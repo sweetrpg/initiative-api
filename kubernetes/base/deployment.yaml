@@ -1,0 +1,81 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+    name: PROJECT_NAME
+
+spec:
+    strategy:
+        rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 1
+        type: RollingUpdate
+    selector:
+        matchLabels:
+            platform: sweetrpg
+            app: APP_NAME
+            component: COMPONENT_NAME
+    template:
+        metadata:
+            labels:
+                platform: sweetrpg
+                app: APP_NAME
+                component: COMPONENT_NAME
+        spec:
+            serviceAccountName: PROJECT_NAME
+            imagePullSecrets:
+                - name: sweetrpg-registry
+            containers:
+                - name: PROJECT_NAME-app
+                  image: registry.sweetrpg.com/PROJECT_NAME:latest
+                  imagePullPolicy: Always
+                  envFrom:
+                      - configMapRef:
+                            name: PROJECT_NAME
+                      - configMapRef:
+                            name: PROJECT_NAME-env
+                      - secretRef:
+                            name: PROJECT_NAME
+                      - secretRef:
+                            name: PROJECT_NAME-env
+                  env:
+                      - name: NEW_RELIC_CONFIG_FILE
+                        value: /config/newrelic.ini
+                  ports:
+                      - containerPort: PORT
+                        name: http
+                  resources:
+                      requests:
+                          cpu: "20m"
+                          memory: "55M"
+                      limits:
+                          cpu: "100m"
+                          memory: "256M"
+                  livenessProbe:
+                      httpGet:
+                          path: /health/ping
+                          port: PORT
+                      initialDelaySeconds: 90
+                      timeoutSeconds: 10
+                  readinessProbe:
+                      httpGet:
+                          path: /health/ping
+                          port: PORT
+                      initialDelaySeconds: 30
+                      timeoutSeconds: 10
+                  volumeMounts:
+                      - mountPath: /data
+                        name: data
+                      - mountPath: /config
+                        name: config
+            volumes:
+                - name: config
+                  secret:
+                      secretName: PROJECT_NAME-config-env
+                      items:
+                          - key: newrelic.ini
+                            path: newrelic.ini
+                - name: data
+                  emptyDir: {}
+            restartPolicy: Always

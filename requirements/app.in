@@ -1,0 +1,5 @@
+Flask>=2.0
+Jinja
+git+https://github.com/sweetrpg/db.git@develop
+git+https://github.com/sweetrpg/api-core.git@develop
+git+https://github.com/sweetrpg/XXX-model.git@develop

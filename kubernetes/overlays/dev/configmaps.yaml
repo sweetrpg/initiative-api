@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+    name: sweetrpg-PROJECT_NAME-env
+
+data:
+    DB_HOST: xxx
+    DB_USER: xxx
+    DB_NAME: xxx
+    DB_OPTS: "retryWrites=true&w=majority"
+    AUTH0_CALLBACK_URL: xxx
+    AUTH0_DOMAIN: xxx
+    AUTH0_LOGIN_URL: xxx
+    PORT: "1234"
+    SERVICE_CHECK_URL: xxx
+    HEALTH_CHECK_URL: xxx
+    REDIS_HOST: xxx

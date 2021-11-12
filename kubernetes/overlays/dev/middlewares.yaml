@@ -1,0 +1,12 @@
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+
+metadata:
+    name: strip-prefix
+
+spec:
+    stripPrefix:
+        prefixes:
+            - /api/0/PROJECT
+            - /api/1/PROJECT

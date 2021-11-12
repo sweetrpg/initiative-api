@@ -1,0 +1,5 @@
+-r app.in
+-r tests.in
+-r docs.in
+pip-tools==6.3.0
+black

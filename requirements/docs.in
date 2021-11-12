@@ -1,0 +1,7 @@
+-r app.in
+Pallets-Sphinx-Themes
+Sphinx==4.2
+sphinx-issues
+sphinxcontrib-log-cabinet
+sphinx-tabs
+rstcheck
