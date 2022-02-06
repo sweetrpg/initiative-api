@@ -23,7 +23,7 @@ spec:
                 app: APP_NAME
                 component: COMPONENT_NAME
         spec:
-            serviceAccountName: PROJECT_NAME
+            serviceAccountName: PACKAGE-COMPONENT
             imagePullSecrets:
                 - name: sweetrpg-registry
             containers:
