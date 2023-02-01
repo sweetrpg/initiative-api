@@ -1,0 +1,31 @@
+name: Update Requirements
+
+on:
+    workflow_dispatch:
+    repository_dispatch:
+        types:
+            - api-core-published
+    schedule:
+        - cron: "0 2 * * 2"
+    push:
+        paths:
+            - "requirements/*.in"
+
+jobs:
+    update-reqs:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v3
+            - uses: actions/setup-python@v4
+              with:
+                  python-version: "3.10"
+            - name: update-reqs
+              run: |
+                  pip install -U wheel setuptools pip-tools
+                  git config --global user.email "ci@sweetrpg.com"
+                  git config --global user.name "SweetRPG Requirement Updater"
+                  git checkout ${{ github.head_ref || github.ref_name }}
+                  scripts/update-requirements.sh
+                  git add requirements/*.txt
+                  git commit -m "Update requirements"
+                  git push origin
