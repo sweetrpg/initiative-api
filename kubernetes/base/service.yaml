@@ -8,7 +8,7 @@ metadata:
 spec:
     selector:
         app: sweetrpg-PROJECT_NAME
-    type: LoadBalancer
+    type: ClusterIP
     ports:
         - name: http
           port: PORT
