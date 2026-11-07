@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sweetrpg/authz-client.go/authz"
 	"github.com/sweetrpg/initiative-api/constants"
 )
 
@@ -14,7 +15,7 @@ func newRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(Correlation())
-	SetupHandlers(r)
+	SetupHandlers(r, authz.NewClient("http://127.0.0.1:1", "http://127.0.0.1:1"))
 	return r
 }
 

@@ -5,6 +5,8 @@ package constants
 const (
 	LOG_LEVEL                   = "LOG_LEVEL"
 	OTEL_EXPORTER_OTLP_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	AUTH_API_URL                = "AUTH_API_URL"
+	USERS_API_URL               = "USERS_API_URL"
 	ALLOWED_ORIGINS             = "ALLOWED_ORIGINS"
 )
 

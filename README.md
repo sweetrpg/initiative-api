@@ -24,6 +24,8 @@ make run
 | `ENV` | `dev` | |
 | `LOG_LEVEL` | `WARN` | `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | absolute URL of the trace collector |
+| `AUTH_API_URL` | required | auth-api base URL; tokens are verified via `/authz/check` |
+| `USERS_API_URL` | required | users-api base URL; resolves the caller to `users._id` |
 | `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
 
 Invalid values stop the process at startup with every problem listed.

@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 	sloggin "github.com/samber/slog-gin"
 	"github.com/sweetrpg/api-core.go/tracing"
+	"github.com/sweetrpg/authz-client.go/authz"
 	"github.com/sweetrpg/common.go/logging"
 	"github.com/sweetrpg/initiative-api/config"
 	"github.com/sweetrpg/initiative-api/constants"
@@ -39,7 +40,7 @@ func main() {
 	tracing.SetupTracing(constants.ServiceName)
 	defer tracing.TeardownTracing()
 
-	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL)), ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -59,7 +60,7 @@ func main() {
 	}
 }
 
-func newRouter(cfg config.Config) *gin.Engine {
+func newRouter(cfg config.Config, authzClient *authz.Client) *gin.Engine {
 	httpLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	r := gin.New()
@@ -80,6 +81,6 @@ func newRouter(cfg config.Config) *gin.Engine {
 		}))
 	}
 
-	server.SetupHandlers(r)
+	server.SetupHandlers(r, authzClient)
 	return r
 }

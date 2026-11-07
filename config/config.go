@@ -22,6 +22,11 @@ type Config struct {
 	OTLPEndpoint string
 	// AllowedOrigins is the CORS allowlist; empty disables CORS (fail closed).
 	AllowedOrigins []string
+	// AuthAPIURL is auth-api's base URL. Bearer tokens are verified there via /authz/check
+	// (signature, expiry, iss, aud, roles); this service holds no signing keys or credentials.
+	AuthAPIURL string
+	// UsersAPIURL is users-api's base URL, used to resolve the verified caller to users._id.
+	UsersAPIURL string
 }
 
 var logLevels = map[string]bool{"DEBUG": true, "INFO": true, "WARN": true, "ERROR": true}
@@ -42,6 +47,8 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		Version:      get("VERSION", "v0.0.0"),
 		LogLevel:     strings.ToUpper(get(constants.LOG_LEVEL, "WARN")),
 		OTLPEndpoint: get(constants.OTEL_EXPORTER_OTLP_ENDPOINT, ""),
+		AuthAPIURL:   strings.TrimRight(get(constants.AUTH_API_URL, ""), "/"),
+		UsersAPIURL:  strings.TrimRight(get(constants.USERS_API_URL, ""), "/"),
 	}
 	if origins := get(constants.ALLOWED_ORIGINS, ""); origins != "" {
 		c.AllowedOrigins = strings.Split(origins, ",")
@@ -54,11 +61,9 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if !logLevels[c.LogLevel] {
 		errs = append(errs, fmt.Errorf("%s %q: must be one of DEBUG, INFO, WARN, ERROR", constants.LOG_LEVEL, c.LogLevel))
 	}
-	if c.OTLPEndpoint != "" {
-		if u, err := url.Parse(c.OTLPEndpoint); err != nil || u.Scheme == "" || u.Host == "" {
-			errs = append(errs, fmt.Errorf("%s %q: must be an absolute URL", constants.OTEL_EXPORTER_OTLP_ENDPOINT, c.OTLPEndpoint))
-		}
-	}
+	errs = append(errs, checkURL(constants.OTEL_EXPORTER_OTLP_ENDPOINT, c.OTLPEndpoint, false)...)
+	errs = append(errs, checkURL(constants.AUTH_API_URL, c.AuthAPIURL, true)...)
+	errs = append(errs, checkURL(constants.USERS_API_URL, c.UsersAPIURL, true)...)
 	for _, o := range c.AllowedOrigins {
 		if strings.TrimSpace(o) == "*" {
 			errs = append(errs, fmt.Errorf("%s: wildcard origin is not allowed", constants.ALLOWED_ORIGINS))
@@ -70,3 +75,17 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 
 // FromEnv is Load against the process environment.
 func FromEnv() (Config, error) { return Load(os.LookupEnv) }
+
+// checkURL validates an absolute http(s) URL; an empty value is an error only when required.
+func checkURL(key, value string, required bool) []error {
+	if value == "" {
+		if required {
+			return []error{fmt.Errorf("%s: required", key)}
+		}
+		return nil
+	}
+	if u, err := url.Parse(value); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return []error{fmt.Errorf("%s %q: must be an absolute http(s) URL", key, value)}
+	}
+	return nil
+}
