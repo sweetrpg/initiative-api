@@ -60,7 +60,7 @@ var (
 	CredentialSpec = Spec{
 		Name:        CollectionCredentials,
 		Filterable:  []string{"label"},
-		Sortable:    []string{"label", "created_at", "last_used_at"},
+		Sortable:    []string{"label", "created_at"},
 		Projectable: []string{"label", "scopes", "revoked_at", "last_used_at", "revision", "owner_user_id", "created_at", "updated_at"},
 		Indexes: []store.IndexSpec{
 			{Name: "owner_created", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "created_at", Value: -1}}},
