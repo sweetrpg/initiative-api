@@ -1,0 +1,17 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - master
+      - develop
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    uses: sweetrpg/github-actions/.github/workflows/go-ci.yaml@master
+    with:
+      publish-coverage: false
+    secrets: inherit

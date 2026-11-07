@@ -1,17 +1,43 @@
-# PACKAGE_NAME
+# initiative-api
 
-[![Unit tests](https://github.com/sweetrpg/PACKAGE_NAME/actions/workflows/python-ci.yml/badge.svg)](https://github.com/sweetrpg/PACKAGE_NAME/actions/workflows/python-ci.yml)
-[![Coverage](https://github.com/sweetrpg/PACKAGE_NAME/coverage.svg)](https://github.com/sweetrpg/PACKAGE_NAME)
-[![License](https://img.shields.io/github/license/sweetrpg/PACKAGE_NAME.svg)](https://img.shields.io/github/license/sweetrpg/PACKAGE_NAME.svg)
-[![Issues](https://img.shields.io/github/issues/sweetrpg/PACKAGE_NAME.svg)](https://img.shields.io/github/issues/sweetrpg/PACKAGE_NAME.svg)
-[![PRs](https://img.shields.io/github/issues-pr/sweetrpg/PACKAGE_NAME.svg)](https://img.shields.io/github/issues-pr/sweetrpg/PACKAGE_NAME.svg)
-[![Dependabot](https://badgen.net/github/dependabot/sweetrpg/PACKAGE_NAME)](https://badgen.net/github/dependabot/sweetrpg/PACKAGE_NAME)
+[![License](https://img.shields.io/github/license/sweetrpg/initiative-api.svg)](LICENSE)
+[![Issues](https://img.shields.io/github/issues/sweetrpg/initiative-api.svg)](https://github.com/sweetrpg/initiative-api/issues)
+[![PRs](https://img.shields.io/github/issues-pr/sweetrpg/initiative-api.svg)](https://github.com/sweetrpg/initiative-api/pulls)
 
-[![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
-[![Built with love](https://ForTheBadge.com/images/badges/built-with-love.svg)](https://ForTheBadge.com/images/badges/built-with-love.svg)
+Go API behind Initiative!, the SweetRPG initiative tracker. All tracker rules live here; clients
+are presentation only (PADR-0033, proposed). Design and task list:
+`openspec/changes/initiative-api` in [sweetrpg/platform](https://github.com/sweetrpg/platform).
 
-Put something useful here.
+Status: skeleton. Config validation, logging, tracing, and `/status/*` are in place; auth,
+data layer, and domain routes are not.
 
-## Documentation
+## Running
 
-Documentation for this package can be found [here](https://sweetrpg.github.io/PACKAGE_NAME).
+```bash
+cp .env.example .env
+make run
+```
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `BIND_ADDRESS` | `:8000` | `host:port` |
+| `ENV` | `dev` | |
+| `LOG_LEVEL` | `WARN` | `DEBUG`, `INFO`, `WARN`, `ERROR` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | absolute URL of the trace collector |
+| `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
+
+Invalid values stop the process at startup with every problem listed.
+
+## Endpoints
+
+- `GET /status/ping`: shallow liveness and readiness probe.
+- `GET /status/health`: dependency check (no dependencies yet).
+
+Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written
+to the access log as `correlation_id`.
+
+## Checks
+
+```bash
+make lint test
+```
