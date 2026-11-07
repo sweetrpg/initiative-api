@@ -11,6 +11,7 @@ require (
 	github.com/sweetrpg/authz-client.go v0.2.0
 	github.com/sweetrpg/common.go v0.0.16
 	github.com/sweetrpg/model-core.go v0.1.0
+	github.com/sweetrpg/mongodb.go v0.0.191
 	go.mongodb.org/mongo-driver v1.17.10
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.72.0
 )
@@ -47,7 +48,6 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.63.0 // indirect
-	github.com/sweetrpg/mongodb.go v0.0.191 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.2 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
