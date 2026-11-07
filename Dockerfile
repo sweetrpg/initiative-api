@@ -1,61 +1,53 @@
-#-------------------------------------------------------------------------------------------------------------
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License. See https://go.microsoft.com/fwlink/?linkid=2090316 for license information.
-#-------------------------------------------------------------------------------------------------------------
+# This is a multi-stage Dockerfile and requires >= Docker 17.05
+# https://docs.docker.com/engine/userguide/eng-image/multistage-build/
+FROM golang:1.26.5 AS builder
 
-FROM python:3.9
+ENV GOPROXY=http://proxy.golang.org
 
-# Avoid warnings by switching to noninteractive
-ENV DEBIAN_FRONTEND=noninteractive
+RUN mkdir -p /src/initiative-api
+WORKDIR /src/initiative-api
 
-ENV PYTHONUNBUFFERED 1
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download && go mod verify
 
-# This Dockerfile adds a non-root 'vscode' user with sudo access. However, for Linux,
-# this user's GID/UID must match your local user UID/GID to avoid permission issues
-# with bind mounts. Update USER_UID / USER_GID if yours is not 1000. See
-# https://aka.ms/vscode-remote/containers/non-root-user for details.
+ADD . .
+RUN CGO_ENABLED=0 GOOS=linux go build -v -o /bin/server ./cmd/initiative-api
+
+FROM alpine
+
 ARG USERNAME=sweetrpg
-ARG USER_UID=1001
-ARG USER_GID=$USER_UID
-ARG REQUIREMENTS=requirements/app.txt
+ARG BUILD_NUMBER=unset
+ARG BUILD_JOB=unset
+ARG BUILD_SHA=unset
+ARG BUILD_DATE=unset
+ARG BUILD_VERSION=unset
 
-# Uncomment the following COPY line and the corresponding lines in the `RUN` command if you wish to
-# include your requirements in the image itself. It is suggested that you only do this if your
-# requirements rarely (if ever) change.
-COPY $REQUIREMENTS /tmp/pip-tmp/requirements.txt
+RUN apk add --no-cache bash
+RUN apk add --no-cache ca-certificates
 
-# Configure apt and install packages
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends apt-utils dialog 2>&1 \
-    #
-    # Verify git, process tools, lsb-release (common in install instructions for CLIs) installed
-    && apt-get install -y git iproute2 procps lsb-release \
-    #
-    # Install pylint
-    && pip install pylint \
-    #
-    # Other stuff
-    # && apt-get install -y postgresql-client \
-    #
-    # Update Python environment based on requirements.txt
-    && pip --disable-pip-version-check --no-cache-dir install -r /tmp/pip-tmp/requirements.txt \
-    && rm -rf /tmp/pip-tmp \
-    #
-    # Create a non-root user to use if preferred - see https://aka.ms/vscode-remote/containers/non-root-user.
-    && groupadd --gid $USER_GID $USERNAME \
-    && useradd -s /bin/bash --uid $USER_UID --gid $USER_GID -m $USERNAME \
-    #
-    # Clean up
-    && apt-get autoremove -y \
-    && apt-get clean -y \
-    && rm -rf /var/lib/apt/lists/*
+RUN addgroup $USERNAME \
+    && adduser -D -G $USERNAME $USERNAME
 
-COPY src /app
-ADD scripts/entrypoint.sh /
-WORKDIR /app
+WORKDIR /app/
 
-# Switch back to dialog for any ad-hoc use of apt-get
-ENV DEBIAN_FRONTEND=
+RUN mkdir -p /app/bin /app/config
+COPY --from=builder /bin/server /app/bin/
 
-ENTRYPOINT [ "/entrypoint.sh" ]
-#CMD [ "newrelic-admin", "run-program", "gunicorn", "wsgi:app" ]
+RUN echo "{\"number\":\"${BUILD_NUMBER}\",\"job\":\"${BUILD_JOB}\",\"sha\":\"${BUILD_SHA}\",\"date\":\"${BUILD_DATE}\",\"version\":\"${BUILD_VERSION}\"}" > /app/config/build-info.json
+RUN chown -R ${USERNAME}:${USERNAME} /app
+
+ENV GO_ENV=production
+ENV BIND_ADDRESS=0.0.0.0:8000
+ENV PORT="8000"
+ENV GIN_MODE="release"
+ENV VERSION=${BUILD_VERSION}
+
+EXPOSE 8000
+
+USER ${USERNAME}
+
+CMD [ "/app/bin/server" ]
