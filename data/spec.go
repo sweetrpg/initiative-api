@@ -20,7 +20,11 @@ type Spec struct {
 	// (credential revocation, last use, scopes, secret) are not here; they get dedicated functions.
 	Updatable     []string
 	UnsetOnDelete []string
-	Indexes       []store.IndexSpec
+	// ConflictOnDuplicate maps a unique-index rejection to ErrConflict. Set it only where the
+	// collection's one unique index is a user-facing constraint (theme slot); elsewhere the raw
+	// store.ErrDuplicate is returned so it is not mislabeled.
+	ConflictOnDuplicate bool
+	Indexes             []store.IndexSpec
 }
 
 func asc(fields ...string) bson.D {
@@ -49,12 +53,13 @@ var (
 	// ThemeSpec: slot numbers are unique per owner among live themes. Soft delete unsets slot, and
 	// the partial filter ($exists: true is the supported form) leaves slot-less rows out.
 	ThemeSpec = Spec{
-		Name:          CollectionThemes,
-		Filterable:    []string{"name", "slot"},
-		Sortable:      []string{"name", "slot", "created_at", "updated_at"},
-		Projectable:   []string{"name", "style", "slot", "main_color", "accent1_color", "accent2_color", "background1_color", "background2_color", "primary_font_name", "secondary_font_name", "background_image", "revision", "owner_user_id", "created_at", "updated_at"},
-		Updatable:     []string{"name", "style", "main_color", "accent1_color", "accent2_color", "background1_color", "background2_color", "primary_font_name", "secondary_font_name", "background_image", "slot"},
-		UnsetOnDelete: []string{"slot"},
+		Name:                CollectionThemes,
+		Filterable:          []string{"name", "slot"},
+		Sortable:            []string{"name", "slot", "created_at", "updated_at"},
+		Projectable:         []string{"name", "style", "slot", "main_color", "accent1_color", "accent2_color", "background1_color", "background2_color", "primary_font_name", "secondary_font_name", "background_image", "revision", "owner_user_id", "created_at", "updated_at"},
+		Updatable:           []string{"name", "style", "main_color", "accent1_color", "accent2_color", "background1_color", "background2_color", "primary_font_name", "secondary_font_name", "background_image", "slot"},
+		UnsetOnDelete:       []string{"slot"},
+		ConflictOnDuplicate: true,
 		Indexes: []store.IndexSpec{
 			{Name: "owner_slot", Keys: asc("owner_user_id", "slot"), Unique: true,
 				Partial: bson.D{{Key: "slot", Value: bson.D{{Key: "$exists", Value: true}}}}},
