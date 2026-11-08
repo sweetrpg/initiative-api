@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -161,6 +162,33 @@ func (r *Owned[T, P]) updateState(ctx context.Context, ownerUserID, actingUserID
 		}
 	}
 	return r.apply(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+}
+
+// updateBoth writes settings (Updatable fields) and state (StateFields) in one atomic,
+// compare-and-set write, for changes where a setting and the state derived from it must land
+// together. Either map may be empty, not both.
+func (r *Owned[T, P]) updateBoth(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, settings, state map[string]any) (T, error) {
+	var out T
+	if err := requireOwnerActor(ownerUserID, actingUserID); err != nil {
+		return out, err
+	}
+	merged := make(map[string]any, len(settings)+len(state))
+	if len(settings) > 0 {
+		if err := validateSet(r.spec, settings); err != nil {
+			return out, err
+		}
+		maps.Copy(merged, settings)
+	}
+	for k, v := range state {
+		if !in(r.spec.StateFields, k) {
+			return out, fmt.Errorf("%w: field %q is not a state field of %s", ErrInvalid, k, r.spec.Name)
+		}
+		merged[k] = v
+	}
+	if len(merged) == 0 {
+		return out, fmt.Errorf("%w: nothing to update", ErrInvalid)
+	}
+	return r.apply(ctx, ownerUserID, actingUserID, id, expectedRevision, merged)
 }
 
 func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {

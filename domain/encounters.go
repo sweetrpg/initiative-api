@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 
@@ -22,6 +23,7 @@ type Encounters struct {
 	repo    *data.Encounters
 	systems *data.SystemRepo
 	newID   func() string
+	perm    func(n int) []int
 }
 
 // NewEncounters builds the encounter service on db.
@@ -30,6 +32,7 @@ func NewEncounters(db store.Database) *Encounters {
 		repo:    data.NewEncounters(db),
 		systems: data.NewSystemRepo(db),
 		newID:   func() string { return primitive.NewObjectID().Hex() },
+		perm:    rand.Perm,
 	}
 }
 
@@ -73,9 +76,46 @@ func (s *Encounters) List(ctx context.Context, owner string, q data.Query) (data
 }
 
 // UpdateSettings sets the encounter's settings (name, game_system_id, ordering, tie_breaker,
-// display flags, theme_id, position). Combat state cannot be set here.
+// display flags, theme_id, position). Combat state cannot be set here, but a new ordering or tie
+// breaker recomputes the turn queue in the same write.
 func (s *Encounters) UpdateSettings(ctx context.Context, owner, actor, id string, rev int64, set map[string]any) (data.Encounter, error) {
-	return s.repo.Update(ctx, owner, actor, id, rev, set)
+	_, ord := set["ordering"]
+	_, tie := set["tie_breaker"]
+	if !ord && !tie {
+		return s.repo.Update(ctx, owner, actor, id, rev, set)
+	}
+	cur, err := s.repo.Load(ctx, owner, id)
+	if err != nil {
+		return data.Encounter{}, err
+	}
+	o, t := cur.Ordering, cur.TieBreaker
+	if v, ok := set["ordering"].(string); ok {
+		o = v
+	}
+	if v, ok := set["tie_breaker"].(string); ok {
+		t = v
+	}
+	st := stateOf(cur)
+	s.recompute(&st, o, t)
+	return s.repo.Write(ctx, owner, actor, id, rev, set, st)
+}
+
+func stateOf(cur data.Encounter) data.EncounterState {
+	return data.EncounterState{
+		Status: cur.Status, Round: cur.Round, CurrentCombatantID: cur.CurrentCombatantID,
+		TurnQueue: slices.Clone(cur.TurnQueue), Combatants: slices.Clone(cur.Combatants),
+	}
+}
+
+// editQueue is edit followed by a turn-queue recompute under the encounter's ordering.
+func (s *Encounters) editQueue(ctx context.Context, owner, actor, id string, rev int64, change func(*data.EncounterState, data.Encounter) error) (data.Encounter, error) {
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, cur data.Encounter) error {
+		if err := change(st, cur); err != nil {
+			return err
+		}
+		s.recompute(st, cur.Ordering, cur.TieBreaker)
+		return nil
+	})
 }
 
 // Delete soft-deletes the encounter.
@@ -85,17 +125,14 @@ func (s *Encounters) Delete(ctx context.Context, owner, actor, id string, rev in
 
 // edit reads the encounter, applies change to its state, and writes the result compare-and-set on
 // rev. A missed read is classified 403/404 like the write paths.
-// change also receives the encounter's game system ID, for health validation.
-func (s *Encounters) edit(ctx context.Context, owner, actor, id string, rev int64, change func(*data.EncounterState, string) error) (data.Encounter, error) {
+// change also receives the encounter as read, for its settings.
+func (s *Encounters) edit(ctx context.Context, owner, actor, id string, rev int64, change func(*data.EncounterState, data.Encounter) error) (data.Encounter, error) {
 	cur, err := s.repo.Load(ctx, owner, id)
 	if err != nil {
 		return data.Encounter{}, err
 	}
-	st := data.EncounterState{
-		Status: cur.Status, Round: cur.Round, CurrentCombatantID: cur.CurrentCombatantID,
-		TurnQueue: slices.Clone(cur.TurnQueue), Combatants: slices.Clone(cur.Combatants),
-	}
-	if err := change(&st, cur.GameSystemID); err != nil {
+	st := stateOf(cur)
+	if err := change(&st, cur); err != nil {
 		return data.Encounter{}, err
 	}
 	return s.repo.SetState(ctx, owner, actor, id, rev, st)

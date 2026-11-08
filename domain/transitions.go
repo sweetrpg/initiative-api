@@ -9,10 +9,10 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 )
 
-// Start moves a draft encounter to active at round 1. The current combatant is chosen by the
-// turn engine once the queue exists.
+// Start moves a draft encounter to active at round 1, builds the turn queue, and makes the first
+// combatant current (its conditions tick as its turn begins).
 func (s *Encounters) Start(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
+	return s.editQueue(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		if st.Status != data.StatusDraft {
 			return fmt.Errorf("%w: cannot start from %s", ErrTransition, st.Status)
 		}
@@ -23,7 +23,7 @@ func (s *Encounters) Start(ctx context.Context, owner, actor, id string, rev int
 
 // End moves an active encounter to ended.
 func (s *Encounters) End(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		if st.Status != data.StatusActive {
 			return fmt.Errorf("%w: cannot end from %s", ErrTransition, st.Status)
 		}
@@ -51,7 +51,7 @@ func (s *Encounters) Reset(ctx context.Context, owner, actor, id string, rev int
 	for _, f := range sys.Fields {
 		defaults[f.Key] = f.Def
 	}
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		st.Status, st.Round, st.CurrentCombatantID, st.TurnQueue = data.StatusDraft, 0, "", nil
 		for i := range st.Combatants {
 			c := &st.Combatants[i]
