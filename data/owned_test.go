@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func TestCreateStampsOwnerRevisionAndAudit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.got != tt.want {
+			if !same(tt.got, tt.want) {
 				t.Fatalf("got %v, want %v", tt.got, tt.want)
 			}
 		})
@@ -150,7 +151,7 @@ func TestUpdateAdvancesRevisionAndAudit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.got != tt.want {
+			if !same(tt.got, tt.want) {
 				t.Fatalf("got %v, want %v", tt.got, tt.want)
 			}
 		})
@@ -198,7 +199,7 @@ func TestSoftDeleteOutcomes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r, _ := newRosters(t)
 			mustCreate(t, r, "u1", "Goblins")
-			if err := r.SoftDelete(ctx, tt.owner, tt.owner, tt.id); !errors.Is(err, tt.want) {
+			if err := r.SoftDelete(ctx, tt.owner, tt.owner, tt.id, 1); !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want %v", err, tt.want)
 			}
 		})
@@ -208,7 +209,7 @@ func TestSoftDeleteOutcomes(t *testing.T) {
 func TestSoftDeletedRecordIsGoneButKept(t *testing.T) {
 	r, col := newRosters(t)
 	mustCreate(t, r, "u1", "Goblins")
-	if err := r.SoftDelete(ctx, "u1", "u1", "a"); err != nil {
+	if err := r.SoftDelete(ctx, "u1", "u1", "a", 1); err != nil {
 		t.Fatal(err)
 	}
 	_, getErr := r.Get(ctx, "u1", "a")
@@ -231,12 +232,94 @@ func TestThemeSoftDeleteFreesSlot(t *testing.T) {
 	}
 	dup := &Theme{Name: "Other", Slot: &slot}
 	dupErr := r.Create(ctx, "u1", "u1", dup)
-	if err := r.SoftDelete(ctx, "u1", "u1", first.ID); err != nil {
+	if err := r.SoftDelete(ctx, "u1", "u1", first.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	reuse := &Theme{Name: "Reuse", Slot: &slot}
 	reuseErr := r.Create(ctx, "u1", "u1", reuse)
 	if dupErr == nil || reuseErr != nil {
 		t.Fatalf("duplicate slot err=%v (want error), reuse after delete err=%v (want nil)", dupErr, reuseErr)
+	}
+}
+
+// same compares values, using Equal for times (== also compares location and monotonic clock).
+func same(got, want any) bool {
+	if g, ok := got.(time.Time); ok {
+		w, ok := want.(time.Time)
+		return ok && g.Equal(w)
+	}
+	return got == want
+}
+
+func TestSoftDeleteStaleRevisionConflicts(t *testing.T) {
+	r, col := newRosters(t)
+	mustCreate(t, r, "u1", "Goblins")
+	err := r.SoftDelete(ctx, "u1", "u1", "a", 9)
+	if !errors.Is(err, ErrRevisionConflict) || col.Docs()[0]["deleted_at"] != nil {
+		t.Fatalf("err = %v, deleted_at = %v; want a conflict and a live record", err, col.Docs()[0]["deleted_at"])
+	}
+}
+
+func TestCredentialUpdateRejectsStateFields(t *testing.T) {
+	for _, field := range []string{"secret_hash", "revoked_at", "last_used_at", "scopes"} {
+		t.Run(field, func(t *testing.T) {
+			r := NewOwned[IntegrationCredential](fake.NewDB(), CredentialSpec)
+			c := &IntegrationCredential{Label: "foundry", Scopes: []string{ScopeRead}}
+			if err := r.Create(ctx, "u1", "u1", c); err != nil {
+				t.Fatal(err)
+			}
+			_, err := r.Update(ctx, "u1", "u1", c.ID, 1, map[string]any{field: "x"})
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("err = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestCredentialLabelIsUpdatable(t *testing.T) {
+	r := NewOwned[IntegrationCredential](fake.NewDB(), CredentialSpec)
+	c := &IntegrationCredential{Label: "old"}
+	_ = r.Create(ctx, "u1", "u1", c)
+	got, err := r.Update(ctx, "u1", "u1", c.ID, 1, map[string]any{"label": "new"})
+	if err != nil || got.Label != "new" {
+		t.Fatalf("label=%q err=%v, want new", got.Label, err)
+	}
+}
+
+func TestEveryDeclaredUpdatableFieldExistsInProjectable(t *testing.T) {
+	for _, s := range []Spec{RosterSpec, ThemeSpec, CredentialSpec} {
+		for _, f := range s.Updatable {
+			if reservedFields[f] {
+				t.Fatalf("%s lists reserved field %q as updatable", s.Name, f)
+			}
+		}
+	}
+}
+
+func TestConcurrentWritersExactlyOneWins(t *testing.T) {
+	r, col := newRosters(t)
+	mustCreate(t, r, "u1", "Goblins")
+	const writers = 25
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = r.Update(ctx, "u1", "u1", "a", 1, map[string]any{"name": "w"})
+		}()
+	}
+	wg.Wait()
+	wins, conflicts := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			wins++
+		case errors.Is(err, ErrRevisionConflict):
+			conflicts++
+		}
+	}
+	if wins != 1 || conflicts != writers-1 || col.Docs()[0]["revision"] != int64(2) {
+		t.Fatalf("wins=%d conflicts=%d revision=%v, want 1, %d, 2", wins, conflicts, col.Docs()[0]["revision"], writers-1)
 	}
 }

@@ -42,6 +42,13 @@ func Definitions() ([]data.GameSystem, error) {
 	if err := readJSON("systems/systems.json", &systems); err != nil {
 		return nil, err
 	}
+	return expand(families, systems)
+}
+
+// expand builds and validates the systems, and checks identifiers across the whole set: IDs are
+// unique, and no alias repeats another alias or equals any system's ID (an alias lookup must
+// never be ambiguous with an ID lookup).
+func expand(families map[string][]data.TrackerField, systems []systemFile) ([]data.GameSystem, error) {
 	out := make([]data.GameSystem, 0, len(systems))
 	for _, s := range systems {
 		fields := s.Fields
@@ -61,7 +68,26 @@ func Definitions() ([]data.GameSystem, error) {
 		}
 		out = append(out, sys)
 	}
-	return out, nil
+	return out, checkIdentifiers(out)
+}
+
+func checkIdentifiers(systems []data.GameSystem) error {
+	owner := map[string]string{} // identifier -> system that claims it
+	for _, s := range systems {
+		if prev, dup := owner[s.ID]; dup {
+			return fmt.Errorf("seed: id %q used by both %q and %q", s.ID, prev, s.ID)
+		}
+		owner[s.ID] = s.ID
+	}
+	for _, s := range systems {
+		for _, a := range s.Aliases {
+			if prev, dup := owner[a]; dup {
+				return fmt.Errorf("seed: alias %q of %q collides with %q", a, s.ID, prev)
+			}
+			owner[a] = s.ID
+		}
+	}
+	return nil
 }
 
 func readJSON(name string, v any) error {

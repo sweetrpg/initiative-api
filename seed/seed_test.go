@@ -103,3 +103,35 @@ func TestResolveFoundryAlias(t *testing.T) {
 		t.Fatalf("got %q err=%v, want dnd5", got.ID, err)
 	}
 }
+
+func TestExpandRejectsIdentifierCollisions(t *testing.T) {
+	fam := map[string][]data.TrackerField{"f": {{Key: "k", Label: "l", Kind: data.FieldCounter, Def: 1}}}
+	tests := []struct {
+		name    string
+		systems []systemFile
+	}{
+		{"alias equals another system's id", []systemFile{
+			{ID: "alpha", Name: "A", Family: "f"}, {ID: "beta", Name: "B", Family: "f", Aliases: []string{"alpha"}}}},
+		{"alias equals a later system's id", []systemFile{
+			{ID: "beta", Name: "B", Family: "f", Aliases: []string{"alpha"}}, {ID: "alpha", Name: "A", Family: "f"}}},
+		{"alias shared by two systems", []systemFile{
+			{ID: "alpha", Name: "A", Family: "f", Aliases: []string{"x"}}, {ID: "beta", Name: "B", Family: "f", Aliases: []string{"x"}}}},
+		{"duplicate id", []systemFile{{ID: "alpha", Name: "A", Family: "f"}, {ID: "alpha", Name: "A2", Family: "f"}}},
+		{"unknown family", []systemFile{{ID: "alpha", Name: "A", Family: "nope"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := expand(fam, tt.systems); err == nil {
+				t.Fatal("want an error, got nil")
+			}
+		})
+	}
+}
+
+func TestExpandAcceptsDistinctIdentifiers(t *testing.T) {
+	fam := map[string][]data.TrackerField{"f": {{Key: "k", Label: "l", Kind: data.FieldCounter, Def: 1}}}
+	_, err := expand(fam, []systemFile{{ID: "alpha", Name: "A", Family: "f", Aliases: []string{"a1"}}, {ID: "beta", Name: "B", Family: "f"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

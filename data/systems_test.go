@@ -1,11 +1,14 @@
 package data
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 func ip(n int) *int { return &n }
@@ -97,8 +100,8 @@ func TestAliasUniqueAcrossSystems(t *testing.T) {
 	_, _ = r.Upsert(ctx, okSystem())
 	other := okSystem()
 	other.ID = "other"
-	if _, err := r.Upsert(ctx, other); err == nil {
-		t.Fatal("want an alias conflict error, got nil")
+	if _, err := r.Upsert(ctx, other); !errors.Is(err, store.ErrDuplicate) {
+		t.Fatalf("err = %v, want store.ErrDuplicate", err)
 	}
 }
 
@@ -131,5 +134,76 @@ func TestListFiltersGatedInTheQuery(t *testing.T) {
 	p, err := r.List(ctx, Query{Filters: []Filter{{"gated", OpEq, []any{false}}}})
 	if err != nil || len(p.Items) != 1 || p.Items[0].ID != "free" || len(col.FindCalls) != 1 {
 		t.Fatalf("items=%v err=%v, want only the ungated system", p.Items, err)
+	}
+}
+
+// racyDB makes a competing writer change the stored system just before our update lands.
+type racyDB struct {
+	*fake.DB
+	rival func(n int)
+	calls int
+}
+
+func (d *racyDB) Collection(name string) store.Collection {
+	return &racyCol{Collection: d.Fake(name), db: d}
+}
+
+type racyCol struct {
+	store.Collection
+	db *racyDB
+}
+
+func (c *racyCol) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
+	c.db.calls++
+	c.db.rival(c.db.calls)
+	return c.Collection.FindOneAndUpdate(ctx, f, u, out)
+}
+
+// racyRepo returns a repo whose updates are preceded by rival(plain, n), plus a plain repo on the
+// same data for seeding and for the rival's own writes.
+func racyRepo(t *testing.T, rival func(plain *SystemRepo, n int)) (racy, plain *SystemRepo) {
+	t.Helper()
+	db := &racyDB{DB: fake.NewDB()}
+	racy, plain = NewSystemRepo(db), NewSystemRepo(db.DB)
+	racy.now, plain.now = func() time.Time { return clock }, func() time.Time { return clock }
+	db.rival = func(n int) { rival(plain, n) }
+	return racy, plain
+}
+
+func renamed(name string) GameSystem {
+	s := okSystem()
+	s.Name = name
+	return s
+}
+
+func TestLostRaceToIdenticalDefinitionIsUnchanged(t *testing.T) {
+	racy, plain := racyRepo(t, func(p *SystemRepo, n int) { _, _ = p.Upsert(ctx, renamed("Mine")) })
+	_, _ = plain.Upsert(ctx, okSystem())
+	out, err := racy.Upsert(ctx, renamed("Mine"))
+	if err != nil || out != Unchanged {
+		t.Fatalf("out=%s err=%v, want unchanged after the rival wrote the same definition", out, err)
+	}
+}
+
+func TestLostRaceToDifferentDefinitionRetriesAndUpdates(t *testing.T) {
+	racy, plain := racyRepo(t, func(p *SystemRepo, n int) {
+		if n == 1 {
+			_, _ = p.Upsert(ctx, renamed("Rival"))
+		}
+	})
+	_, _ = plain.Upsert(ctx, okSystem())
+	out, err := racy.Upsert(ctx, renamed("Mine"))
+	got, _ := plain.Get(ctx, "sys")
+	if err != nil || out != Updated || got.Name != "Mine" {
+		t.Fatalf("out=%s err=%v name=%q, want updated to Mine on retry", out, err, got.Name)
+	}
+}
+
+func TestLosingTheRaceTwiceIsAnError(t *testing.T) {
+	racy, plain := racyRepo(t, func(p *SystemRepo, n int) { _, _ = p.Upsert(ctx, renamed(string(rune('A'+n)))) })
+	_, _ = plain.Upsert(ctx, okSystem())
+	out, err := racy.Upsert(ctx, renamed("Mine"))
+	if !errors.Is(err, errLostRace) || out == Unchanged {
+		t.Fatalf("out=%s err=%v, want errLostRace and never unchanged", out, err)
 	}
 }

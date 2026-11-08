@@ -70,18 +70,29 @@ func (s *SystemRepo) Upsert(ctx context.Context, sys GameSystem) (Outcome, error
 	}
 	sys.DefinitionHash = hash
 
-	var cur GameSystem
-	err = s.c.FindOne(ctx, bson.D{{Key: "_id", Value: sys.ID}}, &cur)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return s.create(ctx, sys)
-	case err != nil:
-		return "", err
-	case cur.DefinitionHash == hash:
-		return Unchanged, nil
+	// A concurrent loader can change the row between our read and write; re-read and retry once
+	// before giving up, so a lost race is never reported as "unchanged".
+	for attempt := 0; attempt < 2; attempt++ {
+		var cur GameSystem
+		err = s.c.FindOne(ctx, bson.D{{Key: "_id", Value: sys.ID}}, &cur)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return s.create(ctx, sys)
+		case err != nil:
+			return "", err
+		case cur.DefinitionHash == hash:
+			return Unchanged, nil
+		}
+		out, err := s.update(ctx, sys, cur.DefinitionHash)
+		if !errors.Is(err, errLostRace) {
+			return out, err
+		}
 	}
-	return s.update(ctx, sys, cur.DefinitionHash)
+	return "", fmt.Errorf("system %q: %w", sys.ID, errLostRace)
 }
+
+// errLostRace means another writer changed the definition between the read and the write.
+var errLostRace = errors.New("data: concurrent change to system definition")
 
 func (s *SystemRepo) create(ctx context.Context, sys GameSystem) (Outcome, error) {
 	sys.Revision = 1
@@ -108,8 +119,8 @@ func (s *SystemRepo) update(ctx context.Context, sys GameSystem, prevHash string
 	if errors.Is(err, store.ErrDuplicate) {
 		return "", fmt.Errorf("system %q alias conflicts with another system: %w", sys.ID, err)
 	}
-	if errors.Is(err, store.ErrNotFound) { // another loader changed it first; nothing to do
-		return Unchanged, nil
+	if errors.Is(err, store.ErrNotFound) {
+		return "", errLostRace
 	}
 	return Updated, err
 }

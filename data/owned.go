@@ -92,13 +92,16 @@ var reservedFields = map[string]bool{
 	"deleted_at": true, "deleted_by": true,
 }
 
-func validateSet(set map[string]any) error {
+func validateSet(spec Spec, set map[string]any) error {
 	if len(set) == 0 {
 		return fmt.Errorf("%w: nothing to update", ErrInvalid)
 	}
 	for k := range set {
 		if reservedFields[k] || strings.HasPrefix(k, "$") || strings.Contains(k, ".") || k == "" {
 			return fmt.Errorf("%w: field %q cannot be set", ErrInvalid, k)
+		}
+		if !in(spec.Updatable, k) {
+			return fmt.Errorf("%w: field %q is not updatable on %s", ErrInvalid, k, spec.Name)
 		}
 	}
 	return nil
@@ -127,7 +130,7 @@ func (r *Owned[T, P]) Update(ctx context.Context, ownerUserID, actingUserID, id 
 	if err := requireOwnerActor(ownerUserID, actingUserID); err != nil {
 		return out, err
 	}
-	if err := validateSet(set); err != nil {
+	if err := validateSet(r.spec, set); err != nil {
 		return out, err
 	}
 	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
@@ -138,14 +141,15 @@ func (r *Owned[T, P]) Update(ctx context.Context, ownerUserID, actingUserID, id 
 	}
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &out)
 	if errors.Is(err, store.ErrNotFound) {
-		return r.classify(ctx, ownerUserID, id, true)
+		return r.classify(ctx, ownerUserID, id)
 	}
 	return out, err
 }
 
-// SoftDelete tombstones owner's record (deleted_at/deleted_by, plus the spec's UnsetOnDelete
-// fields), per PADR-0027 for user-owned domain data.
-func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID, id string) error {
+// SoftDelete tombstones owner's record if its revision is still expectedRevision (deleted_at/
+// deleted_by, plus the spec's UnsetOnDelete fields), per PADR-0027 for user-owned domain data.
+// Failures are classified like Update's, including ErrRevisionConflict.
+func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64) error {
 	if err := requireOwnerActor(ownerUserID, actingUserID); err != nil {
 		return err
 	}
@@ -164,16 +168,17 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 		update = append(update, bson.E{Key: "$unset", Value: unset})
 	}
 	var discard T
-	err := r.c.FindOneAndUpdate(ctx, scopeID(ownerUserID, id), update, &discard)
+	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
+	err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
 	if errors.Is(err, store.ErrNotFound) {
-		_, err = r.classify(ctx, ownerUserID, id, false)
+		_, err = r.classify(ctx, ownerUserID, id)
 	}
 	return err
 }
 
 // classify runs only after an owner-scoped write matched nothing. It does an owner-agnostic
-// lookup to tell 404 from 403 from (for versioned writes) 409; it never grants access.
-func (r *Owned[T, P]) classify(ctx context.Context, owner, id string, versioned bool) (T, error) {
+// lookup to tell 404 from 403 from 409; it never grants access.
+func (r *Owned[T, P]) classify(ctx context.Context, owner, id string) (T, error) {
 	var cur T
 	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}}, &cur)
 	if errors.Is(err, store.ErrNotFound) {
@@ -190,10 +195,6 @@ func (r *Owned[T, P]) classify(ctx context.Context, owner, id string, versioned 
 	case m.OwnerUserID != owner:
 		var zero T
 		return zero, ErrForbidden
-	case versioned:
-		return cur, ErrRevisionConflict
 	}
-	// Owned, live, and unversioned yet unmatched: it changed under us; report not found.
-	var zero T
-	return zero, ErrNotFound
+	return cur, ErrRevisionConflict
 }

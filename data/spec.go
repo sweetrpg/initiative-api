@@ -12,10 +12,13 @@ import (
 // (allow-lists; anything else is rejected, PADR-0030), fields to unset on soft delete, and its
 // indexes.
 type Spec struct {
-	Name          string
-	Filterable    []string
-	Sortable      []string
-	Projectable   []string
+	Name        string
+	Filterable  []string
+	Sortable    []string
+	Projectable []string
+	// Updatable lists the fields Owned.Update may set. State changes with their own rules
+	// (credential revocation, last use, scopes, secret) are not here; they get dedicated functions.
+	Updatable     []string
 	UnsetOnDelete []string
 	Indexes       []store.IndexSpec
 }
@@ -36,6 +39,7 @@ var (
 		Filterable:  []string{"name", "favorite"},
 		Sortable:    []string{"name", "favorite", "created_at", "updated_at"},
 		Projectable: []string{"name", "favorite", "characters", "revision", "owner_user_id", "created_at", "updated_at", "created_by", "updated_by"},
+		Updatable:   []string{"name", "favorite", "characters"},
 		Indexes: []store.IndexSpec{
 			{Name: "owner_name", Keys: asc("owner_user_id", "name")},
 			{Name: "owner_updated", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "updated_at", Value: -1}}},
@@ -49,6 +53,7 @@ var (
 		Filterable:    []string{"name", "slot"},
 		Sortable:      []string{"name", "slot", "created_at", "updated_at"},
 		Projectable:   []string{"name", "style", "slot", "main_color", "accent1_color", "accent2_color", "background1_color", "background2_color", "primary_font_name", "secondary_font_name", "background_image", "revision", "owner_user_id", "created_at", "updated_at"},
+		Updatable:     []string{"name", "style", "main_color", "accent1_color", "accent2_color", "background1_color", "background2_color", "primary_font_name", "secondary_font_name", "background_image", "slot"},
 		UnsetOnDelete: []string{"slot"},
 		Indexes: []store.IndexSpec{
 			{Name: "owner_slot", Keys: asc("owner_user_id", "slot"), Unique: true,
@@ -61,6 +66,7 @@ var (
 		Name:        CollectionCredentials,
 		Filterable:  []string{"label"},
 		Sortable:    []string{"label", "created_at"},
+		Updatable:   []string{"label"},
 		Projectable: []string{"label", "scopes", "revoked_at", "last_used_at", "revision", "owner_user_id", "created_at", "updated_at"},
 		Indexes: []store.IndexSpec{
 			{Name: "owner_created", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "created_at", Value: -1}}},
@@ -69,6 +75,7 @@ var (
 	}
 
 	// SystemSpec: aliases (including Foundry system IDs) are unique across systems.
+	// SystemSpec has no Updatable fields: definitions change only through SystemRepo.Upsert.
 	SystemSpec = Spec{
 		Name:        CollectionGameSystems,
 		Filterable:  []string{"family", "gated", "aliases", "name"},
