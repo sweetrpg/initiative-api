@@ -153,6 +153,12 @@ type racyCol struct {
 	db *racyDB
 }
 
+func (c *racyCol) InsertOne(ctx context.Context, doc any) error {
+	c.db.calls++
+	c.db.rival(c.db.calls)
+	return c.Collection.InsertOne(ctx, doc)
+}
+
 func (c *racyCol) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
 	c.db.calls++
 	c.db.rival(c.db.calls)
@@ -205,5 +211,41 @@ func TestLosingTheRaceTwiceIsAnError(t *testing.T) {
 	out, err := racy.Upsert(ctx, renamed("Mine"))
 	if !errors.Is(err, errLostRace) || out == Unchanged {
 		t.Fatalf("out=%s err=%v, want errLostRace and never unchanged", out, err)
+	}
+}
+
+func TestTwoReplicasInsertingSameSystemBothSucceed(t *testing.T) {
+	racy, plain := racyRepo(t, func(p *SystemRepo, n int) {
+		if n == 1 {
+			_, _ = p.Upsert(ctx, okSystem()) // the other replica's first insert wins
+		}
+	})
+	out, err := racy.Upsert(ctx, okSystem())
+	got, _ := plain.Get(ctx, "sys")
+	if err != nil || out != Unchanged || got.Revision != 1 {
+		t.Fatalf("out=%s err=%v revision=%d, want unchanged at revision 1", out, err, got.Revision)
+	}
+}
+
+func TestFirstInsertRaceWithDifferentDefinitionUpdates(t *testing.T) {
+	racy, plain := racyRepo(t, func(p *SystemRepo, n int) {
+		if n == 1 {
+			_, _ = p.Upsert(ctx, renamed("Rival"))
+		}
+	})
+	out, err := racy.Upsert(ctx, renamed("Mine"))
+	got, _ := plain.Get(ctx, "sys")
+	if err != nil || out != Updated || got.Name != "Mine" {
+		t.Fatalf("out=%s err=%v name=%q, want updated to Mine", out, err, got.Name)
+	}
+}
+
+func TestFailedUpsertReturnsEmptyOutcome(t *testing.T) {
+	r, _ := newSystems(t)
+	_, _ = r.Upsert(ctx, okSystem())
+	other := okSystem()
+	other.ID = "other"
+	if out, err := r.Upsert(ctx, other); err == nil || out != "" {
+		t.Fatalf("out=%q err=%v, want empty outcome with an error", out, err)
 	}
 }

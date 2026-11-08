@@ -323,3 +323,41 @@ func TestConcurrentWritersExactlyOneWins(t *testing.T) {
 		t.Fatalf("wins=%d conflicts=%d revision=%v, want 1, %d, 2", wins, conflicts, col.Docs()[0]["revision"], writers-1)
 	}
 }
+
+func themeRepo(t *testing.T) *Owned[Theme, *Theme] {
+	t.Helper()
+	db := fake.NewDB()
+	if err := EnsureIndexes(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	return NewOwned[Theme](db, ThemeSpec)
+}
+
+func TestDuplicateSlotOnCreateIsConflict(t *testing.T) {
+	r := themeRepo(t)
+	slot := 1
+	_ = r.Create(ctx, "u1", "u1", &Theme{Name: "A", Slot: &slot})
+	if err := r.Create(ctx, "u1", "u1", &Theme{Name: "B", Slot: &slot}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+}
+
+func TestDuplicateSlotOnUpdateIsConflict(t *testing.T) {
+	r := themeRepo(t)
+	s1, s2 := 1, 2
+	_ = r.Create(ctx, "u1", "u1", &Theme{Name: "A", Slot: &s1})
+	b := &Theme{Name: "B", Slot: &s2}
+	_ = r.Create(ctx, "u1", "u1", b)
+	if _, err := r.Update(ctx, "u1", "u1", b.ID, 1, map[string]any{"slot": 1}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict", err)
+	}
+}
+
+func TestSameSlotForDifferentOwnersIsAllowed(t *testing.T) {
+	r := themeRepo(t)
+	slot := 1
+	_ = r.Create(ctx, "u1", "u1", &Theme{Name: "A", Slot: &slot})
+	if err := r.Create(ctx, "u2", "u2", &Theme{Name: "A", Slot: &slot}); err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+}

@@ -73,17 +73,21 @@ func (s *SystemRepo) Upsert(ctx context.Context, sys GameSystem) (Outcome, error
 	// A concurrent loader can change the row between our read and write; re-read and retry once
 	// before giving up, so a lost race is never reported as "unchanged".
 	for attempt := 0; attempt < 2; attempt++ {
-		var cur GameSystem
+		var (
+			cur GameSystem
+			out Outcome
+		)
 		err = s.c.FindOne(ctx, bson.D{{Key: "_id", Value: sys.ID}}, &cur)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			return s.create(ctx, sys)
+			out, err = s.create(ctx, sys)
 		case err != nil:
 			return "", err
 		case cur.DefinitionHash == hash:
 			return Unchanged, nil
+		default:
+			out, err = s.update(ctx, sys, cur.DefinitionHash)
 		}
-		out, err := s.update(ctx, sys, cur.DefinitionHash)
 		if !errors.Is(err, errLostRace) {
 			return out, err
 		}
@@ -99,9 +103,17 @@ func (s *SystemRepo) create(ctx context.Context, sys GameSystem) (Outcome, error
 	models.StampCreate(&sys.Auditable, models.SystemActor, s.now())
 	err := s.c.InsertOne(ctx, sys)
 	if errors.Is(err, store.ErrDuplicate) {
-		return "", fmt.Errorf("system %q conflicts with an existing id or alias: %w", sys.ID, err)
+		// Another replica may have inserted this same ID first; if so, retry as an update/no-op.
+		var existing GameSystem
+		if s.c.FindOne(ctx, bson.D{{Key: "_id", Value: sys.ID}}, &existing) == nil {
+			return "", errLostRace
+		}
+		return "", fmt.Errorf("system %q alias conflicts with another system: %w", sys.ID, err)
 	}
-	return Created, err
+	if err != nil {
+		return "", err
+	}
+	return Created, nil
 }
 
 func (s *SystemRepo) update(ctx context.Context, sys GameSystem, prevHash string) (Outcome, error) {
@@ -122,7 +134,10 @@ func (s *SystemRepo) update(ctx context.Context, sys GameSystem, prevHash string
 	if errors.Is(err, store.ErrNotFound) {
 		return "", errLostRace
 	}
-	return Updated, err
+	if err != nil {
+		return "", err
+	}
+	return Updated, nil
 }
 
 func definitionHash(sys GameSystem) (string, error) {
