@@ -189,8 +189,8 @@ func TestRemovingCurrentPassesTurnToNextWrappingAtEnd(t *testing.T) {
 	e, _ = s.Advance(ctx, "u1", "u1", e.ID, e.Revision) // B is last
 	b := findByName(e, "B")
 	e, err := s.RemoveCombatant(ctx, "u1", "u1", e.ID, e.Revision, b.ID)
-	if err != nil || findByID(e, e.CurrentCombatantID).Name != "A" {
-		t.Fatalf("err=%v current=%q, want A", err, e.CurrentCombatantID)
+	if err != nil || findByID(e, e.CurrentCombatantID).Name != "A" || e.Round != 2 {
+		t.Fatalf("err=%v current=%q round=%d, want A in round 2", err, e.CurrentCombatantID, e.Round)
 	}
 }
 
@@ -222,5 +222,15 @@ func TestTurnActionsAreOwnerScoped(t *testing.T) {
 	e := startedEncounter(t, s, scored("A", data.KindPC, 20))
 	if _, err := s.Advance(ctx, "u2", "u2", e.ID, e.Revision); !errors.Is(err, data.ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestRemovingCurrentInTheMiddleKeepsRound(t *testing.T) {
+	s := newTurnService(t)
+	e := startedEncounter(t, s, scored("A", data.KindPC, 20), scored("B", data.KindPC, 10), scored("C", data.KindPC, 5))
+	a := findByName(e, "A")
+	e, err := s.RemoveCombatant(ctx, "u1", "u1", e.ID, e.Revision, a.ID)
+	if err != nil || findByID(e, e.CurrentCombatantID).Name != "B" || e.Round != 1 {
+		t.Fatalf("err=%v current=%q round=%d, want B in round 1", err, e.CurrentCombatantID, e.Round)
 	}
 }

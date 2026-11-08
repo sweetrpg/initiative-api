@@ -10,7 +10,8 @@ import (
 
 // recompute rebuilds the turn queue under ordering and tie. In an active encounter it also keeps
 // a current combatant: if the current one left the queue, the combatant now at its old position
-// takes the turn (wrapping to the front), and an empty current picks the first.
+// takes the turn (wrapping to the front and starting the next round if it was last), and an empty
+// current picks the first.
 func (s *Encounters) recompute(st *data.EncounterState, ordering, tie string) {
 	prev := st.TurnQueue
 	st.TurnQueue = buildQueue(ordering, tie, st.Combatants, prev, s.perm)
@@ -21,7 +22,11 @@ func (s *Encounters) recompute(st *data.EncounterState, ordering, tie string) {
 		st.CurrentCombatantID = ""
 		return
 	}
-	pos := max(slices.Index(prev, st.CurrentCombatantID), 0)
+	old := slices.Index(prev, st.CurrentCombatantID)
+	pos := max(old, 0)
+	if old >= len(st.TurnQueue) {
+		st.Round++ // the removed combatant was last: the turn wraps to the front, a new round
+	}
 	st.CurrentCombatantID = st.TurnQueue[pos%len(st.TurnQueue)]
 	beginTurn(st)
 }
