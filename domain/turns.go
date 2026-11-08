@@ -8,6 +8,16 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 )
 
+// effectiveOrdering is the ordering the engine applies. No System orders by initiative value only,
+// whatever the stored ordering says: pcVsAdversary grouping needs a system that defines it, and
+// none of the current definitions do.
+func effectiveOrdering(ordering, gameSystemID string) string {
+	if ordering == data.OrderPCVsAdversary && gameSystemID == data.DefaultSystemID {
+		return data.OrderHighToLow
+	}
+	return ordering
+}
+
 // recompute rebuilds the turn queue under ordering and tie. In an active encounter it also keeps
 // a current combatant: if the current one left the queue, the combatant now at its old position
 // takes the turn (wrapping to the front and starting the next round if it was last), and an empty

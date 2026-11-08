@@ -76,27 +76,31 @@ func (s *Encounters) List(ctx context.Context, owner string, q data.Query) (data
 }
 
 // UpdateSettings sets the encounter's settings (name, game_system_id, ordering, tie_breaker,
-// display flags, theme_id, position). Combat state cannot be set here, but a new ordering or tie
-// breaker recomputes the turn queue in the same write.
+// display flags, theme_id, position). Combat state cannot be set here, but a new ordering, tie
+// breaker, or game system recomputes the turn queue in the same write.
 func (s *Encounters) UpdateSettings(ctx context.Context, owner, actor, id string, rev int64, set map[string]any) (data.Encounter, error) {
 	_, ord := set["ordering"]
 	_, tie := set["tie_breaker"]
-	if !ord && !tie {
+	_, sys := set["game_system_id"]
+	if !ord && !tie && !sys {
 		return s.repo.Update(ctx, owner, actor, id, rev, set)
 	}
 	cur, err := s.repo.Load(ctx, owner, id)
 	if err != nil {
 		return data.Encounter{}, err
 	}
-	o, t := cur.Ordering, cur.TieBreaker
+	o, t, sysID := cur.Ordering, cur.TieBreaker, cur.GameSystemID
 	if v, ok := set["ordering"].(string); ok {
 		o = v
+	}
+	if v, ok := set["game_system_id"].(string); ok {
+		sysID = v
 	}
 	if v, ok := set["tie_breaker"].(string); ok {
 		t = v
 	}
 	st := stateOf(cur)
-	s.recompute(&st, o, t)
+	s.recompute(&st, effectiveOrdering(o, sysID), t)
 	return s.repo.Write(ctx, owner, actor, id, rev, set, st)
 }
 
@@ -113,7 +117,7 @@ func (s *Encounters) editQueue(ctx context.Context, owner, actor, id string, rev
 		if err := change(st, cur); err != nil {
 			return err
 		}
-		s.recompute(st, cur.Ordering, cur.TieBreaker)
+		s.recompute(st, effectiveOrdering(cur.Ordering, cur.GameSystemID), cur.TieBreaker)
 		return nil
 	})
 }
