@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -98,13 +100,36 @@ func opEncounter(t *testing.T, op encounterOp) (*Encounters, data.Encounter) {
 	return s, op.prep(t, s, e)
 }
 
+// snapshot reads the whole stored encounter, for before/after comparison.
+func snapshot(t *testing.T, s *Encounters, id string) data.Encounter {
+	t.Helper()
+	e, err := s.Get(ctx, "u1", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// requireUnchanged fails unless the stored encounter is identical, field for field, to before.
+func requireUnchanged(t *testing.T, s *Encounters, before data.Encounter) {
+	t.Helper()
+	after := snapshot(t, s, before.ID)
+	if !reflect.DeepEqual(before, after) {
+		b, _ := json.MarshalIndent(before, "", " ")
+		a, _ := json.MarshalIndent(after, "", " ")
+		t.Fatalf("rejected call changed the encounter\nbefore: %s\nafter:  %s", b, a)
+	}
+}
+
 func TestEveryEncounterWriteChecksTheRevision(t *testing.T) {
 	for _, op := range encounterOps() {
 		t.Run(op.name, func(t *testing.T) {
 			s, e := opEncounter(t, op)
+			before := snapshot(t, s, e.ID)
 			if err := op.call(s, "u1", e, e.Revision+3); !errors.Is(err, data.ErrRevisionConflict) {
 				t.Fatalf("stale revision err = %v, want ErrRevisionConflict", err)
 			}
+			requireUnchanged(t, s, before)
 			if err := op.call(s, "u1", e, e.Revision); err != nil {
 				t.Fatalf("current revision err = %v, want success", err)
 			}
@@ -116,18 +141,17 @@ func TestEveryEncounterWriteIsOwnerChecked(t *testing.T) {
 	for _, op := range encounterOps() {
 		t.Run(op.name, func(t *testing.T) {
 			s, e := opEncounter(t, op)
+			before := snapshot(t, s, e.ID)
 			if err := op.call(s, "u2", e, e.Revision); !errors.Is(err, data.ErrForbidden) {
 				t.Fatalf("other owner err = %v, want ErrForbidden", err)
 			}
+			requireUnchanged(t, s, before)
 			missing := e
 			missing.ID = "absent"
 			if err := op.call(s, "u1", missing, e.Revision); !errors.Is(err, data.ErrNotFound) {
 				t.Fatalf("absent encounter err = %v, want ErrNotFound", err)
 			}
-			got, err := s.Get(ctx, "u1", e.ID)
-			if err != nil || got.Revision != e.Revision {
-				t.Fatalf("encounter changed by rejected calls: revision %d, err %v", got.Revision, err)
-			}
+			requireUnchanged(t, s, before)
 		})
 	}
 }
