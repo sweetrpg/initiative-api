@@ -241,3 +241,32 @@ func TestMissingSystemErrorDoesNotEchoTheID(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalid without the system ID", err)
 	}
 }
+
+func TestSystemSwitchToUnknownSystemIsRejectedAndLeavesEncounterAlone(t *testing.T) {
+	db := fake.NewDB()
+	seedSystems(t, db, hpSystem(DefaultSystemID, 5), hpSystem("big", 10))
+	r, e := healthEncounter(t, db, "big", withHP("c1", 3))
+	set := map[string]any{"game_system_id": "nope"}
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"update", func() error { _, err := r.Update(ctx, "u1", "u1", e.ID, 1, set); return err }},
+		{"write", func() error {
+			_, err := r.Write(ctx, "u1", "u1", e.ID, 1, set, EncounterState{Status: StatusDraft, Combatants: []Combatant{withHP("c1", 3)}})
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "nope") {
+				t.Fatalf("err = %v, want ErrInvalid without the ID (the default system must not stand in)", err)
+			}
+			got, _ := r.Get(ctx, "u1", e.ID)
+			if got.GameSystemID != "big" || got.Revision != 1 {
+				t.Fatalf("encounter changed: %+v", got)
+			}
+		})
+	}
+}

@@ -120,6 +120,9 @@ func (r *Encounters) Update(ctx context.Context, ownerUserID, actingUserID, id s
 		return Encounter{}, err
 	}
 	if sysID, ok := set["game_system_id"].(string); ok {
+		if err := r.requireSystem(ctx, sysID); err != nil {
+			return Encounter{}, err
+		}
 		// Every combatant's health must fit the new system before the switch is stored.
 		cur, err := r.Load(ctx, ownerUserID, id)
 		if err != nil {
@@ -145,6 +148,17 @@ func validateCombatant(c Combatant) error {
 		}
 	}
 	return nil
+}
+
+// requireSystem rejects a game system that has no definition. The No System fallback applies only
+// to an encounter whose existing system lost its definition, never to choosing one: creating an
+// encounter and switching its system both require the definition to exist.
+func (r *Encounters) requireSystem(ctx context.Context, sysID string) error {
+	_, err := r.systems.Get(ctx, sysID)
+	if errors.Is(err, ErrNotFound) {
+		return invalid("the game system is not defined")
+	}
+	return err
 }
 
 // checkHealth validates the health of each combatant in cs against the encounter's game system
@@ -195,6 +209,11 @@ func (r *Encounters) Write(ctx context.Context, ownerUserID, actingUserID, id st
 	}
 	if err := ValidateState(st); err != nil {
 		return Encounter{}, err
+	}
+	if sysID, ok := settings["game_system_id"].(string); ok {
+		if err := r.requireSystem(ctx, sysID); err != nil {
+			return Encounter{}, err
+		}
 	}
 	if slices.ContainsFunc(st.Combatants, func(c Combatant) bool { return len(c.Health) > 0 }) {
 		cur, err := r.Load(ctx, ownerUserID, id)
