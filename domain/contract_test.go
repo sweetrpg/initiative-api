@@ -3,8 +3,10 @@ package domain
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/sweetrpg/initiative-api/data"
@@ -60,24 +62,86 @@ func checkFixed(t *testing.T, name string, v any) {
 	compare(t, name, stableJSON(t, v, false))
 }
 
+// updateAllowed reports whether fixtures may be rewritten: only with UPDATE_FIXTURES=1 and never
+// in CI (the CI variable is set by GitHub Actions), where drift must fail, not heal itself.
+func updateAllowed(env func(string) string) (bool, error) {
+	if env("UPDATE_FIXTURES") != "1" {
+		return false, nil
+	}
+	if env("CI") != "" {
+		return false, errors.New("UPDATE_FIXTURES is set in CI; fixtures are never rewritten there")
+	}
+	return true, nil
+}
+
+// diffFixture returns an error when got differs from the fixture file name in dir.
+func diffFixture(dir, name string, got []byte) error {
+	want, err := os.ReadFile(filepath.Join(dir, name+".json")) //nolint:gosec // fixed test fixture directory
+	if err != nil {
+		return fmt.Errorf("missing fixture %s (run with UPDATE_FIXTURES=1 locally): %w", name, err)
+	}
+	if string(got) != string(want) {
+		return fmt.Errorf("%s differs from its fixture:\n got: %s\nwant: %s", name, got, want)
+	}
+	return nil
+}
+
 func compare(t *testing.T, name string, got []byte) {
 	t.Helper()
-	path := filepath.Join(fixtureDir, name+".json")
-	if os.Getenv("UPDATE_FIXTURES") == "1" {
+	update, err := updateAllowed(os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update {
 		if err := os.MkdirAll(fixtureDir, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, got, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(fixtureDir, name+".json"), got, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	want, err := os.ReadFile(path) //nolint:gosec // fixed test fixture directory
-	if err != nil {
-		t.Fatalf("missing fixture %s (run with UPDATE_FIXTURES=1): %v", path, err)
+	if err := diffFixture(fixtureDir, name, got); err != nil {
+		t.Fatal(err)
 	}
-	if string(got) != string(want) {
-		t.Fatalf("%s differs from its fixture:\n got: %s\nwant: %s", name, got, want)
+}
+
+func TestFixtureComparisonFailsOnDrift(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "x.json"), []byte("{\"a\": 1}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := diffFixture(dir, "x", []byte("{\"a\": 1}\n")); err != nil {
+		t.Fatalf("identical output reported as drift: %v", err)
+	}
+	if err := diffFixture(dir, "x", []byte("{\"a\": 2}\n")); err == nil {
+		t.Fatal("changed output was not reported as drift")
+	}
+	if err := diffFixture(dir, "absent", []byte("{}")); err == nil {
+		t.Fatal("a missing fixture was not reported")
+	}
+}
+
+func TestFixturesAreNeverRewrittenInCI(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		allowed bool
+		fails   bool
+	}{
+		{"no flags", map[string]string{}, false, false},
+		{"local update", map[string]string{"UPDATE_FIXTURES": "1"}, true, false},
+		{"update in CI", map[string]string{"UPDATE_FIXTURES": "1", "CI": "true"}, false, true},
+		{"CI without update", map[string]string{"CI": "true"}, false, false},
+		{"other value", map[string]string{"UPDATE_FIXTURES": "yes"}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, err := updateAllowed(func(k string) string { return tt.env[k] })
+			if ok != tt.allowed || (err != nil) != tt.fails {
+				t.Fatalf("allowed=%v err=%v, want allowed=%v fails=%v", ok, err, tt.allowed, tt.fails)
+			}
+		})
 	}
 }
 
@@ -99,6 +163,7 @@ func TestContractEncounterLifecycleResponses(t *testing.T) {
 	s := newTurnService(t)
 	e := contractEncounter(t, s)
 	checkFixture(t, "encounter_created", e)
+	expect(t, "created", e, data.StatusDraft, 1, 0, nil)
 
 	got, err := s.Get(ctx, "user-1", e.ID)
 	if err != nil || got.ID != e.ID || got.Revision != e.Revision {
@@ -109,18 +174,34 @@ func TestContractEncounterLifecycleResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkFixture(t, "encounter_started", e)
+	expect(t, "started", e, data.StatusActive, 2, 1, []string{"c1", "c2"})
 
 	e, err = s.Advance(ctx, "user-1", "user-1", e.ID, e.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkFixture(t, "encounter_advanced", e)
+	expect(t, "advanced", e, data.StatusActive, 3, 1, []string{"c1", "c2"})
+	if e.CurrentCombatantID != "c2" {
+		t.Fatalf("advanced: current = %q, want c2", e.CurrentCombatantID)
+	}
 
 	e, err = s.Reset(ctx, "user-1", "user-1", e.ID, e.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkFixture(t, "encounter_reset", e)
+	expect(t, "reset", e, data.StatusDraft, 4, 0, nil)
+}
+
+// expect asserts the fields clients branch on, so a wrong value cannot hide behind a regenerated
+// fixture.
+func expect(t *testing.T, step string, e data.Encounter, status string, revision int64, round int, queue []string) {
+	t.Helper()
+	if e.Status != status || e.Revision != revision || e.Round != round || !slices.Equal(e.TurnQueue, queue) {
+		t.Fatalf("%s: status=%q revision=%d round=%d queue=%v, want %q %d %d %v",
+			step, e.Status, e.Revision, e.Round, e.TurnQueue, status, revision, round, queue)
+	}
 }
 
 func TestContractStaleRevisionReturnsTheCurrentEncounter(t *testing.T) {
@@ -161,6 +242,10 @@ func TestContractRosterAndGameSystemResponses(t *testing.T) {
 	}
 	checkFixed(t, "game_system", sys)
 }
+
+// errorClassesNote explains the read/write split in the access classes.
+const errorClassesNote = "Reading another user's record is not_found, so a GET never reveals that the ID exists; " +
+	"writing to it is forbidden (docs/coding-conventions.md, Owner-Scoped Data Access), classified only after the owner-scoped write has matched nothing."
 
 type errorCase struct {
 	Scenario string `json:"scenario"`
@@ -237,5 +322,8 @@ func TestContractErrorClasses(t *testing.T) {
 		}
 		cases = append(cases, errorCase{sc.name, class, key})
 	}
-	checkFixed(t, "error_classes", cases)
+	checkFixed(t, "error_classes", struct {
+		Note  string      `json:"note"`
+		Cases []errorCase `json:"cases"`
+	}{errorClassesNote, cases})
 }

@@ -1,53 +1,56 @@
-[
-  {
-    "class": "not_found",
-    "scenario": "read another user's encounter"
-  },
-  {
-    "class": "not_found",
-    "scenario": "read an encounter that does not exist"
-  },
-  {
-    "class": "forbidden",
-    "scenario": "edit another user's encounter"
-  },
-  {
-    "class": "revision_conflict",
-    "scenario": "edit with a stale revision"
-  },
-  {
-    "class": "invalid_health",
-    "key": "hp",
-    "scenario": "health above its maximum"
-  },
-  {
-    "class": "invalid_health",
-    "key": "hp",
-    "scenario": "health below its minimum"
-  },
-  {
-    "class": "invalid_health",
-    "key": "mana",
-    "scenario": "health key not in the definition"
-  },
-  {
-    "class": "not_found",
-    "scenario": "unknown combatant"
-  },
-  {
-    "class": "invalid_transition",
-    "scenario": "advance a draft encounter"
-  },
-  {
-    "class": "invalid_transition",
-    "scenario": "end a draft encounter"
-  },
-  {
-    "class": "invalid",
-    "scenario": "combat state through settings"
-  },
-  {
-    "class": "invalid",
-    "scenario": "unknown game system"
-  }
-]
+{
+  "cases": [
+    {
+      "class": "not_found",
+      "scenario": "read another user's encounter"
+    },
+    {
+      "class": "not_found",
+      "scenario": "read an encounter that does not exist"
+    },
+    {
+      "class": "forbidden",
+      "scenario": "edit another user's encounter"
+    },
+    {
+      "class": "revision_conflict",
+      "scenario": "edit with a stale revision"
+    },
+    {
+      "class": "invalid_health",
+      "key": "hp",
+      "scenario": "health above its maximum"
+    },
+    {
+      "class": "invalid_health",
+      "key": "hp",
+      "scenario": "health below its minimum"
+    },
+    {
+      "class": "invalid_health",
+      "key": "mana",
+      "scenario": "health key not in the definition"
+    },
+    {
+      "class": "not_found",
+      "scenario": "unknown combatant"
+    },
+    {
+      "class": "invalid_transition",
+      "scenario": "advance a draft encounter"
+    },
+    {
+      "class": "invalid_transition",
+      "scenario": "end a draft encounter"
+    },
+    {
+      "class": "invalid",
+      "scenario": "combat state through settings"
+    },
+    {
+      "class": "invalid",
+      "scenario": "unknown game system"
+    }
+  ],
+  "note": "Reading another user's record is not_found, so a GET never reveals that the ID exists; writing to it is forbidden (docs/coding-conventions.md, Owner-Scoped Data Access), classified only after the owner-scoped write has matched nothing."
+}
