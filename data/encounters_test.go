@@ -88,11 +88,6 @@ func TestEncounterCreateRejectsBadValues(t *testing.T) {
 		{"ordering", func(e *Encounter) { e.Ordering = "sideways" }},
 		{"empty ordering", func(e *Encounter) { e.Ordering = "" }},
 		{"tie breaker", func(e *Encounter) { e.TieBreaker = "coinflip" }},
-		{"status", func(e *Encounter) { e.Status = "paused" }},
-		{"queue entry not a combatant", func(e *Encounter) {
-			e.Combatants = []Combatant{{ID: "c1"}}
-			e.TurnQueue = []string{"c1", "ghost"}
-		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,12 +101,55 @@ func TestEncounterCreateRejectsBadValues(t *testing.T) {
 	}
 }
 
-func TestEncounterCreateAcceptsQueueOfOwnCombatants(t *testing.T) {
+func TestValidateEncounter(t *testing.T) {
+	base := func() *Encounter {
+		return &Encounter{Status: StatusDraft, Ordering: OrderHighToLow, TieBreaker: TieRandom,
+			Combatants: []Combatant{{ID: "c1"}, {ID: "c2"}}, TurnQueue: []string{"c1", "c2"}}
+	}
+	tests := []struct {
+		name    string
+		mod     func(*Encounter)
+		invalid bool
+	}{
+		{"valid", func(*Encounter) {}, false},
+		{"bad status", func(e *Encounter) { e.Status = "paused" }, true},
+		{"queue entry not a combatant", func(e *Encounter) { e.TurnQueue = []string{"c1", "ghost"} }, true},
+		{"duplicate combatant id", func(e *Encounter) { e.Combatants = []Combatant{{ID: "c1"}, {ID: "c1"}} }, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := base()
+			tt.mod(e)
+			if err := ValidateEncounter(e); errors.Is(err, ErrInvalid) != tt.invalid {
+				t.Fatalf("err = %v, invalid want %v", err, tt.invalid)
+			}
+		})
+	}
+}
+
+func TestEncounterCreateIgnoresCallerCombatState(t *testing.T) {
 	r := newEncounters(t)
-	e := &Encounter{Name: "x", Status: StatusDraft, Ordering: OrderHighToLow, TieBreaker: TieRandom,
+	e := &Encounter{Name: "x", Status: StatusActive, Round: 5, CurrentCombatantID: "c1",
+		Ordering: OrderHighToLow, TieBreaker: TieRandom,
 		Combatants: []Combatant{{ID: "c1"}}, TurnQueue: []string{"c1"}}
 	if err := r.Create(ctx, "u1", "u1", e); err != nil {
 		t.Fatal(err)
+	}
+	got, err := r.Get(ctx, "u1", e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusDraft || got.Round != 0 || got.CurrentCombatantID != "" || len(got.TurnQueue) != 0 {
+		t.Fatalf("stored %q round %d current %q queue %v, want fresh draft", got.Status, got.Round, got.CurrentCombatantID, got.TurnQueue)
+	}
+}
+
+func TestEncounterCreateRejectsDuplicateCombatantIDs(t *testing.T) {
+	r := newEncounters(t)
+	e := &Encounter{Name: "x", Ordering: OrderHighToLow, TieBreaker: TieRandom,
+		Combatants: []Combatant{{ID: "c1"}, {ID: "c1"}}}
+	if err := r.Create(ctx, "u1", "u1", e); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
 }
 

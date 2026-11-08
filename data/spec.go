@@ -63,6 +63,7 @@ var (
 			{Name: "owner_position", Keys: asc("owner_user_id", "position")},
 			{Name: "owner_name", Keys: asc("owner_user_id", "name")},
 			{Name: "owner_created_at", Keys: asc("owner_user_id", "created_at")},
+			{Name: "owner_updated_at", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "updated_at", Value: -1}}},
 			{Name: "owner_status_updated", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "status", Value: 1}, {Key: "updated_at", Value: -1}}},
 		},
 	}

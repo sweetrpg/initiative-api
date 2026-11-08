@@ -39,6 +39,9 @@ func ValidateEncounter(e *Encounter) error {
 	}
 	ids := make(map[string]bool, len(e.Combatants))
 	for _, c := range e.Combatants {
+		if ids[c.ID] {
+			return fmt.Errorf("%w: duplicate combatant id %q", ErrInvalid, c.ID)
+		}
 		ids[c.ID] = true
 	}
 	for _, id := range e.TurnQueue {
@@ -63,8 +66,10 @@ func validateEncounterSet(set map[string]any) error {
 	return nil
 }
 
-// Create validates e, then stores it as owner's new encounter.
+// Create resets e's combat state to a fresh draft, validates it, then stores it as owner's new
+// encounter. Callers cannot create an encounter that is already running.
 func (r *Encounters) Create(ctx context.Context, ownerUserID, actingUserID string, e *Encounter) error {
+	e.Status, e.Round, e.CurrentCombatantID, e.TurnQueue = StatusDraft, 0, "", nil
 	if err := ValidateEncounter(e); err != nil {
 		return err
 	}
