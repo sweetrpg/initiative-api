@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 
@@ -35,11 +36,14 @@ func (s *Encounters) End(ctx context.Context, owner, actor, id string, rev int64
 // combatant's conditions, and sets health values back to the game system's defaults. Combatants,
 // their initiative, and removed marks are kept.
 func (s *Encounters) Reset(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
-	cur, err := s.load(ctx, owner, id)
+	cur, err := s.repo.Load(ctx, owner, id)
 	if err != nil {
 		return data.Encounter{}, err
 	}
 	sys, err := s.systems.Get(ctx, cur.GameSystemID)
+	if errors.Is(err, data.ErrNotFound) {
+		return data.Encounter{}, invalid("unknown game system %q", cur.GameSystemID)
+	}
 	if err != nil {
 		return data.Encounter{}, err
 	}

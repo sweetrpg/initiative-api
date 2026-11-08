@@ -19,7 +19,7 @@ type Spec struct {
 	// Updatable lists the fields Owned.Update may set. State changes with their own rules
 	// (credential revocation, last use, scopes, secret) are not here; they get dedicated functions.
 	Updatable []string
-	// StateFields lists the fields only Owned.UpdateState may set: results of domain rules.
+	// StateFields lists the fields only Encounters.SetState may set: results of domain rules.
 	StateFields   []string
 	UnsetOnDelete []string
 	// ConflictOnDuplicate maps a unique-index rejection to ErrConflict. Set it only where the

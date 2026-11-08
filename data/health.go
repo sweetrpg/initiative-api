@@ -1,14 +1,8 @@
-package domain
+package data
 
-import (
-	"context"
-	"errors"
-	"fmt"
+import "fmt"
 
-	"github.com/sweetrpg/initiative-api/data"
-)
-
-// HealthError reports the health field that failed validation. It wraps data.ErrInvalid.
+// HealthError reports the health field that failed validation. It wraps ErrInvalid.
 type HealthError struct {
 	Field  string
 	Reason string
@@ -16,14 +10,14 @@ type HealthError struct {
 
 func (e *HealthError) Error() string { return fmt.Sprintf("health field %q: %s", e.Field, e.Reason) }
 
-// Unwrap lets errors.Is match data.ErrInvalid.
-func (e *HealthError) Unwrap() error { return data.ErrInvalid }
+// Unwrap lets errors.Is match ErrInvalid.
+func (e *HealthError) Unwrap() error { return ErrInvalid }
 
 // CheckHealth validates h against sys's tracker definition: every key must be a defined field, and
 // each value must be at least the field's Min and at most its Max (or, for MaxRef, the current
 // value of the referenced field in h when present).
-func CheckHealth(sys data.GameSystem, h map[string]int) error {
-	fields := make(map[string]data.TrackerField, len(sys.Fields))
+func CheckHealth(sys GameSystem, h map[string]int) error {
+	fields := make(map[string]TrackerField, len(sys.Fields))
 	for _, f := range sys.Fields {
 		fields[f.Key] = f
 	}
@@ -43,19 +37,4 @@ func CheckHealth(sys data.GameSystem, h map[string]int) error {
 		}
 	}
 	return nil
-}
-
-// checkHealth loads the encounter's game system and validates h. Empty h needs no lookup.
-func (s *Encounters) checkHealth(ctx context.Context, sysID string, h map[string]int) error {
-	if len(h) == 0 {
-		return nil
-	}
-	sys, err := s.systems.Get(ctx, sysID)
-	if errors.Is(err, data.ErrNotFound) {
-		return invalid("unknown game system %q", sysID)
-	}
-	if err != nil {
-		return err
-	}
-	return CheckHealth(sys, h)
 }

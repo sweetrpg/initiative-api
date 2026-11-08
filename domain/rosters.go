@@ -16,7 +16,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-var kinds = []string{data.KindPC, data.KindAdversary, data.KindObject}
+var kinds = data.Kinds
 
 // Rosters implements roster and character rules.
 type Rosters struct {

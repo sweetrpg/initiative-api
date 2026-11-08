@@ -9,8 +9,9 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 )
 
-// CombatantPatch is a partial combatant edit: nil fields are left alone. Health, when set,
-// replaces the combatant's health map.
+// CombatantPatch is a partial combatant edit: nil fields are left alone. Health values are merged
+// over the stored map (keys not in the patch keep their values); the merged map is what gets
+// validated.
 type CombatantPatch struct {
 	Name       *string
 	Kind       *string
@@ -50,10 +51,7 @@ func (s *Encounters) AddCombatant(ctx context.Context, owner, actor, id string, 
 	if err != nil {
 		return data.Encounter{}, err
 	}
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, sysID string) error {
-		if err := s.checkHealth(ctx, sysID, n.Health); err != nil {
-			return err
-		}
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
 		st.Combatants = append(st.Combatants, n)
 		return nil
 	})
@@ -61,12 +59,9 @@ func (s *Encounters) AddCombatant(ctx context.Context, owner, actor, id string, 
 
 // UpdateCombatant applies patch to the combatant with ID combatantID.
 func (s *Encounters) UpdateCombatant(ctx context.Context, owner, actor, id string, rev int64, combatantID string, patch CombatantPatch) (data.Encounter, error) {
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, sysID string) error {
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
 		c, err := findCombatant(st, combatantID)
 		if err != nil {
-			return err
-		}
-		if err := s.checkHealth(ctx, sysID, patch.Health); err != nil {
 			return err
 		}
 		return applyPatch(c, patch)
@@ -95,7 +90,12 @@ func applyPatch(c *data.Combatant, p CombatantPatch) error {
 		c.Notes = *p.Notes
 	}
 	if p.Health != nil {
-		c.Health = maps.Clone(p.Health)
+		merged := maps.Clone(c.Health)
+		if merged == nil {
+			merged = map[string]int{}
+		}
+		maps.Copy(merged, p.Health)
+		c.Health = merged
 	}
 	return nil
 }

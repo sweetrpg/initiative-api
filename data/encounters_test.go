@@ -104,7 +104,7 @@ func TestEncounterCreateRejectsBadValues(t *testing.T) {
 func TestValidateEncounter(t *testing.T) {
 	base := func() *Encounter {
 		return &Encounter{Status: StatusDraft, Ordering: OrderHighToLow, TieBreaker: TieRandom,
-			Combatants: []Combatant{{ID: "c1"}, {ID: "c2"}}, TurnQueue: []string{"c1", "c2"}}
+			Combatants: []Combatant{cb("c1"), cb("c2")}, TurnQueue: []string{"c1", "c2"}}
 	}
 	tests := []struct {
 		name    string
@@ -114,7 +114,7 @@ func TestValidateEncounter(t *testing.T) {
 		{"valid", func(*Encounter) {}, false},
 		{"bad status", func(e *Encounter) { e.Status = "paused" }, true},
 		{"queue entry not a combatant", func(e *Encounter) { e.TurnQueue = []string{"c1", "ghost"} }, true},
-		{"duplicate combatant id", func(e *Encounter) { e.Combatants = []Combatant{{ID: "c1"}, {ID: "c1"}} }, true},
+		{"duplicate combatant id", func(e *Encounter) { e.Combatants = []Combatant{cb("c1"), cb("c1")} }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -131,7 +131,7 @@ func TestEncounterCreateIgnoresCallerCombatState(t *testing.T) {
 	r := newEncounters(t)
 	e := &Encounter{Name: "x", Status: StatusActive, Round: 5, CurrentCombatantID: "c1",
 		Ordering: OrderHighToLow, TieBreaker: TieRandom,
-		Combatants: []Combatant{{ID: "c1"}}, TurnQueue: []string{"c1"}}
+		Combatants: []Combatant{cb("c1")}, TurnQueue: []string{"c1"}}
 	if err := r.Create(ctx, "u1", "u1", e); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestEncounterCreateIgnoresCallerCombatState(t *testing.T) {
 func TestEncounterCreateRejectsDuplicateCombatantIDs(t *testing.T) {
 	r := newEncounters(t)
 	e := &Encounter{Name: "x", Ordering: OrderHighToLow, TieBreaker: TieRandom,
-		Combatants: []Combatant{{ID: "c1"}, {ID: "c1"}}}
+		Combatants: []Combatant{cb("c1"), cb("c1")}}
 	if err := r.Create(ctx, "u1", "u1", e); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
@@ -258,7 +258,7 @@ func TestSetStateAdvancesRevisionOnce(t *testing.T) {
 	r := newEncounters(t)
 	e := newEncounter(t, r, "u1")
 	got, err := r.SetState(ctx, "u1", "u1", e.ID, 1, EncounterState{Status: StatusActive, Round: 1,
-		CurrentCombatantID: "c1", TurnQueue: []string{"c1"}, Combatants: []Combatant{{ID: "c1"}}})
+		CurrentCombatantID: "c1", TurnQueue: []string{"c1"}, Combatants: []Combatant{cb("c1")}})
 	if err != nil || got.Revision != 2 || got.Status != StatusActive || got.CurrentCombatantID != "c1" {
 		t.Fatalf("err=%v got=%+v", err, got)
 	}
@@ -268,8 +268,83 @@ func TestSetStateRejectsDuplicateCombatantID(t *testing.T) {
 	r := newEncounters(t)
 	e := newEncounter(t, r, "u1")
 	_, err := r.SetState(ctx, "u1", "u1", e.ID, 1, EncounterState{Status: StatusActive,
-		Combatants: []Combatant{{ID: "c1"}, {ID: "c1"}}})
+		Combatants: []Combatant{cb("c1"), cb("c1")}})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+func cb(id string) Combatant { return Combatant{ID: id, Name: "n" + id, Kind: KindPC} }
+
+func TestValidateStateCombatantRules(t *testing.T) {
+	one := 1
+	zero := 0
+	tests := []struct {
+		name string
+		c    Combatant
+	}{
+		{"no name", Combatant{ID: "c1", Name: " ", Kind: KindPC}},
+		{"bad kind", Combatant{ID: "c1", Name: "a", Kind: "dragon"}},
+		{"unnamed condition", Combatant{ID: "c1", Name: "a", Kind: KindPC, Conditions: []Condition{{Name: " "}}}},
+		{"zero rounds condition", Combatant{ID: "c1", Name: "a", Kind: KindPC, Conditions: []Condition{{Name: "x", RoundsRemaining: &zero}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateState(EncounterState{Status: StatusDraft, Combatants: []Combatant{tt.c}}); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("err = %v, want ErrInvalid", err)
+			}
+		})
+	}
+	ok := Combatant{ID: "c1", Name: "a", Kind: KindPC, Conditions: []Condition{{Name: "x", RoundsRemaining: &one}}}
+	if err := ValidateState(EncounterState{Status: StatusDraft, Combatants: []Combatant{ok}}); err != nil {
+		t.Fatalf("valid state rejected: %v", err)
+	}
+}
+
+func TestSetStateChecksHealthAgainstTheDefinition(t *testing.T) {
+	db := fake.NewDB()
+	zero := 0
+	sys := GameSystem{ID: "test", Name: "T", Family: "f", Aliases: []string{"test"},
+		Fields: []TrackerField{{Key: "hp", Label: "HP", Kind: FieldCounter, Min: &zero}}}
+	if _, err := NewSystemRepo(db).Upsert(ctx, sys); err != nil {
+		t.Fatal(err)
+	}
+	r := NewEncounters(db)
+	e := &Encounter{Name: "x", GameSystemID: "test", Ordering: OrderHighToLow, TieBreaker: TieRandom}
+	if err := r.Create(ctx, "u1", "u1", e); err != nil {
+		t.Fatal(err)
+	}
+	bad := cb("c1")
+	bad.Health = map[string]int{"hp": -5}
+	_, err := r.SetState(ctx, "u1", "u1", e.ID, 1, EncounterState{Status: StatusDraft, Combatants: []Combatant{bad}})
+	var he *HealthError
+	if !errors.As(err, &he) || he.Field != "hp" {
+		t.Fatalf("err = %v, want HealthError on hp", err)
+	}
+}
+
+func TestCheckHealthBounds(t *testing.T) {
+	zero, max := 0, 20
+	sys := GameSystem{Fields: []TrackerField{
+		{Key: "hp", Min: &zero, MaxRef: "max_hp"},
+		{Key: "max_hp", Min: &zero, Max: &max},
+	}}
+	tests := []struct {
+		name string
+		h    map[string]int
+		bad  bool
+	}{
+		{"ok", map[string]int{"hp": 5, "max_hp": 10}, false},
+		{"at min", map[string]int{"hp": 0}, false},
+		{"above max", map[string]int{"max_hp": 21}, true},
+		{"above max_ref", map[string]int{"hp": 11, "max_hp": 10}, true},
+		{"max_ref absent", map[string]int{"hp": 50}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := CheckHealth(sys, tt.h); (err != nil) != tt.bad {
+				t.Fatalf("err = %v, bad want %v", err, tt.bad)
+			}
+		})
 	}
 }

@@ -16,7 +16,9 @@ func newEncService(t *testing.T) *Encounters {
 	s.newID = func() string { n++; return "c" + string(rune('0'+n)) }
 	hp := 0
 	sys := data.GameSystem{ID: "test", Name: "Test", Family: "f", Aliases: []string{"test"},
-		Fields: []data.TrackerField{{Key: "hp", Label: "HP", Kind: data.FieldCounter, Def: 10, Min: &hp}}}
+		Fields: []data.TrackerField{
+			{Key: "hp", Label: "HP", Kind: data.FieldCounter, Def: 10, Min: &hp, MaxRef: "max_hp"},
+			{Key: "max_hp", Label: "Max HP", Kind: data.FieldCounter, Def: 10, Min: &hp}}}
 	if _, err := data.NewSystemRepo(db).Upsert(ctx, sys); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +36,7 @@ func newEnc(t *testing.T, s *Encounters, owner string, cs ...data.Combatant) dat
 }
 
 func orc() data.Combatant {
-	return data.Combatant{Name: "Orc", Kind: data.KindAdversary, Health: map[string]int{"hp": 3},
+	return data.Combatant{Name: "Orc", Kind: data.KindAdversary, Health: map[string]int{"hp": 3, "max_hp": 10},
 		Conditions: []data.Condition{{Name: "Stunned"}}}
 }
 
@@ -289,7 +291,7 @@ func TestHealthIsValidatedAgainstTheDefinition(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.call()
-			var he *HealthError
+			var he *data.HealthError
 			if !errors.Is(err, data.ErrInvalid) || !errors.As(err, &he) || he.Field != tt.want {
 				t.Fatalf("err = %v, want HealthError on %q", err, tt.want)
 			}
@@ -300,36 +302,28 @@ func TestHealthIsValidatedAgainstTheDefinition(t *testing.T) {
 	}
 }
 
-func TestCheckHealthBounds(t *testing.T) {
-	zero, max := 0, 20
-	sys := data.GameSystem{Fields: []data.TrackerField{
-		{Key: "hp", Min: &zero, MaxRef: "max_hp"},
-		{Key: "max_hp", Min: &zero, Max: &max},
-	}}
-	tests := []struct {
-		name string
-		h    map[string]int
-		bad  bool
-	}{
-		{"ok", map[string]int{"hp": 5, "max_hp": 10}, false},
-		{"at min", map[string]int{"hp": 0}, false},
-		{"above max", map[string]int{"max_hp": 21}, true},
-		{"above max_ref", map[string]int{"hp": 11, "max_hp": 10}, true},
-		{"max_ref absent", map[string]int{"hp": 50}, false},
+func TestPartialHealthPatchIsValidatedAgainstStoredValues(t *testing.T) {
+	s := newEncService(t)
+	e := newEnc(t, s, "u1", orc())
+	_, err := s.UpdateCombatant(ctx, "u1", "u1", e.ID, e.Revision, "c1", CombatantPatch{Health: map[string]int{"hp": 50}})
+	var he *data.HealthError
+	if !errors.As(err, &he) || he.Field != "hp" {
+		t.Fatalf("err = %v, want HealthError on hp (stored max_hp is 10)", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := CheckHealth(sys, tt.h); (err != nil) != tt.bad {
-				t.Fatalf("err = %v, bad want %v", err, tt.bad)
-			}
-		})
+	got, err := s.UpdateCombatant(ctx, "u1", "u1", e.ID, e.Revision, "c1", CombatantPatch{Health: map[string]int{"hp": 8}})
+	if err != nil || got.Combatants[0].Health["hp"] != 8 || got.Combatants[0].Health["max_hp"] != 10 {
+		t.Fatalf("err=%v health=%v, want hp 8 merged with max_hp 10", err, got.Combatants[0].Health)
 	}
 }
 
-func TestSettingsCannotSetCombatState(t *testing.T) {
+func TestResetWithMissingGameSystemIsInvalidNotNotFound(t *testing.T) {
 	s := newEncService(t)
 	e := newEnc(t, s, "u1")
-	if _, err := s.UpdateSettings(ctx, "u1", "u1", e.ID, 1, map[string]any{"status": data.StatusActive}); !errors.Is(err, data.ErrInvalid) {
-		t.Fatalf("err = %v, want ErrInvalid", err)
+	if _, err := s.repo.Update(ctx, "u1", "u1", e.ID, 1, map[string]any{"game_system_id": "gone"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Reset(ctx, "u1", "u1", e.ID, 2)
+	if !errors.Is(err, data.ErrInvalid) || errors.Is(err, data.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrInvalid only", err)
 	}
 }

@@ -22,6 +22,9 @@ const (
 	KindObject    = "object"
 )
 
+// Kinds lists the valid character and combatant kinds.
+var Kinds = []string{KindPC, KindAdversary, KindObject}
+
 // Credential scopes.
 const (
 	ScopeRead  = "read"
