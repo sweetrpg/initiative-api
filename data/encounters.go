@@ -82,6 +82,11 @@ func ValidateState(st EncounterState) error {
 }
 
 func validateEncounterSet(set map[string]any) error {
+	if v, ok := set["game_system_id"]; ok {
+		if s, isStr := v.(string); !isStr || strings.TrimSpace(s) == "" {
+			return fmt.Errorf("%w: game_system_id must be a non-empty string", ErrInvalid)
+		}
+	}
 	if v, ok := set["ordering"]; ok {
 		if s, isStr := v.(string); !isStr || !slices.Contains(orderings, s) {
 			return fmt.Errorf("%w: ordering %v", ErrInvalid, v)
@@ -108,10 +113,21 @@ func (r *Encounters) Create(ctx context.Context, ownerUserID, actingUserID strin
 	return r.Owned.Create(ctx, ownerUserID, actingUserID, e)
 }
 
-// Update validates the enumerated values in set, then applies it with the revision check.
+// Update validates the enumerated values in set, then applies it with the revision check. A change
+// of game system also checks every combatant's health against the new system.
 func (r *Encounters) Update(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (Encounter, error) {
 	if err := validateEncounterSet(set); err != nil {
 		return Encounter{}, err
+	}
+	if sysID, ok := set["game_system_id"].(string); ok {
+		// Every combatant's health must fit the new system before the switch is stored.
+		cur, err := r.Load(ctx, ownerUserID, id)
+		if err != nil {
+			return Encounter{}, err
+		}
+		if err := r.checkHealth(ctx, sysID, cur.Combatants, nil); err != nil {
+			return Encounter{}, err
+		}
 	}
 	return r.Owned.Update(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
 }
@@ -152,7 +168,7 @@ func (r *Encounters) checkHealth(ctx context.Context, sysID string, cs, existing
 	}
 	sys, err := r.systems.GetOrDefault(ctx, sysID)
 	if errors.Is(err, ErrNotFound) {
-		return invalid("unknown game system %q and no default system is defined", sysID)
+		return invalid("the encounter's game system has no definition and no default system is defined")
 	}
 	if err != nil {
 		return err

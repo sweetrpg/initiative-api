@@ -2,6 +2,7 @@ package data
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sweetrpg/initiative-api/store/fake"
@@ -163,5 +164,80 @@ func TestSwitchingSystemRechecksEveryCombatant(t *testing.T) {
 	var he *HealthError
 	if !errors.As(err, &he) {
 		t.Fatalf("err = %v, want HealthError: 8 exceeds the new system's max 5", err)
+	}
+}
+
+func TestCreateRejectsInvalidHealth(t *testing.T) {
+	db := fake.NewDB()
+	seedSystems(t, db, hpSystem("s", 5))
+	tests := []struct {
+		name string
+		h    map[string]int
+	}{
+		{"above max", map[string]int{"hp": 9}},
+		{"unknown key", map[string]int{"mana": 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := cb("c1")
+			c.Health = tt.h
+			e := &Encounter{Name: "x", GameSystemID: "s", Ordering: OrderHighToLow, TieBreaker: TieRandom, Combatants: []Combatant{c}}
+			var he *HealthError
+			if err := NewEncounters(db).Create(ctx, "u1", "u1", e); !errors.As(err, &he) {
+				t.Fatalf("err = %v, want HealthError", err)
+			}
+		})
+	}
+}
+
+func TestSettingsOnlySystemSwitchChecksEveryCombatant(t *testing.T) {
+	db := fake.NewDB()
+	seedSystems(t, db, hpSystem("big", 10), hpSystem("small", 5))
+	r, e := healthEncounter(t, db, "big", withHP("c1", 8))
+	var he *HealthError
+	if _, err := r.Update(ctx, "u1", "u1", e.ID, 1, map[string]any{"game_system_id": "small"}); !errors.As(err, &he) {
+		t.Fatalf("err = %v, want HealthError: hp 8 exceeds the new system's max 5", err)
+	}
+	got, err := r.Get(ctx, "u1", e.ID)
+	if err != nil || got.GameSystemID != "big" || got.Revision != 1 {
+		t.Fatalf("encounter changed by a rejected switch: %+v, %v", got, err)
+	}
+}
+
+func TestSettingsOnlySystemSwitchAllowedWhenHealthFits(t *testing.T) {
+	db := fake.NewDB()
+	seedSystems(t, db, hpSystem("big", 10), hpSystem("small", 5))
+	r, e := healthEncounter(t, db, "big", withHP("c1", 3))
+	got, err := r.Update(ctx, "u1", "u1", e.ID, 1, map[string]any{"game_system_id": "small"})
+	if err != nil || got.GameSystemID != "small" {
+		t.Fatalf("err=%v got=%+v, want switch accepted", err, got)
+	}
+}
+
+func TestSettingsOnlySystemSwitchByAnotherOwnerIsForbidden(t *testing.T) {
+	db := fake.NewDB()
+	seedSystems(t, db, hpSystem("big", 10), hpSystem("small", 5))
+	r, e := healthEncounter(t, db, "big", withHP("c1", 3))
+	if _, err := r.Update(ctx, "u2", "u2", e.ID, 1, map[string]any{"game_system_id": "small"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestSystemSwitchRejectsNonStringSystemID(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	for _, v := range []any{3, " "} {
+		if _, err := r.Update(ctx, "u1", "u1", e.ID, 1, map[string]any{"game_system_id": v}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("game_system_id %v: err = %v, want ErrInvalid", v, err)
+		}
+	}
+}
+
+func TestMissingSystemErrorDoesNotEchoTheID(t *testing.T) {
+	db := fake.NewDB()
+	r, e := healthEncounter(t, db, "secret-system-id")
+	_, err := r.SetState(ctx, "u1", "u1", e.ID, 1, EncounterState{Status: StatusDraft, Combatants: []Combatant{withHP("c1", 1)}})
+	if !errors.Is(err, ErrInvalid) || strings.Contains(err.Error(), "secret-system-id") {
+		t.Fatalf("err = %v, want ErrInvalid without the system ID", err)
 	}
 }

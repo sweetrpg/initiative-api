@@ -42,7 +42,7 @@ func (s *Encounters) Reset(ctx context.Context, owner, actor, id string, rev int
 	}
 	sys, err := s.systems.GetOrDefault(ctx, cur.GameSystemID)
 	if errors.Is(err, data.ErrNotFound) {
-		return data.Encounter{}, invalid("unknown game system %q", cur.GameSystemID)
+		return data.Encounter{}, invalid("the encounter's game system has no definition")
 	}
 	if err != nil {
 		return data.Encounter{}, err

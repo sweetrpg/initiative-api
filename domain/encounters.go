@@ -45,7 +45,7 @@ func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.E
 	}
 	_, err := s.systems.Get(ctx, enc.GameSystemID)
 	if errors.Is(err, data.ErrNotFound) {
-		return data.Encounter{}, invalid("unknown game system %q", enc.GameSystemID)
+		return data.Encounter{}, invalid("the encounter's game system is not defined")
 	}
 	if err != nil {
 		return data.Encounter{}, err
