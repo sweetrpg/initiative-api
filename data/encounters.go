@@ -151,9 +151,18 @@ func (r *Encounters) checkHealth(ctx context.Context, sysID string, cs []Combata
 	return nil
 }
 
-// SetState validates st (structure, and combatant health against the encounter's game system),
-// then writes it as the encounter's combat state with the revision check.
+// SetState validates st and writes it as the encounter's combat state with the revision check.
 func (r *Encounters) SetState(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, st EncounterState) (Encounter, error) {
+	return r.Write(ctx, ownerUserID, actingUserID, id, expectedRevision, nil, st)
+}
+
+// Write validates settings (Updatable fields) and st (structure, and combatant health against the
+// encounter's game system), then writes both in one atomic write with the revision check. Use it
+// when a setting change, such as the ordering, comes with recomputed state.
+func (r *Encounters) Write(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, settings map[string]any, st EncounterState) (Encounter, error) {
+	if err := validateEncounterSet(settings); err != nil {
+		return Encounter{}, err
+	}
 	if err := ValidateState(st); err != nil {
 		return Encounter{}, err
 	}
@@ -162,15 +171,19 @@ func (r *Encounters) SetState(ctx context.Context, ownerUserID, actingUserID, id
 		if err != nil {
 			return Encounter{}, err
 		}
-		if err := r.checkHealth(ctx, cur.GameSystemID, st.Combatants); err != nil {
+		sysID := cur.GameSystemID
+		if v, ok := settings["game_system_id"].(string); ok {
+			sysID = v
+		}
+		if err := r.checkHealth(ctx, sysID, st.Combatants); err != nil {
 			return Encounter{}, err
 		}
 	}
-	set := map[string]any{
+	state := map[string]any{
 		"status": st.Status, "round": st.Round, "current_combatant_id": st.CurrentCombatantID,
 		"turn_queue": nonNil(st.TurnQueue), "combatants": nonNilC(st.Combatants),
 	}
-	return r.updateState(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+	return r.updateBoth(ctx, ownerUserID, actingUserID, id, expectedRevision, settings, state)
 }
 
 func nonNil(s []string) []string {

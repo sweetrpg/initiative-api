@@ -348,3 +348,28 @@ func TestCheckHealthBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteAppliesSettingsAndStateInOneRevision(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	got, err := r.Write(ctx, "u1", "u1", e.ID, 1, map[string]any{"ordering": OrderLowToHigh},
+		EncounterState{Status: StatusDraft, TurnQueue: []string{"c1"}, Combatants: []Combatant{cb("c1")}})
+	if err != nil || got.Revision != 2 || got.Ordering != OrderLowToHigh || got.TurnQueue[0] != "c1" {
+		t.Fatalf("err=%v got=%+v, want one write at revision 2", err, got)
+	}
+}
+
+func TestWriteRejectsBadSettingsAndStaleRevision(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	st := EncounterState{Status: StatusDraft}
+	if _, err := r.Write(ctx, "u1", "u1", e.ID, 1, map[string]any{"ordering": "z"}, st); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("bad ordering err = %v, want ErrInvalid", err)
+	}
+	if _, err := r.Write(ctx, "u1", "u1", e.ID, 1, map[string]any{"status": "active"}, st); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("state key as setting err = %v, want ErrInvalid", err)
+	}
+	if _, err := r.Write(ctx, "u1", "u1", e.ID, 9, nil, st); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale err = %v, want ErrRevisionConflict", err)
+	}
+}

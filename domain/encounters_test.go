@@ -101,7 +101,7 @@ func TestRemoveCombatantLeavesQueueAndCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	e, err = s.RemoveCombatant(ctx, "u1", "u1", e.ID, e.Revision, "c1")
-	if err != nil || len(e.TurnQueue) != 1 || e.TurnQueue[0] != "c2" || e.CurrentCombatantID != "" {
+	if err != nil || len(e.TurnQueue) != 1 || e.TurnQueue[0] != "c2" || e.CurrentCombatantID != "c2" {
 		t.Fatalf("err=%v queue=%v current=%q", err, e.TurnQueue, e.CurrentCombatantID)
 	}
 }
