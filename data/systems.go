@@ -52,6 +52,19 @@ func (s *SystemRepo) Get(ctx context.Context, idOrAlias string) (GameSystem, err
 	return out, err
 }
 
+// DefaultSystemID is "No System": the simple tracker every user can use, and the definition an
+// encounter falls back to when its game system has no definition.
+const DefaultSystemID = "none"
+
+// GetOrDefault returns the system for idOrAlias, or the default system when none is defined for it.
+func (s *SystemRepo) GetOrDefault(ctx context.Context, idOrAlias string) (GameSystem, error) {
+	sys, err := s.Get(ctx, idOrAlias)
+	if errors.Is(err, ErrNotFound) {
+		return s.Get(ctx, DefaultSystemID)
+	}
+	return sys, err
+}
+
 // List returns one page of systems; filtering (for example gated=false for users without the
 // entitlement) goes through q.
 func (s *SystemRepo) List(ctx context.Context, q Query) (Page[GameSystem], error) {
@@ -199,6 +212,10 @@ func validateField(f TrackerField, byKey map[string]TrackerField) error {
 	}
 	if f.Max != nil && f.MaxRef != "" {
 		return fmt.Errorf("field %q sets both max and max_ref", f.Key)
+	}
+	if f.Kind == FieldFlag && (f.Def < 0 || f.Def > 1 || f.MaxRef != "" ||
+		(f.Min != nil && *f.Min < 0) || (f.Max != nil && *f.Max > 1)) {
+		return fmt.Errorf("flag field %q must stay within 0 and 1", f.Key)
 	}
 	if f.MaxRef != "" {
 		if ref, ok := byKey[f.MaxRef]; !ok || f.MaxRef == f.Key {

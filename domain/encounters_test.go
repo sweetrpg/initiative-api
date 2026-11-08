@@ -318,12 +318,61 @@ func TestPartialHealthPatchIsValidatedAgainstStoredValues(t *testing.T) {
 
 func TestResetWithMissingGameSystemIsInvalidNotNotFound(t *testing.T) {
 	s := newEncService(t)
-	e := newEnc(t, s, "u1")
-	if _, err := s.repo.Update(ctx, "u1", "u1", e.ID, 1, map[string]any{"game_system_id": "gone"}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := s.Reset(ctx, "u1", "u1", e.ID, 2)
+	e := vanishedSystemEncounter(t, s)
+	_, err := s.Reset(ctx, "u1", "u1", e.ID, e.Revision)
 	if !errors.Is(err, data.ErrInvalid) || errors.Is(err, data.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrInvalid only", err)
 	}
+}
+
+func TestResetFallsBackToTheDefaultSystemDefinition(t *testing.T) {
+	s := newEncService(t)
+	zero := 0
+	none := data.GameSystem{ID: data.DefaultSystemID, Name: "No System", Family: "simple",
+		Fields: []data.TrackerField{{Key: "hp", Label: "HP", Kind: data.FieldCounter, Def: 1, Min: &zero}}}
+	if _, err := s.systems.Upsert(ctx, none); err != nil {
+		t.Fatal(err)
+	}
+	c := orc()
+	c.Health = map[string]int{"hp": 7}
+	e := vanishedSystemEncounter(t, s, c)
+	e, err := s.Reset(ctx, "u1", "u1", e.ID, e.Revision)
+	if err != nil || e.Combatants[0].Health["hp"] != 1 {
+		t.Fatalf("err=%v health=%v, want hp 1 from the No System definition", err, e.Combatants[0].Health)
+	}
+}
+
+func TestUpdateSettingsRejectsUnknownGameSystem(t *testing.T) {
+	s := newEncService(t)
+	e := newEnc(t, s, "u1", orc())
+	for _, set := range []map[string]any{
+		{"game_system_id": "nope"},
+		{"game_system_id": "nope", "ordering": data.OrderLowToHigh},
+	} {
+		if _, err := s.UpdateSettings(ctx, "u1", "u1", e.ID, e.Revision, set); !errors.Is(err, data.ErrInvalid) {
+			t.Fatalf("set %v: err = %v, want ErrInvalid", set, err)
+		}
+	}
+	got, _ := s.Get(ctx, "u1", e.ID)
+	if got.GameSystemID != "test" || got.Revision != e.Revision {
+		t.Fatalf("encounter changed: %+v", got)
+	}
+}
+
+// vanishedSystemEncounter stores an encounter whose game system has no definition, as happens when
+// a definition is removed after use. Creation through the service would reject it.
+func vanishedSystemEncounter(t *testing.T, s *Encounters, cs ...data.Combatant) data.Encounter {
+	t.Helper()
+	e := data.Encounter{Name: "Old", GameSystemID: "gone", Ordering: data.OrderHighToLow, TieBreaker: data.TieRandom}
+	for i, c := range cs {
+		n, err := newCombatant(c, "v"+string(rune('0'+i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.Combatants = append(e.Combatants, n)
+	}
+	if err := s.repo.Create(ctx, "u1", "u1", &e); err != nil {
+		t.Fatal(err)
+	}
+	return e
 }

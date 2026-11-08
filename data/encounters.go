@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -81,6 +82,11 @@ func ValidateState(st EncounterState) error {
 }
 
 func validateEncounterSet(set map[string]any) error {
+	if v, ok := set["game_system_id"]; ok {
+		if s, isStr := v.(string); !isStr || strings.TrimSpace(s) == "" {
+			return fmt.Errorf("%w: game_system_id must be a non-empty string", ErrInvalid)
+		}
+	}
 	if v, ok := set["ordering"]; ok {
 		if s, isStr := v.(string); !isStr || !slices.Contains(orderings, s) {
 			return fmt.Errorf("%w: ordering %v", ErrInvalid, v)
@@ -101,16 +107,30 @@ func (r *Encounters) Create(ctx context.Context, ownerUserID, actingUserID strin
 	if err := ValidateEncounter(e); err != nil {
 		return err
 	}
-	if err := r.checkHealth(ctx, e.GameSystemID, e.Combatants); err != nil {
+	if err := r.checkHealth(ctx, e.GameSystemID, e.Combatants, nil); err != nil {
 		return err
 	}
 	return r.Owned.Create(ctx, ownerUserID, actingUserID, e)
 }
 
-// Update validates the enumerated values in set, then applies it with the revision check.
+// Update validates the enumerated values in set, then applies it with the revision check. A change
+// of game system also checks every combatant's health against the new system.
 func (r *Encounters) Update(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (Encounter, error) {
 	if err := validateEncounterSet(set); err != nil {
 		return Encounter{}, err
+	}
+	if sysID, ok := set["game_system_id"].(string); ok {
+		if err := r.requireSystem(ctx, sysID); err != nil {
+			return Encounter{}, err
+		}
+		// Every combatant's health must fit the new system before the switch is stored.
+		cur, err := r.Load(ctx, ownerUserID, id)
+		if err != nil {
+			return Encounter{}, err
+		}
+		if err := r.checkHealth(ctx, sysID, cur.Combatants, nil); err != nil {
+			return Encounter{}, err
+		}
 	}
 	return r.Owned.Update(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
 }
@@ -130,20 +150,44 @@ func validateCombatant(c Combatant) error {
 	return nil
 }
 
-// checkHealth validates every combatant's health against the game system definition. The system
-// is looked up only when some combatant has health values.
-func (r *Encounters) checkHealth(ctx context.Context, sysID string, cs []Combatant) error {
-	if !slices.ContainsFunc(cs, func(c Combatant) bool { return len(c.Health) > 0 }) {
+// requireSystem rejects a game system that has no definition. The No System fallback applies only
+// to an encounter whose existing system lost its definition, never to choosing one: creating an
+// encounter and switching its system both require the definition to exist.
+func (r *Encounters) requireSystem(ctx context.Context, sysID string) error {
+	_, err := r.systems.Get(ctx, sysID)
+	if errors.Is(err, ErrNotFound) {
+		return invalid("the game system is not defined")
+	}
+	return err
+}
+
+// checkHealth validates the health of each combatant in cs against the encounter's game system
+// definition (the default system when the encounter's has none). Only combatants that are new or
+// whose health differs from existing are checked, so a stored value that a later definition change
+// made invalid does not block unrelated edits. The system is looked up only when something needs
+// checking.
+func (r *Encounters) checkHealth(ctx context.Context, sysID string, cs, existing []Combatant) error {
+	before := make(map[string]map[string]int, len(existing))
+	for _, c := range existing {
+		before[c.ID] = c.Health
+	}
+	var changed []Combatant
+	for _, c := range cs {
+		if prev, ok := before[c.ID]; len(c.Health) > 0 && (!ok || !maps.Equal(prev, c.Health)) {
+			changed = append(changed, c)
+		}
+	}
+	if len(changed) == 0 {
 		return nil
 	}
-	sys, err := r.systems.Get(ctx, sysID)
+	sys, err := r.systems.GetOrDefault(ctx, sysID)
 	if errors.Is(err, ErrNotFound) {
-		return invalid("unknown game system %q", sysID)
+		return invalid("the encounter's game system has no definition and no default system is defined")
 	}
 	if err != nil {
 		return err
 	}
-	for _, c := range cs {
+	for _, c := range changed {
 		if err := CheckHealth(sys, c.Health); err != nil {
 			return err
 		}
@@ -166,6 +210,11 @@ func (r *Encounters) Write(ctx context.Context, ownerUserID, actingUserID, id st
 	if err := ValidateState(st); err != nil {
 		return Encounter{}, err
 	}
+	if sysID, ok := settings["game_system_id"].(string); ok {
+		if err := r.requireSystem(ctx, sysID); err != nil {
+			return Encounter{}, err
+		}
+	}
 	if slices.ContainsFunc(st.Combatants, func(c Combatant) bool { return len(c.Health) > 0 }) {
 		cur, err := r.Load(ctx, ownerUserID, id)
 		if err != nil {
@@ -175,7 +224,11 @@ func (r *Encounters) Write(ctx context.Context, ownerUserID, actingUserID, id st
 		if v, ok := settings["game_system_id"].(string); ok {
 			sysID = v
 		}
-		if err := r.checkHealth(ctx, sysID, st.Combatants); err != nil {
+		existing := cur.Combatants
+		if _, switched := settings["game_system_id"]; switched {
+			existing = nil // a new system: every combatant's health is checked afresh
+		}
+		if err := r.checkHealth(ctx, sysID, st.Combatants, existing); err != nil {
 			return Encounter{}, err
 		}
 	}
