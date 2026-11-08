@@ -68,12 +68,12 @@ func (r *Owned[T, P]) Create(ctx context.Context, ownerUserID, actingUserID stri
 	m.Revision = 1
 	m.DeletedAt, m.DeletedBy = nil, nil
 	models.StampCreate(&m.Auditable, actingUserID, r.now())
-	return mapDuplicate(r.c.InsertOne(ctx, doc))
+	return r.mapDuplicate(r.c.InsertOne(ctx, doc))
 }
 
-// mapDuplicate turns a unique-index rejection into ErrConflict.
-func mapDuplicate(err error) error {
-	if errors.Is(err, store.ErrDuplicate) {
+// mapDuplicate turns a unique-index rejection into ErrConflict for specs that opt in.
+func (r *Owned[T, P]) mapDuplicate(err error) error {
+	if r.spec.ConflictOnDuplicate && errors.Is(err, store.ErrDuplicate) {
 		return ErrConflict
 	}
 	return err
@@ -151,7 +151,7 @@ func (r *Owned[T, P]) Update(ctx context.Context, ownerUserID, actingUserID, id 
 	if errors.Is(err, store.ErrNotFound) {
 		return r.classify(ctx, ownerUserID, id)
 	}
-	return out, mapDuplicate(err)
+	return out, r.mapDuplicate(err)
 }
 
 // SoftDelete tombstones owner's record if its revision is still expectedRevision (deleted_at/

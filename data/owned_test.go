@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 )
 
@@ -359,5 +360,16 @@ func TestSameSlotForDifferentOwnersIsAllowed(t *testing.T) {
 	_ = r.Create(ctx, "u1", "u1", &Theme{Name: "A", Slot: &slot})
 	if err := r.Create(ctx, "u2", "u2", &Theme{Name: "A", Slot: &slot}); err != nil {
 		t.Fatalf("err = %v, want nil", err)
+	}
+}
+
+func TestCredentialSecretHashCollisionIsNotMislabeledAsSlotConflict(t *testing.T) {
+	db := fake.NewDB()
+	_ = EnsureIndexes(ctx, db)
+	r := NewOwned[IntegrationCredential](db, CredentialSpec)
+	_ = r.Create(ctx, "u1", "u1", &IntegrationCredential{Label: "a", SecretHash: "h"})
+	err := r.Create(ctx, "u2", "u2", &IntegrationCredential{Label: "b", SecretHash: "h"})
+	if errors.Is(err, ErrConflict) || !errors.Is(err, store.ErrDuplicate) {
+		t.Fatalf("err = %v, want the raw store.ErrDuplicate and not ErrConflict", err)
 	}
 }

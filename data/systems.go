@@ -105,10 +105,14 @@ func (s *SystemRepo) create(ctx context.Context, sys GameSystem) (Outcome, error
 	if errors.Is(err, store.ErrDuplicate) {
 		// Another replica may have inserted this same ID first; if so, retry as an update/no-op.
 		var existing GameSystem
-		if s.c.FindOne(ctx, bson.D{{Key: "_id", Value: sys.ID}}, &existing) == nil {
+		switch rerr := s.c.FindOne(ctx, bson.D{{Key: "_id", Value: sys.ID}}, &existing); {
+		case rerr == nil:
 			return "", errLostRace
+		case errors.Is(rerr, store.ErrNotFound):
+			return "", fmt.Errorf("system %q alias conflicts with another system: %w", sys.ID, err)
+		default:
+			return "", rerr
 		}
-		return "", fmt.Errorf("system %q alias conflicts with another system: %w", sys.ID, err)
 	}
 	if err != nil {
 		return "", err

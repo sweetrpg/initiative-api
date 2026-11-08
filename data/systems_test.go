@@ -240,12 +240,79 @@ func TestFirstInsertRaceWithDifferentDefinitionUpdates(t *testing.T) {
 	}
 }
 
+// faultyDB injects errors into an otherwise working fake.
+type faultyDB struct {
+	*fake.DB
+	insertErr, updateErr, findErr error
+	findFailsFrom                 int // fail FindOne from this 1-based call on (0 = never)
+	finds                         int
+}
+
+func (d *faultyDB) Collection(name string) store.Collection {
+	return &faultyCol{Collection: d.Fake(name), db: d}
+}
+
+type faultyCol struct {
+	store.Collection
+	db *faultyDB
+}
+
+func (c *faultyCol) InsertOne(ctx context.Context, doc any) error {
+	if c.db.insertErr != nil {
+		return c.db.insertErr
+	}
+	return c.Collection.InsertOne(ctx, doc)
+}
+
+func (c *faultyCol) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
+	if c.db.updateErr != nil {
+		return c.db.updateErr
+	}
+	return c.Collection.FindOneAndUpdate(ctx, f, u, out)
+}
+
+func (c *faultyCol) FindOne(ctx context.Context, f bson.D, out any) error {
+	c.db.finds++
+	if c.db.findFailsFrom > 0 && c.db.finds >= c.db.findFailsFrom {
+		return c.db.findErr
+	}
+	return c.Collection.FindOne(ctx, f, out)
+}
+
 func TestFailedUpsertReturnsEmptyOutcome(t *testing.T) {
-	r, _ := newSystems(t)
-	_, _ = r.Upsert(ctx, okSystem())
-	other := okSystem()
-	other.ID = "other"
-	if out, err := r.Upsert(ctx, other); err == nil || out != "" {
-		t.Fatalf("out=%q err=%v, want empty outcome with an error", out, err)
+	boom := errors.New("boom")
+	tests := []struct {
+		name  string
+		setup func(db *faultyDB, repo *SystemRepo)
+		sys   GameSystem
+		want  error
+	}{
+		{"alias conflict", func(db *faultyDB, repo *SystemRepo) {
+			_, _ = repo.Upsert(ctx, okSystem())
+		}, func() GameSystem { s := okSystem(); s.ID = "other"; return s }(), store.ErrDuplicate},
+		{"failing update", func(db *faultyDB, repo *SystemRepo) {
+			_, _ = repo.Upsert(ctx, okSystem())
+			db.updateErr = boom
+		}, renamed("Changed"), boom},
+		{"non-duplicate insert error", func(db *faultyDB, repo *SystemRepo) { db.insertErr = boom }, okSystem(), boom},
+		{"read error after duplicate insert", func(db *faultyDB, repo *SystemRepo) {
+			db.insertErr, db.findErr, db.findFailsFrom = store.ErrDuplicate, boom, 2
+		}, okSystem(), boom},
+		{"read error on first lookup", func(db *faultyDB, repo *SystemRepo) {
+			db.findErr, db.findFailsFrom = boom, 1
+		}, okSystem(), boom},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := &faultyDB{DB: fake.NewDB()}
+			_ = EnsureIndexes(ctx, db.DB)
+			repo := NewSystemRepo(db)
+			tt.setup(db, repo)
+			db.finds = 0
+			out, err := repo.Upsert(ctx, tt.sys)
+			if out != "" || !errors.Is(err, tt.want) {
+				t.Fatalf("out=%q err=%v, want empty outcome and %v", out, err, tt.want)
+			}
+		})
 	}
 }
