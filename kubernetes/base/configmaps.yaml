@@ -3,6 +3,8 @@ apiVersion: v1
 kind: ConfigMap
 
 metadata:
-    name: PROJECT_NAME
+  name: api-common
 
-data: {}
+data:
+  GIN_MODE: release
+  PORT: "8000"

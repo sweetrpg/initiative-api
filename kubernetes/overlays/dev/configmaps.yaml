@@ -3,17 +3,29 @@ apiVersion: v1
 kind: ConfigMap
 
 metadata:
-    name: sweetrpg-PROJECT_NAME-env
+  name: api-env
 
 data:
-    DB_HOST: xxx
-    DB_USER: xxx
-    DB_NAME: xxx
-    DB_OPTS: "retryWrites=true&w=majority"
-    AUTH0_CALLBACK_URL: xxx
-    AUTH0_DOMAIN: xxx
-    AUTH0_LOGIN_URL: xxx
-    PORT: "1234"
-    SERVICE_CHECK_URL: xxx
-    HEALTH_CHECK_URL: xxx
-    REDIS_HOST: xxx
+  ENV: dev
+  LOG_LEVEL: WARN
+  # Database connection parts; only the password (DB_PW, in secrets.yaml) is sensitive.
+  DB_SCHEME: mongodb+srv
+  DB_HOST: cluster0.z9nxg.mongodb.net
+  DB_USER: initiative-api
+  DB_NAME: sweetrpg-initiative
+  DB_OPTS: retryWrites=true&w=majority
+  BUILD_INFO_PATH: /app/config/build-info.json
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo-distributor.observability.svc.cluster.local:4318/
+  PYROSCOPE_SERVER_ADDRESS: http://pyroscope.observability.svc.cluster.local:4040
+  PYROSCOPE_TENANT_ID: psw
+  # Namespace cache Service (infrastructure repo, initiative/cache; Application in
+  # clusters/dev/initiative/cache.yaml).
+  REDIS_HOST: cache.sweetrpg-initiative.svc.cluster.local
+  REDIS_PORT: "6379"
+  INGRESS_BASE_PATH: /api/0/initiative
+  INGRESS_HOST: dev.sweetrpg.com
+  INGRESS_SCHEMES: http,https
+  # Bearer tokens are verified at auth-api and the caller resolved at users-api; both required
+  # at startup (config.Load). No service token is involved (PADR-0037).
+  AUTH_API_URL: http://api-v1.sweetrpg-auth.svc.cluster.local:8000
+  USERS_API_URL: http://api-v1.sweetrpg-users.svc.cluster.local:8000

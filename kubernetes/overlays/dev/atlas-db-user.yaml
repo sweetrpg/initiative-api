@@ -1,0 +1,51 @@
+---
+# initiative-api's own database user, scoped to only its own database. The shared "sweetrpg"
+# user (readWriteAnyDatabase) is break-glass, not for service use. Same pattern as game-room-api,
+# admin-api and catalog-api.
+apiVersion: atlas.mongodb.com/v1
+kind: AtlasDatabaseUser
+
+metadata:
+  name: initiative-api
+
+spec:
+  databaseName: admin
+  username: initiative-api
+  passwordSecretRef:
+    name: initiative-api-db-credentials
+  projectRef:
+    name: sweetrpg
+    namespace: sweetrpg-db
+  roles:
+    - databaseName: sweetrpg-initiative
+      roleName: readWrite
+  x509Type: NONE
+
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+
+metadata:
+  name: initiative-api-db-credentials
+
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: akeyless
+    kind: ClusterSecretStore
+  target:
+    name: initiative-api-db-credentials
+    template:
+      metadata:
+        labels:
+          atlas.mongodb.com/type: credentials
+    creationPolicy: Owner
+  dataFrom:
+    # NOT YET PROVISIONED: /sweetrpg/initiative/api/db needs a DB_PASSWORD field in Akeyless before
+    # this resolves and the Atlas Operator can create the user with that password.
+    - extract:
+        key: /sweetrpg/initiative/api/db
+      rewrite:
+        - regexp:
+            source: "DB_PASSWORD"
+            target: "password"

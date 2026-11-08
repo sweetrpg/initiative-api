@@ -1,0 +1,22 @@
+---
+kind: Service
+apiVersion: v1
+
+metadata:
+  name: api-v0
+
+spec:
+  # Alias for "latest": the public Ingress's /api/0/initiative path and any in-cluster caller that
+  # wants latest-not-pinned targets this Service rather than api-v1. Its selector currently matches
+  # the same pods as api-v1 (the only version that exists); when a v2 ships, repoint `version` here
+  # at v2 while api-v1 keeps selecting v1 pods.
+  selector:
+    app.kubernetes.io/name: initiative-api
+    app.kubernetes.io/version: v1
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: initiative
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
