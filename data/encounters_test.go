@@ -2,6 +2,7 @@ package data
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -371,5 +372,52 @@ func TestWriteRejectsBadSettingsAndStaleRevision(t *testing.T) {
 	}
 	if _, err := r.Write(ctx, "u1", "u1", e.ID, 9, nil, st); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale err = %v, want ErrRevisionConflict", err)
+	}
+}
+
+func TestUpdateStateRejectsEmptyAndUnknownFields(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	for name, set := range map[string]map[string]any{"empty": {}, "settings field": {"name": "x"}} {
+		if _, err := r.updateState(ctx, "u1", "u1", e.ID, 1, set); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s: err = %v, want ErrInvalid", name, err)
+		}
+	}
+	if _, err := r.updateState(ctx, "", "", e.ID, 1, map[string]any{"round": 1}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty owner err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestMissingClassifiesButNeverGrantsAccess(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	if err := r.Missing(ctx, "u1", e.ID); err != nil {
+		t.Fatalf("visible record: err = %v, want nil", err)
+	}
+	if err := r.Missing(ctx, "u2", e.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other owner err = %v, want ErrForbidden", err)
+	}
+	if err := r.Missing(ctx, "u1", "absent"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("absent err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListAndCountRequireAnOwner(t *testing.T) {
+	r := newEncounters(t)
+	if _, err := r.List(ctx, "", Query{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("list err = %v, want ErrInvalid", err)
+	}
+	if _, err := r.Count(ctx, "", nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("count err = %v, want ErrInvalid", err)
+	}
+	if _, err := r.Count(ctx, "u1", []Filter{{Field: "owner_user_id", Op: OpEq, Values: []any{"u2"}}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("count by owner err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestHealthErrorNamesTheFieldAndReason(t *testing.T) {
+	msg := (&HealthError{Field: "hp", Reason: "too high"}).Error()
+	if !strings.Contains(msg, "hp") || !strings.Contains(msg, "too high") {
+		t.Fatalf("message %q should name the field and reason", msg)
 	}
 }
