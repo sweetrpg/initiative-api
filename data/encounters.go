@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -101,7 +102,7 @@ func (r *Encounters) Create(ctx context.Context, ownerUserID, actingUserID strin
 	if err := ValidateEncounter(e); err != nil {
 		return err
 	}
-	if err := r.checkHealth(ctx, e.GameSystemID, e.Combatants); err != nil {
+	if err := r.checkHealth(ctx, e.GameSystemID, e.Combatants, nil); err != nil {
 		return err
 	}
 	return r.Owned.Create(ctx, ownerUserID, actingUserID, e)
@@ -130,20 +131,33 @@ func validateCombatant(c Combatant) error {
 	return nil
 }
 
-// checkHealth validates every combatant's health against the game system definition. The system
-// is looked up only when some combatant has health values.
-func (r *Encounters) checkHealth(ctx context.Context, sysID string, cs []Combatant) error {
-	if !slices.ContainsFunc(cs, func(c Combatant) bool { return len(c.Health) > 0 }) {
+// checkHealth validates the health of each combatant in cs against the encounter's game system
+// definition (the default system when the encounter's has none). Only combatants that are new or
+// whose health differs from existing are checked, so a stored value that a later definition change
+// made invalid does not block unrelated edits. The system is looked up only when something needs
+// checking.
+func (r *Encounters) checkHealth(ctx context.Context, sysID string, cs, existing []Combatant) error {
+	before := make(map[string]map[string]int, len(existing))
+	for _, c := range existing {
+		before[c.ID] = c.Health
+	}
+	var changed []Combatant
+	for _, c := range cs {
+		if prev, ok := before[c.ID]; len(c.Health) > 0 && (!ok || !maps.Equal(prev, c.Health)) {
+			changed = append(changed, c)
+		}
+	}
+	if len(changed) == 0 {
 		return nil
 	}
-	sys, err := r.systems.Get(ctx, sysID)
+	sys, err := r.systems.GetOrDefault(ctx, sysID)
 	if errors.Is(err, ErrNotFound) {
-		return invalid("unknown game system %q", sysID)
+		return invalid("unknown game system %q and no default system is defined", sysID)
 	}
 	if err != nil {
 		return err
 	}
-	for _, c := range cs {
+	for _, c := range changed {
 		if err := CheckHealth(sys, c.Health); err != nil {
 			return err
 		}
@@ -175,7 +189,11 @@ func (r *Encounters) Write(ctx context.Context, ownerUserID, actingUserID, id st
 		if v, ok := settings["game_system_id"].(string); ok {
 			sysID = v
 		}
-		if err := r.checkHealth(ctx, sysID, st.Combatants); err != nil {
+		existing := cur.Combatants
+		if _, switched := settings["game_system_id"]; switched {
+			existing = nil // a new system: every combatant's health is checked afresh
+		}
+		if err := r.checkHealth(ctx, sysID, st.Combatants, existing); err != nil {
 			return Encounter{}, err
 		}
 	}

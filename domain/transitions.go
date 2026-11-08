@@ -40,7 +40,7 @@ func (s *Encounters) Reset(ctx context.Context, owner, actor, id string, rev int
 	if err != nil {
 		return data.Encounter{}, err
 	}
-	sys, err := s.systems.Get(ctx, cur.GameSystemID)
+	sys, err := s.systems.GetOrDefault(ctx, cur.GameSystemID)
 	if errors.Is(err, data.ErrNotFound) {
 		return data.Encounter{}, invalid("unknown game system %q", cur.GameSystemID)
 	}
