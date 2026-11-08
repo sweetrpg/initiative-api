@@ -1,0 +1,24 @@
+{
+  "characters": [
+    {
+      "health": {
+        "hp": 7
+      },
+      "id": "id1",
+      "kind": "adversary",
+      "name": "Goblin",
+      "notes": "sneaky"
+    }
+  ],
+  "created_at": "2026-01-01T00:00:00Z",
+  "created_by": "user-1",
+  "deleted_at": null,
+  "deleted_by": null,
+  "favorite": true,
+  "id": "GENERATED_ID",
+  "name": "Goblin Camp",
+  "owner_user_id": "user-1",
+  "revision": 1,
+  "updated_at": "2026-01-01T00:00:00Z",
+  "updated_by": "user-1"
+}
