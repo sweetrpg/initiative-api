@@ -3,13 +3,16 @@ kind: Service
 apiVersion: v1
 
 metadata:
-    name: sweetrpg-PROJECT_NAME
+  name: api-v1
 
 spec:
-    selector:
-        app: sweetrpg-PROJECT_NAME
-    type: ClusterIP
-    ports:
-        - name: http
-          port: PORT
-          targetPort: http
+  selector:
+    app.kubernetes.io/name: initiative-api
+    app.kubernetes.io/version: v1
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: initiative
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

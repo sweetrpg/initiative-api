@@ -3,81 +3,72 @@ apiVersion: apps/v1
 kind: Deployment
 
 metadata:
-    name: PROJECT_NAME
+  name: api-v1
 
 spec:
-    strategy:
-        rollingUpdate:
-            maxSurge: 1
-            maxUnavailable: 1
-        type: RollingUpdate
-    selector:
-        matchLabels:
-            platform: sweetrpg
-            app: APP_NAME
-            component: COMPONENT_NAME
-    template:
-        metadata:
-            labels:
-                platform: sweetrpg
-                app: APP_NAME
-                component: COMPONENT_NAME
-            annotations:
-                reloader.stakater.com/auto: "true"
-        spec:
-            serviceAccountName: PACKAGE-COMPONENT
-            imagePullSecrets:
-                - name: sweetrpg-registry
-            containers:
-                - name: PROJECT_NAME-app
-                  image: registry.sweetrpg.com/PROJECT_NAME:latest
-                  imagePullPolicy: Always
-                  envFrom:
-                      - configMapRef:
-                            name: PROJECT_NAME
-                      - configMapRef:
-                            name: PROJECT_NAME-env
-                      - secretRef:
-                            name: PROJECT_NAME
-                      - secretRef:
-                            name: PROJECT_NAME-env
-                  env:
-                      - name: NEW_RELIC_CONFIG_FILE
-                        value: /config/newrelic.ini
-                  ports:
-                      - containerPort: PORT
-                        name: http
-                  resources:
-                      requests:
-                          cpu: "20m"
-                          memory: "55Mi"
-                      limits:
-                          cpu: "100m"
-                          memory: "256Mi"
-                  livenessProbe:
-                      httpGet:
-                          path: /health/ping
-                          port: PORT
-                      initialDelaySeconds: 90
-                      timeoutSeconds: 10
-                  readinessProbe:
-                      httpGet:
-                          path: /health/ping
-                          port: PORT
-                      initialDelaySeconds: 30
-                      timeoutSeconds: 10
-                  volumeMounts:
-                      - mountPath: /data
-                        name: data
-                      - mountPath: /config
-                        name: config
-            volumes:
-                - name: config
-                  secret:
-                      secretName: PROJECT_NAME-config-env
-                      items:
-                          - key: newrelic.ini
-                            path: newrelic.ini
-                - name: data
-                  emptyDir: {}
-            restartPolicy: Always
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: initiative-api
+      app.kubernetes.io/version: v1
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      annotations:
+        reloader.stakater.com/auto: "true"
+        openfeature.dev/enabled: "true"
+        openfeature.dev/featureflagsource: "sweetrpg-system/initiative-api"
+    spec:
+      serviceAccountName: api
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: sweetrpg-registry
+      containers:
+        - name: app
+          image: initiative-api
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: api-common
+            - configMapRef:
+                name: api-env
+            - secretRef:
+                name: api-db
+            - secretRef:
+                name: api-cache
+          env:
+            - name: GOMEMLIMIT
+              value: "200MiB"
+            - name: GOGC
+              value: "90"
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "55Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          # Shallow /status/ping for both probes (PADR-0017): /status/health checks dependencies
+          # and must not gate routing or restarts.
+          livenessProbe:
+            httpGet:
+              path: /status/ping
+              port: http
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /status/ping
+              port: http
+            initialDelaySeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 10
+      restartPolicy: Always

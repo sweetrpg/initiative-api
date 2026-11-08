@@ -1,0 +1,26 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: sweetrpg-initiative
+
+resources:
+  - ../../base
+  - atlas-db-user.yaml
+  - configmaps.yaml
+  - ingress.yaml
+  - middlewares.yaml
+  - secrets.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: initiative-api
+      app.kubernetes.io/version: v1
+      app.kubernetes.io/component: api
+      app.kubernetes.io/part-of: initiative
+      com.sweetrpg/env: dev
+    includeSelectors: false
+    includeTemplates: true
+
+generatorOptions:
+  disableNameSuffixHash: true
