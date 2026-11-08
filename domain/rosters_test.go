@@ -65,8 +65,8 @@ func TestRosterIsOwnerScoped(t *testing.T) {
 	if _, err := s.Get(ctx, "u2", r.ID); !errors.Is(err, data.ErrNotFound) {
 		t.Fatalf("get err = %v, want ErrNotFound", err)
 	}
-	if _, err := s.AddCharacter(ctx, "u2", "u2", r.ID, 1, goblin()); !errors.Is(err, data.ErrNotFound) {
-		t.Fatalf("add err = %v, want ErrNotFound (read-first edits cannot see other owners' rosters)", err)
+	if _, err := s.AddCharacter(ctx, "u2", "u2", r.ID, 1, goblin()); !errors.Is(err, data.ErrForbidden) {
+		t.Fatalf("add err = %v, want ErrForbidden", err)
 	}
 }
 
@@ -143,14 +143,43 @@ func TestCreateEncounterFromRosterCopiesCharacters(t *testing.T) {
 	}
 }
 
-func TestCombatantEditsDoNotTouchRosterOrOtherEncounters(t *testing.T) {
+func TestCharacterMapsDoNotAliasCallerInput(t *testing.T) {
+	s := newService(t)
+	in := goblin()
+	r := mustRoster(t, s, "u1", in)
+	in.Health["hp"] = 99
+	if r.Characters[0].Health["hp"] != 7 {
+		t.Fatalf("roster health = %v, want 7: caller's map is aliased", r.Characters[0].Health)
+	}
+}
+
+func TestOtherOwnersRosterWritesAreForbidden(t *testing.T) {
 	s := newService(t)
 	r := mustRoster(t, s, "u1", goblin())
-	e1, _ := s.CreateEncounterFromRoster(ctx, "u1", "u1", r.ID, baseEncounter())
-	e1.Combatants[0].Health["hp"] = 1
-	got, _ := s.Get(ctx, "u1", r.ID)
-	if got.Characters[0].Health["hp"] != 7 || got.Revision != r.Revision {
-		t.Fatalf("roster changed: %+v", got)
+	id := r.Characters[0].ID
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"rename", func() error { _, err := s.Rename(ctx, "u2", "u2", r.ID, 1, "x", false); return err }},
+		{"delete", func() error { return s.Delete(ctx, "u2", "u2", r.ID, 1) }},
+		{"add character", func() error { _, err := s.AddCharacter(ctx, "u2", "u2", r.ID, 1, goblin()); return err }},
+		{"update character", func() error { _, err := s.UpdateCharacter(ctx, "u2", "u2", r.ID, 1, id, goblin()); return err }},
+		{"remove character", func() error { _, err := s.RemoveCharacter(ctx, "u2", "u2", r.ID, 1, id); return err }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(); !errors.Is(err, data.ErrForbidden) {
+				t.Fatalf("err = %v, want ErrForbidden", err)
+			}
+		})
+	}
+}
+
+func TestMissingRosterWritesAreNotFound(t *testing.T) {
+	s := newService(t)
+	if _, err := s.AddCharacter(ctx, "u1", "u1", "nope", 1, goblin()); !errors.Is(err, data.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 

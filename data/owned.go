@@ -184,6 +184,16 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 	return err
 }
 
+// Missing explains why owner's scoped read of id found nothing: ErrNotFound when no live record
+// exists, ErrForbidden when it belongs to another owner. Call it only after a scoped read or write
+// has already failed; it never grants access. It returns nil if the record is visible to owner.
+func (r *Owned[T, P]) Missing(ctx context.Context, owner, id string) error {
+	if _, err := r.classify(ctx, owner, id); !errors.Is(err, ErrRevisionConflict) {
+		return err
+	}
+	return nil
+}
+
 // classify runs only after an owner-scoped write matched nothing. It does an owner-agnostic
 // lookup to tell 404 from 403 from 409; it never grants access.
 func (r *Owned[T, P]) classify(ctx context.Context, owner, id string) (T, error) {

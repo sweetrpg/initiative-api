@@ -5,6 +5,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -109,6 +110,13 @@ func (s *Rosters) Delete(ctx context.Context, owner, actor, id string, rev int64
 // compare-and-set on rev.
 func (s *Rosters) editCharacters(ctx context.Context, owner, actor, id string, rev int64, edit func([]data.Character) ([]data.Character, error)) (data.Roster, error) {
 	cur, err := s.rosters.Get(ctx, owner, id)
+	if errors.Is(err, data.ErrNotFound) {
+		// The read is only needed to build the new character list; classify a miss as 403 or 404
+		// like the write paths do.
+		if cerr := s.rosters.Missing(ctx, owner, id); cerr != nil {
+			return data.Roster{}, cerr
+		}
+	}
 	if err != nil {
 		return data.Roster{}, err
 	}
