@@ -234,3 +234,60 @@ func TestRemovingCurrentInTheMiddleKeepsRound(t *testing.T) {
 		t.Fatalf("err=%v current=%q round=%d, want B in round 1", err, e.CurrentCombatantID, e.Round)
 	}
 }
+
+func noSystemService(t *testing.T) *Encounters {
+	t.Helper()
+	s := newTurnService(t)
+	zero := 0
+	none := data.GameSystem{ID: data.DefaultSystemID, Name: "No System", Family: "simple",
+		Fields: []data.TrackerField{{Key: "health", Label: "Health", Kind: data.FieldCounter, Def: 1, Min: &zero}}}
+	if _, err := s.systems.Upsert(ctx, none); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func mixedKinds() []data.Combatant {
+	return []data.Combatant{scored("Goblin", data.KindAdversary, 20), scored("Pia", data.KindPC, 3), scored("Pat", data.KindPC, 9)}
+}
+
+func TestNoSystemOrdersByInitiativeOnlyEvenWithPCVsAdversary(t *testing.T) {
+	s := noSystemService(t)
+	e, err := s.Create(ctx, "u1", "u1", data.Encounter{Name: "x", GameSystemID: data.DefaultSystemID,
+		Ordering: data.OrderPCVsAdversary, TieBreaker: data.TieQuery, Combatants: mixedKinds()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err = s.Start(ctx, "u1", "u1", e.ID, e.Revision)
+	if err != nil || !slices.Equal(names(e, e.TurnQueue), []string{"Goblin", "Pat", "Pia"}) {
+		t.Fatalf("err=%v queue=%v, want initiative only: Goblin, Pat, Pia", err, names(e, e.TurnQueue))
+	}
+}
+
+func TestPCVsAdversaryGroupsOnOtherSystems(t *testing.T) {
+	s := noSystemService(t)
+	e, err := s.Create(ctx, "u1", "u1", data.Encounter{Name: "x", GameSystemID: "test",
+		Ordering: data.OrderPCVsAdversary, TieBreaker: data.TieQuery, Combatants: mixedKinds()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err = s.Start(ctx, "u1", "u1", e.ID, e.Revision)
+	if err != nil || !slices.Equal(names(e, e.TurnQueue), []string{"Pat", "Pia", "Goblin"}) {
+		t.Fatalf("err=%v queue=%v, want PCs then adversary", err, names(e, e.TurnQueue))
+	}
+}
+
+func TestSwitchingSystemRecomputesTheQueue(t *testing.T) {
+	s := noSystemService(t)
+	e, _ := s.Create(ctx, "u1", "u1", data.Encounter{Name: "x", GameSystemID: "test",
+		Ordering: data.OrderPCVsAdversary, TieBreaker: data.TieQuery, Combatants: mixedKinds()})
+	e, _ = s.Start(ctx, "u1", "u1", e.ID, e.Revision)
+	e, err := s.UpdateSettings(ctx, "u1", "u1", e.ID, e.Revision, map[string]any{"game_system_id": data.DefaultSystemID})
+	if err != nil || !slices.Equal(names(e, e.TurnQueue), []string{"Goblin", "Pat", "Pia"}) {
+		t.Fatalf("err=%v queue=%v, want initiative only after switching to No System", err, names(e, e.TurnQueue))
+	}
+	e, err = s.UpdateSettings(ctx, "u1", "u1", e.ID, e.Revision, map[string]any{"game_system_id": "test"})
+	if err != nil || !slices.Equal(names(e, e.TurnQueue), []string{"Pat", "Pia", "Goblin"}) {
+		t.Fatalf("err=%v queue=%v, want grouping back on another system", err, names(e, e.TurnQueue))
+	}
+}
