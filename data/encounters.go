@@ -34,17 +34,39 @@ func ValidateEncounter(e *Encounter) error {
 	if !slices.Contains(tieBreakers, e.TieBreaker) {
 		return fmt.Errorf("%w: tie_breaker %q", ErrInvalid, e.TieBreaker)
 	}
-	if !slices.Contains(statuses, e.Status) {
-		return fmt.Errorf("%w: status %q", ErrInvalid, e.Status)
+	return ValidateState(EncounterState{Status: e.Status, Round: e.Round,
+		CurrentCombatantID: e.CurrentCombatantID, TurnQueue: e.TurnQueue, Combatants: e.Combatants})
+}
+
+// EncounterState is the live combat state of an encounter, written as one unit.
+type EncounterState struct {
+	Status             string
+	Round              int
+	CurrentCombatantID string
+	TurnQueue          []string
+	Combatants         []Combatant
+}
+
+// ValidateState checks status, a non-negative round, unique combatant IDs, and that the queue and
+// the current combatant refer to combatants of this state.
+func ValidateState(st EncounterState) error {
+	if !slices.Contains(statuses, st.Status) {
+		return fmt.Errorf("%w: status %q", ErrInvalid, st.Status)
 	}
-	ids := make(map[string]bool, len(e.Combatants))
-	for _, c := range e.Combatants {
+	if st.Round < 0 {
+		return fmt.Errorf("%w: round %d", ErrInvalid, st.Round)
+	}
+	ids := make(map[string]bool, len(st.Combatants))
+	for _, c := range st.Combatants {
 		if ids[c.ID] {
 			return fmt.Errorf("%w: duplicate combatant id %q", ErrInvalid, c.ID)
 		}
 		ids[c.ID] = true
 	}
-	for _, id := range e.TurnQueue {
+	if st.CurrentCombatantID != "" && !ids[st.CurrentCombatantID] {
+		return fmt.Errorf("%w: current combatant %q is not a combatant", ErrInvalid, st.CurrentCombatantID)
+	}
+	for _, id := range st.TurnQueue {
 		if !ids[id] {
 			return fmt.Errorf("%w: turn_queue entry %q is not a combatant", ErrInvalid, id)
 		}
@@ -82,4 +104,30 @@ func (r *Encounters) Update(ctx context.Context, ownerUserID, actingUserID, id s
 		return Encounter{}, err
 	}
 	return r.Owned.Update(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+}
+
+// SetState validates st, then writes it as the encounter's combat state with the revision check.
+func (r *Encounters) SetState(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, st EncounterState) (Encounter, error) {
+	if err := ValidateState(st); err != nil {
+		return Encounter{}, err
+	}
+	set := map[string]any{
+		"status": st.Status, "round": st.Round, "current_combatant_id": st.CurrentCombatantID,
+		"turn_queue": nonNil(st.TurnQueue), "combatants": nonNilC(st.Combatants),
+	}
+	return r.UpdateState(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func nonNilC(s []Combatant) []Combatant {
+	if s == nil {
+		return []Combatant{}
+	}
+	return s
 }

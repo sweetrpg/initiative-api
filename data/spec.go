@@ -18,7 +18,9 @@ type Spec struct {
 	Projectable []string
 	// Updatable lists the fields Owned.Update may set. State changes with their own rules
 	// (credential revocation, last use, scopes, secret) are not here; they get dedicated functions.
-	Updatable     []string
+	Updatable []string
+	// StateFields lists the fields only Owned.UpdateState may set: results of domain rules.
+	StateFields   []string
 	UnsetOnDelete []string
 	// ConflictOnDuplicate maps a unique-index rejection to ErrConflict. Set it only where the
 	// collection's one unique index is a user-facing constraint (theme slot); elsewhere the raw
@@ -59,6 +61,7 @@ var (
 		Sortable:    []string{"name", "status", "position", "created_at", "updated_at"},
 		Projectable: []string{"name", "game_system_id", "ordering", "tie_breaker", "labels", "colorblind", "theme_id", "status", "round", "current_combatant_id", "turn_queue", "position", "combatants", "revision", "owner_user_id", "created_at", "updated_at", "created_by", "updated_by"},
 		Updatable:   []string{"name", "game_system_id", "ordering", "tie_breaker", "labels", "colorblind", "theme_id", "position"},
+		StateFields: []string{"status", "round", "current_combatant_id", "turn_queue", "combatants"},
 		Indexes: []store.IndexSpec{
 			{Name: "owner_position", Keys: asc("owner_user_id", "position")},
 			{Name: "owner_name", Keys: asc("owner_user_id", "name")},

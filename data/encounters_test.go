@@ -224,3 +224,42 @@ func TestEncounterSpecHasNoSessionField(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateStateWritesOnlyStateFields(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	if _, err := r.UpdateState(ctx, "u1", "u1", e.ID, 1, map[string]any{"name": "x"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestSetStateValidates(t *testing.T) {
+	tests := []struct {
+		name string
+		st   EncounterState
+	}{
+		{"bad status", EncounterState{Status: "paused"}},
+		{"negative round", EncounterState{Status: StatusActive, Round: -1}},
+		{"current not a combatant", EncounterState{Status: StatusActive, CurrentCombatantID: "ghost"}},
+		{"queue not a combatant", EncounterState{Status: StatusActive, TurnQueue: []string{"ghost"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newEncounters(t)
+			e := newEncounter(t, r, "u1")
+			if _, err := r.SetState(ctx, "u1", "u1", e.ID, 1, tt.st); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("err = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestSetStateAdvancesRevisionOnce(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	got, err := r.SetState(ctx, "u1", "u1", e.ID, 1, EncounterState{Status: StatusActive, Round: 1,
+		CurrentCombatantID: "c1", TurnQueue: []string{"c1"}, Combatants: []Combatant{{ID: "c1"}}})
+	if err != nil || got.Revision != 2 || got.Status != StatusActive || got.CurrentCombatantID != "c1" {
+		t.Fatalf("err=%v got=%+v", err, got)
+	}
+}
