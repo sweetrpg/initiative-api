@@ -144,10 +144,10 @@ func (r *Owned[T, P]) Update(ctx context.Context, ownerUserID, actingUserID, id 
 	return r.apply(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
 }
 
-// UpdateState is Update for the spec's StateFields: values computed by domain rules, never taken
+// updateState is Update for the spec's StateFields: values computed by domain rules, never taken
 // from client input. Everything else about the write is identical (owner-scoped, compare-and-set,
 // classified failures).
-func (r *Owned[T, P]) UpdateState(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {
+func (r *Owned[T, P]) updateState(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {
 	var out T
 	if err := requireOwnerActor(ownerUserID, actingUserID); err != nil {
 		return out, err

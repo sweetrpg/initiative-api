@@ -40,15 +40,19 @@ func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.E
 	if enc.Name == "" {
 		return data.Encounter{}, invalid("encounter name is required")
 	}
-	if _, err := s.systems.Get(ctx, enc.GameSystemID); err != nil {
-		if errors.Is(err, data.ErrNotFound) {
-			return data.Encounter{}, invalid("unknown game system %q", enc.GameSystemID)
-		}
+	sys, err := s.systems.Get(ctx, enc.GameSystemID)
+	if errors.Is(err, data.ErrNotFound) {
+		return data.Encounter{}, invalid("unknown game system %q", enc.GameSystemID)
+	}
+	if err != nil {
 		return data.Encounter{}, err
 	}
 	combatants := make([]data.Combatant, 0, len(enc.Combatants))
 	for _, c := range enc.Combatants {
 		n, err := newCombatant(c, s.newID())
+		if err == nil {
+			err = CheckHealth(sys, n.Health)
+		}
 		if err != nil {
 			return data.Encounter{}, err
 		}
@@ -82,15 +86,23 @@ func (s *Encounters) Delete(ctx context.Context, owner, actor, id string, rev in
 	return s.repo.SoftDelete(ctx, owner, actor, id, rev)
 }
 
-// edit reads the encounter, applies change to its state, and writes the result compare-and-set on
-// rev. A missed read is classified 403/404 like the write paths.
-func (s *Encounters) edit(ctx context.Context, owner, actor, id string, rev int64, change func(*data.EncounterState) error) (data.Encounter, error) {
+// load reads owner's encounter. A miss is classified 403 (another owner's) or 404 (absent) like
+// the write paths.
+func (s *Encounters) load(ctx context.Context, owner, id string) (data.Encounter, error) {
 	cur, err := s.repo.Get(ctx, owner, id)
 	if errors.Is(err, data.ErrNotFound) {
 		if cerr := s.repo.Missing(ctx, owner, id); cerr != nil {
 			return data.Encounter{}, cerr
 		}
 	}
+	return cur, err
+}
+
+// edit reads the encounter, applies change to its state, and writes the result compare-and-set on
+// rev. A missed read is classified 403/404 like the write paths.
+// change also receives the encounter's game system ID, for health validation.
+func (s *Encounters) edit(ctx context.Context, owner, actor, id string, rev int64, change func(*data.EncounterState, string) error) (data.Encounter, error) {
+	cur, err := s.load(ctx, owner, id)
 	if err != nil {
 		return data.Encounter{}, err
 	}
@@ -98,7 +110,7 @@ func (s *Encounters) edit(ctx context.Context, owner, actor, id string, rev int6
 		Status: cur.Status, Round: cur.Round, CurrentCombatantID: cur.CurrentCombatantID,
 		TurnQueue: slices.Clone(cur.TurnQueue), Combatants: slices.Clone(cur.Combatants),
 	}
-	if err := change(&st); err != nil {
+	if err := change(&st, cur.GameSystemID); err != nil {
 		return data.Encounter{}, err
 	}
 	return s.repo.SetState(ctx, owner, actor, id, rev, st)

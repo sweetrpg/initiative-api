@@ -218,11 +218,111 @@ func TestResetRestoresDraftDefaultsAndClearsConditions(t *testing.T) {
 	}
 }
 
-func TestResetOfOthersEncounterIsNotFound(t *testing.T) {
+func TestResetOfOthersEncounterIsForbiddenAndAbsentIsNotFound(t *testing.T) {
 	s := newEncService(t)
 	e := newEnc(t, s, "u1")
-	if _, err := s.Reset(ctx, "u2", "u2", e.ID, 1); !errors.Is(err, data.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+	if _, err := s.Reset(ctx, "u2", "u2", e.ID, 1); !errors.Is(err, data.ErrForbidden) {
+		t.Fatalf("other owner err = %v, want ErrForbidden", err)
+	}
+	if _, err := s.Reset(ctx, "u1", "u1", "nope", 1); !errors.Is(err, data.ErrNotFound) {
+		t.Fatalf("absent err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestResetClearsStaleTurnQueue(t *testing.T) {
+	s := newEncService(t)
+	e := newEnc(t, s, "u1", orc())
+	e, err := s.repo.SetState(ctx, "u1", "u1", e.ID, e.Revision, data.EncounterState{
+		Status: data.StatusActive, Round: 2, CurrentCombatantID: "c1", TurnQueue: []string{"c1"}, Combatants: e.Combatants})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err = s.Reset(ctx, "u1", "u1", e.ID, e.Revision)
+	if err != nil || len(e.TurnQueue) != 0 {
+		t.Fatalf("err=%v queue=%v, want empty", err, e.TurnQueue)
+	}
+}
+
+func TestEndFromEndedIsRejected(t *testing.T) {
+	s := newEncService(t)
+	e := newEnc(t, s, "u1")
+	e, _ = s.Start(ctx, "u1", "u1", e.ID, e.Revision)
+	e, _ = s.End(ctx, "u1", "u1", e.ID, e.Revision)
+	if _, err := s.End(ctx, "u1", "u1", e.ID, e.Revision); !errors.Is(err, ErrTransition) {
+		t.Fatalf("err = %v, want ErrTransition", err)
+	}
+}
+
+func TestHealthIsValidatedAgainstTheDefinition(t *testing.T) {
+	s := newEncService(t)
+	e := newEnc(t, s, "u1", orc())
+	low, ok := -5, map[string]int{"hp": 4}
+	tests := []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{"add below min", func() error {
+			c := orc()
+			c.Health = map[string]int{"hp": low}
+			_, err := s.AddCombatant(ctx, "u1", "u1", e.ID, 1, c)
+			return err
+		}, "hp"},
+		{"add unknown key", func() error {
+			c := orc()
+			c.Health = map[string]int{"mana": 1}
+			_, err := s.AddCombatant(ctx, "u1", "u1", e.ID, 1, c)
+			return err
+		}, "mana"},
+		{"patch below min", func() error {
+			_, err := s.UpdateCombatant(ctx, "u1", "u1", e.ID, 1, "c1", CombatantPatch{Health: map[string]int{"hp": low}})
+			return err
+		}, "hp"},
+		{"create below min", func() error {
+			c := orc()
+			c.Health = map[string]int{"hp": low}
+			_, err := s.Create(ctx, "u1", "u1", data.Encounter{Name: "x", GameSystemID: "test",
+				Ordering: data.OrderHighToLow, TieBreaker: data.TieRandom, Combatants: []data.Combatant{c}})
+			return err
+		}, "hp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			var he *HealthError
+			if !errors.Is(err, data.ErrInvalid) || !errors.As(err, &he) || he.Field != tt.want {
+				t.Fatalf("err = %v, want HealthError on %q", err, tt.want)
+			}
+		})
+	}
+	if _, err := s.UpdateCombatant(ctx, "u1", "u1", e.ID, 1, "c1", CombatantPatch{Health: ok}); err != nil {
+		t.Fatalf("valid health rejected: %v", err)
+	}
+}
+
+func TestCheckHealthBounds(t *testing.T) {
+	zero, max := 0, 20
+	sys := data.GameSystem{Fields: []data.TrackerField{
+		{Key: "hp", Min: &zero, MaxRef: "max_hp"},
+		{Key: "max_hp", Min: &zero, Max: &max},
+	}}
+	tests := []struct {
+		name string
+		h    map[string]int
+		bad  bool
+	}{
+		{"ok", map[string]int{"hp": 5, "max_hp": 10}, false},
+		{"at min", map[string]int{"hp": 0}, false},
+		{"above max", map[string]int{"max_hp": 21}, true},
+		{"above max_ref", map[string]int{"hp": 11, "max_hp": 10}, true},
+		{"max_ref absent", map[string]int{"hp": 50}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := CheckHealth(sys, tt.h); (err != nil) != tt.bad {
+				t.Fatalf("err = %v, bad want %v", err, tt.bad)
+			}
+		})
 	}
 }
 

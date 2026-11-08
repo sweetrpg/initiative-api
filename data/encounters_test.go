@@ -225,10 +225,10 @@ func TestEncounterSpecHasNoSessionField(t *testing.T) {
 	}
 }
 
-func TestUpdateStateWritesOnlyStateFields(t *testing.T) {
+func TestStateWriteOnlyWritesOnlyStateFields(t *testing.T) {
 	r := newEncounters(t)
 	e := newEncounter(t, r, "u1")
-	if _, err := r.UpdateState(ctx, "u1", "u1", e.ID, 1, map[string]any{"name": "x"}); !errors.Is(err, ErrInvalid) {
+	if _, err := r.updateState(ctx, "u1", "u1", e.ID, 1, map[string]any{"name": "x"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
 }
@@ -261,5 +261,15 @@ func TestSetStateAdvancesRevisionOnce(t *testing.T) {
 		CurrentCombatantID: "c1", TurnQueue: []string{"c1"}, Combatants: []Combatant{{ID: "c1"}}})
 	if err != nil || got.Revision != 2 || got.Status != StatusActive || got.CurrentCombatantID != "c1" {
 		t.Fatalf("err=%v got=%+v", err, got)
+	}
+}
+
+func TestSetStateRejectsDuplicateCombatantID(t *testing.T) {
+	r := newEncounters(t)
+	e := newEncounter(t, r, "u1")
+	_, err := r.SetState(ctx, "u1", "u1", e.ID, 1, EncounterState{Status: StatusActive,
+		Combatants: []Combatant{{ID: "c1"}, {ID: "c1"}}})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
 	}
 }

@@ -11,7 +11,7 @@ import (
 // Start moves a draft encounter to active at round 1. The current combatant is chosen by the
 // turn engine once the queue exists.
 func (s *Encounters) Start(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState) error {
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
 		if st.Status != data.StatusDraft {
 			return fmt.Errorf("%w: cannot start from %s", ErrTransition, st.Status)
 		}
@@ -22,7 +22,7 @@ func (s *Encounters) Start(ctx context.Context, owner, actor, id string, rev int
 
 // End moves an active encounter to ended.
 func (s *Encounters) End(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState) error {
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
 		if st.Status != data.StatusActive {
 			return fmt.Errorf("%w: cannot end from %s", ErrTransition, st.Status)
 		}
@@ -31,11 +31,11 @@ func (s *Encounters) End(ctx context.Context, owner, actor, id string, rev int64
 	})
 }
 
-// Reset returns the encounter to draft at round 0 with no current combatant, clears every
+// Reset returns the encounter to draft at round 0 with no current combatant and an empty turn queue, clears every
 // combatant's conditions, and sets health values back to the game system's defaults. Combatants,
 // their initiative, and removed marks are kept.
 func (s *Encounters) Reset(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
-	cur, err := s.repo.Get(ctx, owner, id)
+	cur, err := s.load(ctx, owner, id)
 	if err != nil {
 		return data.Encounter{}, err
 	}
@@ -47,8 +47,8 @@ func (s *Encounters) Reset(ctx context.Context, owner, actor, id string, rev int
 	for _, f := range sys.Fields {
 		defaults[f.Key] = f.Def
 	}
-	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState) error {
-		st.Status, st.Round, st.CurrentCombatantID = data.StatusDraft, 0, ""
+	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ string) error {
+		st.Status, st.Round, st.CurrentCombatantID, st.TurnQueue = data.StatusDraft, 0, "", nil
 		for i := range st.Combatants {
 			c := &st.Combatants[i]
 			c.Conditions = []data.Condition{}

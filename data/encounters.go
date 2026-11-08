@@ -115,7 +115,7 @@ func (r *Encounters) SetState(ctx context.Context, ownerUserID, actingUserID, id
 		"status": st.Status, "round": st.Round, "current_combatant_id": st.CurrentCombatantID,
 		"turn_queue": nonNil(st.TurnQueue), "combatants": nonNilC(st.Combatants),
 	}
-	return r.UpdateState(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+	return r.updateState(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
 }
 
 func nonNil(s []string) []string {
