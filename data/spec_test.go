@@ -22,7 +22,7 @@ func TestEnsureIndexesCoversEveryCollection(t *testing.T) {
 }
 
 func TestOwnerScopedIndexesLeadWithOwner(t *testing.T) {
-	for _, s := range []Spec{RosterSpec, ThemeSpec, CredentialSpec} {
+	for _, s := range []Spec{RosterSpec, EncounterSpec, ThemeSpec, CredentialSpec} {
 		for _, ix := range s.Indexes {
 			if ix.Name == "secret_hash" { // global lookup by presented secret
 				continue

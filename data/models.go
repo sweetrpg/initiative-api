@@ -9,6 +9,7 @@ import (
 // Collection names.
 const (
 	CollectionRosters     = "rosters"
+	CollectionEncounters  = "encounters"
 	CollectionThemes      = "themes"
 	CollectionGameSystems = "game_systems"
 	CollectionCredentials = "integration_credentials"
@@ -45,6 +46,74 @@ type Roster struct {
 	Name       string      `bson:"name" json:"name"`
 	Favorite   bool        `bson:"favorite" json:"favorite"`
 	Characters []Character `bson:"characters" json:"characters"`
+}
+
+// Encounter orderings.
+const (
+	OrderHighToLow     = "highToLow"
+	OrderLowToHigh     = "lowToHigh"
+	OrderPCVsAdversary = "pcVsAdversary"
+	OrderPlayerManaged = "playerManaged"
+)
+
+// Encounter tie breakers.
+const (
+	TieRandom       = "random"
+	TieAlphabetical = "alphabetical"
+	TieQuery        = "query"
+)
+
+// Encounter statuses.
+const (
+	StatusDraft  = "draft"
+	StatusActive = "active"
+	StatusEnded  = "ended"
+)
+
+// Condition is a named effect on a combatant. RoundsRemaining is nil for an open-ended condition.
+type Condition struct {
+	Name            string `bson:"name" json:"name"`
+	RoundsRemaining *int   `bson:"rounds_remaining,omitempty" json:"rounds_remaining,omitempty"`
+}
+
+// Combatant is an entry in an encounter, embedded in it. Initiative is nil until set. Health
+// holds current values keyed by the field keys of the encounter's game system definition.
+// Removed combatants stay in the document so they can be restored.
+type Combatant struct {
+	ID                string            `bson:"id" json:"id"`
+	Name              string            `bson:"name" json:"name"`
+	Kind              string            `bson:"kind" json:"kind"`
+	Initiative        *float64          `bson:"initiative,omitempty" json:"initiative,omitempty"`
+	Health            map[string]int    `bson:"health,omitempty" json:"health,omitempty"`
+	Conditions        []Condition       `bson:"conditions" json:"conditions"`
+	Notes             string            `bson:"notes" json:"notes"`
+	Removed           bool              `bson:"removed" json:"removed"`
+	SourceCharacterID string            `bson:"source_character_id,omitempty" json:"source_character_id,omitempty"`
+	ExternalRefs      map[string]string `bson:"external_refs,omitempty" json:"external_refs,omitempty"`
+}
+
+// Encounter is one revisioned document holding settings, live combat state, and its combatants
+// (PADR-0033): no separate combat-state record, so every change is one atomic write. TurnQueue
+// holds combatant IDs in turn order and is computed by the server. Position is the owner's
+// launcher display order. Soft-deleted (PADR-0027: user-owned domain data).
+//
+// Session membership (session_id, controllers, hidden combatants) is not modeled: it needs the
+// OpenFGA-backed access path of PADR-0035, so every encounter here is private to its owner.
+type Encounter struct {
+	Meta               `bson:",inline"`
+	Name               string      `bson:"name" json:"name"`
+	GameSystemID       string      `bson:"game_system_id" json:"game_system_id"`
+	Ordering           string      `bson:"ordering" json:"ordering"`
+	TieBreaker         string      `bson:"tie_breaker" json:"tie_breaker"`
+	Labels             bool        `bson:"labels" json:"labels"`
+	Colorblind         bool        `bson:"colorblind" json:"colorblind"`
+	ThemeID            string      `bson:"theme_id,omitempty" json:"theme_id,omitempty"`
+	Status             string      `bson:"status" json:"status"`
+	Round              int         `bson:"round" json:"round"`
+	CurrentCombatantID string      `bson:"current_combatant_id,omitempty" json:"current_combatant_id,omitempty"`
+	TurnQueue          []string    `bson:"turn_queue" json:"turn_queue"`
+	Position           int         `bson:"position" json:"position"`
+	Combatants         []Combatant `bson:"combatants" json:"combatants"`
 }
 
 // Theme is a user's custom theme. Slot is the numbered editable slot it occupies; soft delete
