@@ -141,6 +141,30 @@ func (r *Owned[T, P]) Update(ctx context.Context, ownerUserID, actingUserID, id 
 	if err := validateSet(r.spec, set); err != nil {
 		return out, err
 	}
+	return r.apply(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+}
+
+// updateState is Update for the spec's StateFields: values computed by domain rules, never taken
+// from client input. Everything else about the write is identical (owner-scoped, compare-and-set,
+// classified failures).
+func (r *Owned[T, P]) updateState(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {
+	var out T
+	if err := requireOwnerActor(ownerUserID, actingUserID); err != nil {
+		return out, err
+	}
+	if len(set) == 0 {
+		return out, fmt.Errorf("%w: nothing to update", ErrInvalid)
+	}
+	for k := range set {
+		if !in(r.spec.StateFields, k) {
+			return out, fmt.Errorf("%w: field %q is not a state field of %s", ErrInvalid, k, r.spec.Name)
+		}
+	}
+	return r.apply(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+}
+
+func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {
+	var out T
 	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
 	update := bson.D{
 		{Key: "$set", Value: setDoc(set,

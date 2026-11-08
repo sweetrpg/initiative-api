@@ -2,8 +2,10 @@ package data
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/sweetrpg/initiative-api/store"
 )
@@ -18,11 +20,12 @@ var (
 // queue references before any write reaches the collection.
 type Encounters struct {
 	*Owned[Encounter, *Encounter]
+	systems *SystemRepo
 }
 
 // NewEncounters builds the encounter repository for db.
 func NewEncounters(db store.Database) *Encounters {
-	return &Encounters{NewOwned[Encounter](db, EncounterSpec)}
+	return &Encounters{Owned: NewOwned[Encounter](db, EncounterSpec), systems: NewSystemRepo(db)}
 }
 
 // ValidateEncounter checks a whole encounter document: ordering, tie breaker, and status come
@@ -34,17 +37,42 @@ func ValidateEncounter(e *Encounter) error {
 	if !slices.Contains(tieBreakers, e.TieBreaker) {
 		return fmt.Errorf("%w: tie_breaker %q", ErrInvalid, e.TieBreaker)
 	}
-	if !slices.Contains(statuses, e.Status) {
-		return fmt.Errorf("%w: status %q", ErrInvalid, e.Status)
+	return ValidateState(EncounterState{Status: e.Status, Round: e.Round,
+		CurrentCombatantID: e.CurrentCombatantID, TurnQueue: e.TurnQueue, Combatants: e.Combatants})
+}
+
+// EncounterState is the live combat state of an encounter, written as one unit.
+type EncounterState struct {
+	Status             string
+	Round              int
+	CurrentCombatantID string
+	TurnQueue          []string
+	Combatants         []Combatant
+}
+
+// ValidateState checks status, a non-negative round, unique combatant IDs, and that the queue and
+// the current combatant refer to combatants of this state.
+func ValidateState(st EncounterState) error {
+	if !slices.Contains(statuses, st.Status) {
+		return fmt.Errorf("%w: status %q", ErrInvalid, st.Status)
 	}
-	ids := make(map[string]bool, len(e.Combatants))
-	for _, c := range e.Combatants {
+	if st.Round < 0 {
+		return fmt.Errorf("%w: round %d", ErrInvalid, st.Round)
+	}
+	ids := make(map[string]bool, len(st.Combatants))
+	for _, c := range st.Combatants {
+		if err := validateCombatant(c); err != nil {
+			return err
+		}
 		if ids[c.ID] {
 			return fmt.Errorf("%w: duplicate combatant id %q", ErrInvalid, c.ID)
 		}
 		ids[c.ID] = true
 	}
-	for _, id := range e.TurnQueue {
+	if st.CurrentCombatantID != "" && !ids[st.CurrentCombatantID] {
+		return fmt.Errorf("%w: current combatant %q is not a combatant", ErrInvalid, st.CurrentCombatantID)
+	}
+	for _, id := range st.TurnQueue {
 		if !ids[id] {
 			return fmt.Errorf("%w: turn_queue entry %q is not a combatant", ErrInvalid, id)
 		}
@@ -73,6 +101,9 @@ func (r *Encounters) Create(ctx context.Context, ownerUserID, actingUserID strin
 	if err := ValidateEncounter(e); err != nil {
 		return err
 	}
+	if err := r.checkHealth(ctx, e.GameSystemID, e.Combatants); err != nil {
+		return err
+	}
 	return r.Owned.Create(ctx, ownerUserID, actingUserID, e)
 }
 
@@ -82,4 +113,87 @@ func (r *Encounters) Update(ctx context.Context, ownerUserID, actingUserID, id s
 		return Encounter{}, err
 	}
 	return r.Owned.Update(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+}
+
+func validateCombatant(c Combatant) error {
+	if strings.TrimSpace(c.Name) == "" {
+		return fmt.Errorf("%w: combatant %q has no name", ErrInvalid, c.ID)
+	}
+	if !slices.Contains(Kinds, c.Kind) {
+		return fmt.Errorf("%w: combatant %q kind %q", ErrInvalid, c.ID, c.Kind)
+	}
+	for _, cond := range c.Conditions {
+		if strings.TrimSpace(cond.Name) == "" || (cond.RoundsRemaining != nil && *cond.RoundsRemaining < 1) {
+			return fmt.Errorf("%w: combatant %q has an invalid condition", ErrInvalid, c.ID)
+		}
+	}
+	return nil
+}
+
+// checkHealth validates every combatant's health against the game system definition. The system
+// is looked up only when some combatant has health values.
+func (r *Encounters) checkHealth(ctx context.Context, sysID string, cs []Combatant) error {
+	if !slices.ContainsFunc(cs, func(c Combatant) bool { return len(c.Health) > 0 }) {
+		return nil
+	}
+	sys, err := r.systems.Get(ctx, sysID)
+	if errors.Is(err, ErrNotFound) {
+		return invalid("unknown game system %q", sysID)
+	}
+	if err != nil {
+		return err
+	}
+	for _, c := range cs {
+		if err := CheckHealth(sys, c.Health); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetState validates st (structure, and combatant health against the encounter's game system),
+// then writes it as the encounter's combat state with the revision check.
+func (r *Encounters) SetState(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, st EncounterState) (Encounter, error) {
+	if err := ValidateState(st); err != nil {
+		return Encounter{}, err
+	}
+	if slices.ContainsFunc(st.Combatants, func(c Combatant) bool { return len(c.Health) > 0 }) {
+		cur, err := r.Load(ctx, ownerUserID, id)
+		if err != nil {
+			return Encounter{}, err
+		}
+		if err := r.checkHealth(ctx, cur.GameSystemID, st.Combatants); err != nil {
+			return Encounter{}, err
+		}
+	}
+	set := map[string]any{
+		"status": st.Status, "round": st.Round, "current_combatant_id": st.CurrentCombatantID,
+		"turn_queue": nonNil(st.TurnQueue), "combatants": nonNilC(st.Combatants),
+	}
+	return r.updateState(ctx, ownerUserID, actingUserID, id, expectedRevision, set)
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func nonNilC(s []Combatant) []Combatant {
+	if s == nil {
+		return []Combatant{}
+	}
+	return s
+}
+
+// Load reads owner's encounter; a miss is classified 403 (another owner's) or 404 (absent).
+func (r *Encounters) Load(ctx context.Context, owner, id string) (Encounter, error) {
+	cur, err := r.Get(ctx, owner, id)
+	if errors.Is(err, ErrNotFound) {
+		if cerr := r.Missing(ctx, owner, id); cerr != nil {
+			return Encounter{}, cerr
+		}
+	}
+	return cur, err
 }

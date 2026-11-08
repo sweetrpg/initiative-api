@@ -13,7 +13,14 @@ var ctx = context.Background()
 
 func newService(t *testing.T) *Rosters {
 	t.Helper()
-	s := NewRosters(fake.NewDB())
+	db := fake.NewDB()
+	s := NewRosters(db)
+	zero := 0
+	sys := data.GameSystem{ID: "dnd5e", Name: "D&D 5e", Family: "d20", Aliases: []string{"dnd5e"},
+		Fields: []data.TrackerField{{Key: "hp", Label: "HP", Kind: data.FieldCounter, Def: 10, Min: &zero}}}
+	if _, err := data.NewSystemRepo(db).Upsert(ctx, sys); err != nil {
+		t.Fatal(err)
+	}
 	n := 0
 	s.newID = func() string { n++; return "id" + string(rune('0'+n)) }
 	return s
