@@ -15,7 +15,7 @@ func newRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(Correlation())
-	SetupHandlers(r, authz.NewClient("http://127.0.0.1:1", "http://127.0.0.1:1"))
+	SetupHandlers(r, Services{Authz: authz.NewClient("http://127.0.0.1:1", "http://127.0.0.1:1")})
 	return r
 }
 

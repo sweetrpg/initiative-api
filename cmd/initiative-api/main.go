@@ -21,7 +21,12 @@ import (
 	"github.com/sweetrpg/common.go/logging"
 	"github.com/sweetrpg/initiative-api/config"
 	"github.com/sweetrpg/initiative-api/constants"
+	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/domain"
+	"github.com/sweetrpg/initiative-api/entitlements"
 	"github.com/sweetrpg/initiative-api/server"
+	"github.com/sweetrpg/initiative-api/store"
+	"github.com/sweetrpg/mongodb.go/database"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
@@ -40,7 +45,26 @@ func main() {
 	tracing.SetupTracing(constants.ServiceName)
 	defer tracing.TeardownTracing()
 
-	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL)), ReadHeaderTimeout: 10 * time.Second}
+	database.SetupDatabase() // reads the MongoDB connection settings from the environment
+	defer database.TeardownDatabase()
+	db := store.MongoDatabase{DB: database.Db}
+
+	idxCtx, idxCancel := context.WithTimeout(context.Background(), time.Minute)
+	if err := data.EnsureIndexes(idxCtx, db); err != nil {
+		log.Fatalf("indexes: %v", err)
+	}
+	idxCancel()
+
+	themes, err := domain.NewThemes(db)
+	if err != nil {
+		log.Fatalf("themes: %v", err)
+	}
+	svc := server.Services{
+		Authz:        authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
+		Entitlements: entitlements.New(cfg.EntitlementsAPIURL),
+		Themes:       themes,
+	}
+	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc), ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -60,7 +84,7 @@ func main() {
 	}
 }
 
-func newRouter(cfg config.Config, authzClient *authz.Client) *gin.Engine {
+func newRouter(cfg config.Config, svc server.Services) *gin.Engine {
 	httpLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	r := gin.New()
@@ -81,6 +105,6 @@ func newRouter(cfg config.Config, authzClient *authz.Client) *gin.Engine {
 		}))
 	}
 
-	server.SetupHandlers(r, authzClient)
+	server.SetupHandlers(r, svc)
 	return r
 }

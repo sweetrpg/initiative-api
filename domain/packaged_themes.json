@@ -1,0 +1,26 @@
+[
+  {
+    "id": "pkg-classic-light",
+    "name": "Classic Light",
+    "style": "light",
+    "main_color": "#1F2937",
+    "accent1_color": "#B45309",
+    "accent2_color": "#1D4ED8",
+    "background1_color": "#FFFFFF",
+    "background2_color": "#F3F4F6",
+    "primary_font_name": "Georgia",
+    "secondary_font_name": "Helvetica Neue"
+  },
+  {
+    "id": "pkg-classic-dark",
+    "name": "Classic Dark",
+    "style": "dark",
+    "main_color": "#F9FAFB",
+    "accent1_color": "#FBBF24",
+    "accent2_color": "#60A5FA",
+    "background1_color": "#111827",
+    "background2_color": "#1F2937",
+    "primary_font_name": "Georgia",
+    "secondary_font_name": "Helvetica Neue"
+  }
+]

@@ -35,6 +35,10 @@ Invalid values stop the process at startup with every problem listed.
 
 - `GET /status/ping`: shallow liveness and readiness probe.
 - `GET /status/health`: dependency check (no dependencies yet).
+- `GET /themes`, `GET /themes/packaged`, `GET /themes/{id}`, `POST /themes`,
+  `PATCH /themes/{id}` (body carries `revision`), `DELETE /themes/{id}?revision=N`. Custom themes
+  take the lowest free slot below `initiative.theme_slots`; packaged themes (`pkg-` IDs) are
+  read-only. Errors are `{code, message, correlation_id, key?, limit?}`.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written
 to the access log as `correlation_id`.
