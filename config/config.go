@@ -27,6 +27,8 @@ type Config struct {
 	AuthAPIURL string
 	// UsersAPIURL is users-api's base URL, used to resolve the verified caller to users._id.
 	UsersAPIURL string
+	// EntitlementsAPIURL is entitlements-api's base URL for gating checks.
+	EntitlementsAPIURL string
 }
 
 var logLevels = map[string]bool{"DEBUG": true, "INFO": true, "WARN": true, "ERROR": true}
@@ -42,13 +44,14 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	c := Config{
-		BindAddress:  get("BIND_ADDRESS", ":8000"),
-		Env:          get("ENV", "dev"),
-		Version:      get("VERSION", "v0.0.0"),
-		LogLevel:     strings.ToUpper(get(constants.LOG_LEVEL, "WARN")),
-		OTLPEndpoint: get(constants.OTEL_EXPORTER_OTLP_ENDPOINT, ""),
-		AuthAPIURL:   strings.TrimRight(get(constants.AUTH_API_URL, ""), "/"),
-		UsersAPIURL:  strings.TrimRight(get(constants.USERS_API_URL, ""), "/"),
+		BindAddress:        get("BIND_ADDRESS", ":8000"),
+		Env:                get("ENV", "dev"),
+		Version:            get("VERSION", "v0.0.0"),
+		LogLevel:           strings.ToUpper(get(constants.LOG_LEVEL, "WARN")),
+		OTLPEndpoint:       get(constants.OTEL_EXPORTER_OTLP_ENDPOINT, ""),
+		AuthAPIURL:         strings.TrimRight(get(constants.AUTH_API_URL, ""), "/"),
+		UsersAPIURL:        strings.TrimRight(get(constants.USERS_API_URL, ""), "/"),
+		EntitlementsAPIURL: strings.TrimRight(get(constants.ENTITLEMENTS_API_URL, ""), "/"),
 	}
 	if origins := get(constants.ALLOWED_ORIGINS, ""); origins != "" {
 		c.AllowedOrigins = strings.Split(origins, ",")
@@ -64,6 +67,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	errs = append(errs, checkURL(constants.OTEL_EXPORTER_OTLP_ENDPOINT, c.OTLPEndpoint, false)...)
 	errs = append(errs, checkURL(constants.AUTH_API_URL, c.AuthAPIURL, true)...)
 	errs = append(errs, checkURL(constants.USERS_API_URL, c.UsersAPIURL, true)...)
+	errs = append(errs, checkURL(constants.ENTITLEMENTS_API_URL, c.EntitlementsAPIURL, true)...)
 	for _, o := range c.AllowedOrigins {
 		if strings.TrimSpace(o) == "*" {
 			errs = append(errs, fmt.Errorf("%s: wildcard origin is not allowed", constants.ALLOWED_ORIGINS))
