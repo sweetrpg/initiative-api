@@ -21,7 +21,7 @@ func newRosters(t *testing.T) (*Owned[Roster, *Roster], *fake.Collection) {
 	db := fake.NewDB()
 	r := NewOwned[Roster](db, RosterSpec)
 	n := 0
-	r.newID = func() string { n++; return string(rune('a' + n - 1)) }
+	r.newID = func() string { n++; return testID(string(rune('a' + n - 1))) }
 	r.now = func() time.Time { return clock }
 	return r, db.Fake(CollectionRosters)
 }
@@ -46,7 +46,7 @@ func TestCreateStampsOwnerRevisionAndAudit(t *testing.T) {
 		got, want any
 	}{
 		{"owner", d.OwnerUserID, "u1"},
-		{"id assigned", d.ID, "a"},
+		{"id assigned", d.ID, testID("a")},
 		{"revision", d.Revision, int64(1)},
 		{"created_by", d.CreatedBy, "actor"},
 		{"updated_by", d.UpdatedBy, "actor"},
@@ -105,10 +105,10 @@ func TestUpdateOutcomes(t *testing.T) {
 		rev   int64
 		want  error
 	}{
-		{"owner with current revision", "u1", "a", 1, nil},
-		{"other owner is forbidden", "u2", "a", 1, ErrForbidden},
+		{"owner with current revision", "u1", testID("a"), 1, nil},
+		{"other owner is forbidden", "u2", testID("a"), 1, ErrForbidden},
 		{"missing id is not found", "u1", "zzz", 1, ErrNotFound},
-		{"stale revision conflicts", "u1", "a", 7, ErrRevisionConflict},
+		{"stale revision conflicts", "u1", testID("a"), 7, ErrRevisionConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,7 +125,7 @@ func TestUpdateOutcomes(t *testing.T) {
 func TestUpdateByOtherOwnerChangesNothing(t *testing.T) {
 	r, col := newRosters(t)
 	mustCreate(t, r, "u1", "Goblins")
-	_, _ = r.Update(ctx, "u2", "u2", "a", 1, map[string]any{"name": "Hijacked"})
+	_, _ = r.Update(ctx, "u2", "u2", testID("a"), 1, map[string]any{"name": "Hijacked"})
 	if got := col.Docs()[0]["name"]; got != "Goblins" {
 		t.Fatalf("name = %v, want Goblins", got)
 	}
@@ -136,7 +136,7 @@ func TestUpdateAdvancesRevisionAndAudit(t *testing.T) {
 	mustCreate(t, r, "u1", "Goblins")
 	later := clock.Add(time.Hour)
 	r.now = func() time.Time { return later }
-	got, err := r.Update(ctx, "u1", "editor", "a", 1, map[string]any{"name": "Orcs"})
+	got, err := r.Update(ctx, "u1", "editor", testID("a"), 1, map[string]any{"name": "Orcs"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,8 +162,8 @@ func TestUpdateAdvancesRevisionAndAudit(t *testing.T) {
 func TestConcurrentEditsOneWins(t *testing.T) {
 	r, _ := newRosters(t)
 	mustCreate(t, r, "u1", "Goblins")
-	_, first := r.Update(ctx, "u1", "u1", "a", 1, map[string]any{"name": "A"})
-	cur, second := r.Update(ctx, "u1", "u1", "a", 1, map[string]any{"name": "B"})
+	_, first := r.Update(ctx, "u1", "u1", testID("a"), 1, map[string]any{"name": "A"})
+	cur, second := r.Update(ctx, "u1", "u1", testID("a"), 1, map[string]any{"name": "B"})
 	if first != nil || !errors.Is(second, ErrRevisionConflict) {
 		t.Fatalf("first=%v second=%v, want nil and conflict", first, second)
 	}
@@ -177,7 +177,7 @@ func TestUpdateRejectsReservedAndOperatorFields(t *testing.T) {
 		t.Run(field, func(t *testing.T) {
 			r, _ := newRosters(t)
 			mustCreate(t, r, "u1", "Goblins")
-			_, err := r.Update(ctx, "u1", "u1", "a", 1, map[string]any{field: "x"})
+			_, err := r.Update(ctx, "u1", "u1", testID("a"), 1, map[string]any{field: "x"})
 			if !errors.Is(err, ErrInvalid) {
 				t.Fatalf("err = %v, want ErrInvalid", err)
 			}
@@ -192,8 +192,8 @@ func TestSoftDeleteOutcomes(t *testing.T) {
 		id    string
 		want  error
 	}{
-		{"owner deletes", "u1", "a", nil},
-		{"other owner forbidden", "u2", "a", ErrForbidden},
+		{"owner deletes", "u1", testID("a"), nil},
+		{"other owner forbidden", "u2", testID("a"), ErrForbidden},
 		{"missing not found", "u1", "zzz", ErrNotFound},
 	}
 	for _, tt := range tests {
@@ -210,11 +210,11 @@ func TestSoftDeleteOutcomes(t *testing.T) {
 func TestSoftDeletedRecordIsGoneButKept(t *testing.T) {
 	r, col := newRosters(t)
 	mustCreate(t, r, "u1", "Goblins")
-	if err := r.SoftDelete(ctx, "u1", "u1", "a", 1); err != nil {
+	if err := r.SoftDelete(ctx, "u1", "u1", testID("a"), 1); err != nil {
 		t.Fatal(err)
 	}
-	_, getErr := r.Get(ctx, "u1", "a")
-	_, updErr := r.Update(ctx, "u1", "u1", "a", 2, map[string]any{"name": "x"})
+	_, getErr := r.Get(ctx, "u1", testID("a"))
+	_, updErr := r.Update(ctx, "u1", "u1", testID("a"), 2, map[string]any{"name": "x"})
 	if !errors.Is(getErr, ErrNotFound) || !errors.Is(updErr, ErrNotFound) || len(col.Docs()) != 1 {
 		t.Fatalf("get=%v update=%v docs=%d, want not found twice and the document retained", getErr, updErr, len(col.Docs()))
 	}
@@ -255,7 +255,7 @@ func same(got, want any) bool {
 func TestSoftDeleteStaleRevisionConflicts(t *testing.T) {
 	r, col := newRosters(t)
 	mustCreate(t, r, "u1", "Goblins")
-	err := r.SoftDelete(ctx, "u1", "u1", "a", 9)
+	err := r.SoftDelete(ctx, "u1", "u1", testID("a"), 9)
 	if !errors.Is(err, ErrRevisionConflict) || col.Docs()[0]["deleted_at"] != nil {
 		t.Fatalf("err = %v, deleted_at = %v; want a conflict and a live record", err, col.Docs()[0]["deleted_at"])
 	}
@@ -307,7 +307,7 @@ func TestConcurrentWritersExactlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, errs[i] = r.Update(ctx, "u1", "u1", "a", 1, map[string]any{"name": "w"})
+			_, errs[i] = r.Update(ctx, "u1", "u1", testID("a"), 1, map[string]any{"name": "w"})
 		}()
 	}
 	wg.Wait()
@@ -371,5 +371,21 @@ func TestCredentialSecretHashCollisionIsNotMislabeledAsSlotConflict(t *testing.T
 	err := r.Create(ctx, "u2", "u2", &IntegrationCredential{Label: "b", SecretHash: "h"})
 	if errors.Is(err, ErrConflict) || !errors.Is(err, store.ErrDuplicate) {
 		t.Fatalf("err = %v, want the raw store.ErrDuplicate and not ErrConflict", err)
+	}
+}
+
+func TestMalformedIDsNeverReachTheStore(t *testing.T) {
+	r, _ := newRosters(t)
+	seedRosters(t, r, "u1", "A")
+	for _, id := range []string{"", "a", `{"$ne":""}`, "$ne", testID("a") + "0"} {
+		if _, err := r.Get(ctx, "u1", id); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Get(%q) err = %v, want ErrNotFound", id, err)
+		}
+		if _, err := r.Update(ctx, "u1", "u1", id, 1, map[string]any{"name": "x"}); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Update(%q) err = %v, want ErrNotFound", id, err)
+		}
+		if err := r.SoftDelete(ctx, "u1", "u1", id, 1); !errors.Is(err, ErrNotFound) {
+			t.Errorf("SoftDelete(%q) err = %v, want ErrNotFound", id, err)
+		}
 	}
 }

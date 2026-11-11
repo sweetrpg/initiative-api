@@ -46,8 +46,20 @@ func scope(owner string) bson.D {
 	return bson.D{{Key: "owner_user_id", Value: owner}, {Key: "deleted_at", Value: nil}}
 }
 
+// scopeID is the owner-scoped filter for one record. id must already have passed cleanID.
 func scopeID(owner, id string) bson.D {
 	return append(bson.D{{Key: "_id", Value: id}}, scope(owner)...)
+}
+
+// cleanID returns the canonical form of a client-supplied record ID, or false when it is not a
+// 24-character hex ObjectID. Every ID that reaches a query filter goes through here, so a request
+// value can only ever be a plain ObjectID string, never an operator document or arbitrary text.
+func cleanID(id string) (string, bool) {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return "", false
+	}
+	return oid.Hex(), true
 }
 
 func requireOwnerActor(owner, actor string) error {
@@ -86,6 +98,10 @@ func (r *Owned[T, P]) Get(ctx context.Context, ownerUserID, id string) (T, error
 	var out T
 	if strings.TrimSpace(ownerUserID) == "" {
 		return out, fmt.Errorf("%w: owner is required", ErrInvalid)
+	}
+	id, ok := cleanID(id)
+	if !ok {
+		return out, ErrNotFound
 	}
 	err := r.c.FindOne(ctx, scopeID(ownerUserID, id), &out)
 	if errors.Is(err, store.ErrNotFound) {
@@ -193,6 +209,10 @@ func (r *Owned[T, P]) updateBoth(ctx context.Context, ownerUserID, actingUserID,
 
 func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {
 	var out T
+	id, ok := cleanID(id)
+	if !ok {
+		return out, ErrNotFound
+	}
 	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
 	update := bson.D{
 		{Key: "$set", Value: setDoc(set,
@@ -227,6 +247,10 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 		}
 		update = append(update, bson.E{Key: "$unset", Value: unset})
 	}
+	id, ok := cleanID(id)
+	if !ok {
+		return ErrNotFound
+	}
 	var discard T
 	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
@@ -250,6 +274,10 @@ func (r *Owned[T, P]) Missing(ctx context.Context, owner, id string) error {
 // lookup to tell 404 from 403 from 409; it never grants access.
 func (r *Owned[T, P]) classify(ctx context.Context, owner, id string) (T, error) {
 	var cur T
+	id, ok := cleanID(id)
+	if !ok {
+		return cur, ErrNotFound
+	}
 	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}}, &cur)
 	if errors.Is(err, store.ErrNotFound) {
 		return cur, ErrNotFound

@@ -13,7 +13,7 @@ func newEncounters(t *testing.T) *Encounters {
 	t.Helper()
 	r := NewEncounters(fake.NewDB())
 	n := 0
-	r.newID = func() string { n++; return string(rune('a' + n - 1)) }
+	r.newID = func() string { n++; return testID(string(rune('a' + n - 1))) }
 	r.now = func() time.Time { return clock }
 	return r
 }
