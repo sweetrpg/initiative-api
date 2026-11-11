@@ -5,7 +5,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
 	"github.com/sweetrpg/initiative-api/constants"
+	"github.com/sweetrpg/initiative-api/domain"
+	"github.com/sweetrpg/initiative-api/entitlements"
 )
+
+// Services are the dependencies the resource handlers need.
+type Services struct {
+	Authz        *authz.Client
+	Entitlements *entitlements.Client
+	Themes       *domain.Themes
+}
 
 // ProtectedGroup returns a route group whose every route requires a bearer token that auth-api
 // verifies (signature, expiry, iss, aud) for this service and whose user holds one of roles
@@ -20,9 +29,9 @@ func ProtectedGroup(r *gin.Engine, client *authz.Client, roles ...string) *gin.R
 }
 
 // SetupHandlers registers every route group on r.
-func SetupHandlers(r *gin.Engine, client *authz.Client) {
+func SetupHandlers(r *gin.Engine, s Services) {
 	setupStatusHandlers(r)
 
-	// Resource handlers register on this group (tasks 2.x and 3.x).
-	_ = ProtectedGroup(r, client)
+	g := ProtectedGroup(r, s.Authz)
+	setupThemeHandlers(g, s.Themes, s.Entitlements)
 }

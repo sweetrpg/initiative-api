@@ -194,7 +194,7 @@ func TestCountIsOwnerScopedAndFiltered(t *testing.T) {
 func TestListExcludesSoftDeleted(t *testing.T) {
 	r, _ := newRosters(t)
 	seedRosters(t, r, "u1", "a", "b")
-	_ = r.SoftDelete(ctx, "u1", "u1", "a", 1)
+	_ = r.SoftDelete(ctx, "u1", "u1", testID("a"), 1)
 	p, _ := r.List(ctx, "u1", Query{})
 	if len(p.Items) != 1 || p.Items[0].Name != "b" {
 		t.Fatalf("items = %v, want only b", names(p))
@@ -218,7 +218,8 @@ func TestEqualSortValuesPageByIDTieBreak(t *testing.T) {
 			break
 		}
 	}
-	if fmt.Sprint(ids) != "[d a b c]" {
+	want := fmt.Sprint([]string{testID("d"), testID("a"), testID("b"), testID("c")})
+	if fmt.Sprint(ids) != want {
 		t.Fatalf("walked ids %v, want [d a b c] (other, then the three equal names by id)", ids)
 	}
 }
