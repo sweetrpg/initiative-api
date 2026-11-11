@@ -56,14 +56,16 @@ var (
 	// Combat state (status, round, current_combatant_id, turn_queue, combatants) is not
 	// updatable here: it changes only through the domain functions that apply the tracking rules.
 	EncounterSpec = Spec{
-		Name:        CollectionEncounters,
-		Filterable:  []string{"name", "status", "game_system_id", "position"},
-		Sortable:    []string{"name", "status", "position", "created_at", "updated_at"},
-		Projectable: []string{"name", "game_system_id", "ordering", "tie_breaker", "labels", "colorblind", "theme_id", "status", "round", "current_combatant_id", "turn_queue", "position", "combatants", "revision", "owner_user_id", "created_at", "updated_at", "created_by", "updated_by"},
-		Updatable:   []string{"name", "game_system_id", "ordering", "tie_breaker", "labels", "colorblind", "theme_id", "position"},
-		StateFields: []string{"status", "round", "current_combatant_id", "turn_queue", "combatants"},
+		Name:          CollectionEncounters,
+		Filterable:    []string{"name", "status", "game_system_id", "position"},
+		Sortable:      []string{"name", "status", "position", "created_at", "updated_at"},
+		Projectable:   []string{"name", "game_system_id", "ordering", "tie_breaker", "labels", "colorblind", "theme_id", "status", "round", "current_combatant_id", "turn_queue", "position", "combatants", "revision", "owner_user_id", "created_at", "updated_at", "created_by", "updated_by"},
+		Updatable:     []string{"name", "game_system_id", "ordering", "tie_breaker", "labels", "colorblind", "theme_id", "position"},
+		StateFields:   []string{"status", "round", "current_combatant_id", "turn_queue", "combatants", "ref_keys"},
+		UnsetOnDelete: []string{"ref_keys"},
 		Indexes: []store.IndexSpec{
 			{Name: "owner_position", Keys: asc("owner_user_id", "position")},
+			{Name: "owner_ref_keys", Keys: asc("owner_user_id", "ref_keys")},
 			{Name: "owner_name", Keys: asc("owner_user_id", "name")},
 			{Name: "owner_created_at", Keys: asc("owner_user_id", "created_at")},
 			{Name: "owner_updated_at", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "updated_at", Value: -1}}},

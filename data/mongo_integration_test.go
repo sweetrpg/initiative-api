@@ -57,8 +57,8 @@ func TestMongoConcurrentWritersExactlyOneWins(t *testing.T) {
 	}
 }
 
-// Proves the $expr/$getField lookup against a real server, including a dotted key and owner
-// scoping, which the in-memory fake cannot evaluate.
+// Proves the derived-key lookup against a real server, including a dotted key, the multikey index,
+// and owner scoping.
 func TestMongoFindByExternalRef(t *testing.T) {
 	uri := os.Getenv("MONGODB_TEST_URI")
 	if uri == "" {

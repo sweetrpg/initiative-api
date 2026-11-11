@@ -2,6 +2,8 @@ package data
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -111,6 +113,7 @@ func (r *Encounters) Create(ctx context.Context, ownerUserID, actingUserID strin
 	if err := r.checkHealth(ctx, e.GameSystemID, e.Combatants, nil); err != nil {
 		return err
 	}
+	e.RefKeys = refKeys(e.Combatants)
 	return r.Owned.Create(ctx, ownerUserID, actingUserID, e)
 }
 
@@ -236,6 +239,7 @@ func (r *Encounters) Write(ctx context.Context, ownerUserID, actingUserID, id st
 	state := map[string]any{
 		"status": st.Status, "round": st.Round, "current_combatant_id": st.CurrentCombatantID,
 		"turn_queue": nonNil(st.TurnQueue), "combatants": nonNilC(st.Combatants),
+		"ref_keys": nonNil(refKeys(st.Combatants)),
 	}
 	return r.updateBoth(ctx, ownerUserID, actingUserID, id, expectedRevision, settings, state)
 }
@@ -265,21 +269,43 @@ func (r *Encounters) Load(ctx context.Context, owner, id string) (Encounter, err
 	return cur, err
 }
 
+const (
+	maxRefLen     = 200
+	maxRefMatches = 100
+)
+
+// RefKey is the fixed-shape lookup key for one external reference: the hex SHA-256 of the
+// length-prefixed key and value. Lookups filter on this alone, so request text never becomes part
+// of a query filter.
+func RefKey(key, value string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(key), key, value)))
+	return hex.EncodeToString(sum[:])
+}
+
+// refKeys derives Encounter.RefKeys from the live (not removed) combatants.
+func refKeys(cs []Combatant) []string {
+	var out []string
+	for _, c := range cs {
+		if c.Removed {
+			continue
+		}
+		for k, v := range c.ExternalRefs {
+			out = append(out, RefKey(k, v))
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
 // RefMatch is a combatant whose external_refs hold a looked-up pair, with its encounter's ID.
 type RefMatch struct {
 	EncounterID string    `json:"encounter_id"`
 	Combatant   Combatant `json:"combatant"`
 }
 
-const (
-	maxRefLen     = 200
-	maxRefMatches = 100
-)
-
-// FindByExternalRef returns owner's combatants (removed ones excluded) whose external_refs map
-// key to value. The database matches with $expr/$getField because a key such as "foundry.actor"
-// contains a dot and cannot be a field path. key and value enter the filter only as $literal
-// operands, so they are data and never operators or paths.
+// FindByExternalRef returns owner's live combatants whose external_refs map key to value. The
+// database matches on the derived RefKey; the stored values are then compared exactly, so a hash
+// collision cannot return a wrong combatant.
 func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value string) ([]RefMatch, error) {
 	if strings.TrimSpace(owner) == "" {
 		return nil, fmt.Errorf("%w: owner is required", ErrInvalid)
@@ -287,18 +313,7 @@ func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value st
 	if key == "" || value == "" || len(key) > maxRefLen || len(value) > maxRefLen {
 		return nil, invalid("ref_key and ref_value are required, at most %d bytes", maxRefLen)
 	}
-	hit := bson.D{{Key: "$and", Value: bson.A{
-		bson.D{{Key: "$ne", Value: bson.A{"$$c.removed", true}}},
-		bson.D{{Key: "$eq", Value: bson.A{
-			bson.D{{Key: "$getField", Value: bson.D{
-				{Key: "field", Value: bson.D{{Key: "$literal", Value: key}}},
-				{Key: "input", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$$c.external_refs", bson.D{}}}}}}}},
-			bson.D{{Key: "$literal", Value: value}}}}}}}}
-	expr := bson.D{{Key: "$anyElementTrue", Value: bson.A{
-		bson.D{{Key: "$map", Value: bson.D{
-			{Key: "input", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$combatants", bson.A{}}}}},
-			{Key: "as", Value: "c"}, {Key: "in", Value: hit}}}}}}}
-	filter := append(scope(owner), bson.E{Key: "$expr", Value: expr})
+	filter := append(scope(owner), bson.E{Key: "ref_keys", Value: RefKey(key, value)})
 	var encs []Encounter
 	if err := r.c.Find(ctx, filter, store.FindOptions{Limit: maxRefMatches}, &encs); err != nil {
 		return nil, err

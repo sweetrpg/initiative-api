@@ -117,6 +117,9 @@ type Encounter struct {
 	TurnQueue          []string    `bson:"turn_queue" json:"turn_queue"`
 	Position           int         `bson:"position" json:"position"`
 	Combatants         []Combatant `bson:"combatants" json:"combatants"`
+	// RefKeys is derived from Combatants on every write (see RefKey); it only serves the
+	// external_refs lookup and is never returned.
+	RefKeys []string `bson:"ref_keys,omitempty" json:"-"`
 }
 
 // Theme is a user's custom theme. Slot is the numbered editable slot it occupies; soft delete
