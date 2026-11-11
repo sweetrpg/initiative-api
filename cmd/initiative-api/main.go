@@ -63,6 +63,7 @@ func main() {
 		Authz:        authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
 		Entitlements: entitlements.New(cfg.EntitlementsAPIURL),
 		Themes:       themes,
+		Credentials:  domain.NewCredentials(db),
 		Rosters:      domain.NewRosters(db),
 		Encounters:   domain.NewEncounters(db),
 	}

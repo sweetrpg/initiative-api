@@ -39,6 +39,11 @@ Invalid values stop the process at startup with every problem listed.
   `PATCH /themes/{id}` (body carries `revision`), `DELETE /themes/{id}?revision=N`. Custom themes
   take the lowest free slot below `initiative.theme_slots`; packaged themes (`pkg-` IDs) are
   read-only. Errors are `{code, message, correlation_id, key?, limit?}`.
+- `POST /credentials` (body `label`, `scopes`; the secret is returned once), `GET /credentials`,
+  `POST /credentials/{id}/revoke`. Integrations send the secret as `Authorization: Bearer ic_...`;
+  it acts as its owner with the user role, `read` allows GET and `write` allows other methods.
+  Credentials cannot reach `/credentials`, `/entitlements` or `/themes`.
+- `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written
 to the access log as `correlation_id`.

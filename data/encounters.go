@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sweetrpg/initiative-api/store"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 var (
@@ -262,4 +263,53 @@ func (r *Encounters) Load(ctx context.Context, owner, id string) (Encounter, err
 		}
 	}
 	return cur, err
+}
+
+// RefMatch is a combatant whose external_refs hold a looked-up pair, with its encounter's ID.
+type RefMatch struct {
+	EncounterID string    `json:"encounter_id"`
+	Combatant   Combatant `json:"combatant"`
+}
+
+const (
+	maxRefLen     = 200
+	maxRefMatches = 100
+)
+
+// FindByExternalRef returns owner's combatants (removed ones excluded) whose external_refs map
+// key to value. The database matches with $expr/$getField because a key such as "foundry.actor"
+// contains a dot and cannot be a field path. key and value enter the filter only as $literal
+// operands, so they are data and never operators or paths.
+func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value string) ([]RefMatch, error) {
+	if strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("%w: owner is required", ErrInvalid)
+	}
+	if key == "" || value == "" || len(key) > maxRefLen || len(value) > maxRefLen {
+		return nil, invalid("ref_key and ref_value are required, at most %d bytes", maxRefLen)
+	}
+	hit := bson.D{{Key: "$and", Value: bson.A{
+		bson.D{{Key: "$ne", Value: bson.A{"$$c.removed", true}}},
+		bson.D{{Key: "$eq", Value: bson.A{
+			bson.D{{Key: "$getField", Value: bson.D{
+				{Key: "field", Value: bson.D{{Key: "$literal", Value: key}}},
+				{Key: "input", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$$c.external_refs", bson.D{}}}}}}}},
+			bson.D{{Key: "$literal", Value: value}}}}}}}}
+	expr := bson.D{{Key: "$anyElementTrue", Value: bson.A{
+		bson.D{{Key: "$map", Value: bson.D{
+			{Key: "input", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$combatants", bson.A{}}}}},
+			{Key: "as", Value: "c"}, {Key: "in", Value: hit}}}}}}}
+	filter := append(scope(owner), bson.E{Key: "$expr", Value: expr})
+	var encs []Encounter
+	if err := r.c.Find(ctx, filter, store.FindOptions{Limit: maxRefMatches}, &encs); err != nil {
+		return nil, err
+	}
+	var out []RefMatch
+	for _, e := range encs {
+		for _, c := range e.Combatants {
+			if !c.Removed && c.ExternalRefs[key] == value {
+				out = append(out, RefMatch{EncounterID: e.ID, Combatant: c})
+			}
+		}
+	}
+	return out, nil
 }

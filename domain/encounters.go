@@ -146,3 +146,8 @@ func (s *Encounters) edit(ctx context.Context, owner, actor, id string, rev int6
 	}
 	return s.repo.SetState(ctx, owner, actor, id, rev, st)
 }
+
+// FindByExternalRef returns owner's combatants whose external_refs map key to value.
+func (s *Encounters) FindByExternalRef(ctx context.Context, owner, key, value string) ([]data.RefMatch, error) {
+	return s.repo.FindByExternalRef(ctx, owner, key, value)
+}

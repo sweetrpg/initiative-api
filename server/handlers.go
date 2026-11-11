@@ -14,6 +14,7 @@ type Services struct {
 	Authz        *authz.Client
 	Entitlements *entitlements.Client
 	Themes       *domain.Themes
+	Credentials  *domain.Credentials
 	Rosters      *domain.Rosters
 	Encounters   *domain.Encounters
 }
@@ -23,18 +24,21 @@ type Services struct {
 // (default: RoleUser). Missing or invalid tokens get 401, a missing role gets 403. Routes added
 // to the group inherit this; handlers never repeat the check. The caller's own token is the only
 // credential, per PADR-0037 (no service tokens), and a client application identity alone is a 401.
-func ProtectedGroup(r *gin.Engine, client *authz.Client, roles ...string) *gin.RouterGroup {
+func ProtectedGroup(r *gin.Engine, client *authz.Client, creds *domain.Credentials, roles ...string) *gin.RouterGroup {
 	if len(roles) == 0 {
 		roles = []string{authz.RoleUser}
 	}
-	return r.Group("", authz.RequireAnyRole(client, constants.ServiceName, roles...))
+	return r.Group("", authenticate(creds, authz.RequireAnyRole(client, constants.ServiceName, roles...)))
 }
 
 // SetupHandlers registers every route group on r.
 func SetupHandlers(r *gin.Engine, s Services) {
 	setupStatusHandlers(r)
 
-	g := ProtectedGroup(r, s.Authz)
-	setupThemeHandlers(g, s.Themes, s.Entitlements)
-	setupEntitlementHandlers(g, s)
+	g := ProtectedGroup(r, s.Authz, s.Credentials)
+	u := g.Group("", userOnly)
+	setupThemeHandlers(u, s.Themes, s.Entitlements)
+	setupEntitlementHandlers(u, s)
+	setupCredentialHandlers(u, s)
+	setupRefHandlers(g, s.Encounters)
 }

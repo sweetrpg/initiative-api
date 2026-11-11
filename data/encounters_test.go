@@ -421,3 +421,13 @@ func TestHealthErrorNamesTheFieldAndReason(t *testing.T) {
 		t.Fatalf("message %q should name the field and reason", msg)
 	}
 }
+
+func TestFindByExternalRefRejectsBadInput(t *testing.T) {
+	e := NewEncounters(fake.NewDB())
+	long := strings.Repeat("x", maxRefLen+1)
+	for _, tt := range []struct{ owner, key, val string }{{"", "k", "v"}, {"u1", "", "v"}, {"u1", "k", ""}, {"u1", long, "v"}, {"u1", "k", long}} {
+		if _, err := e.FindByExternalRef(ctx, tt.owner, tt.key, tt.val); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%+v err = %v, want ErrInvalid", tt, err)
+		}
+	}
+}
