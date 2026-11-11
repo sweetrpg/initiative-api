@@ -115,45 +115,76 @@ func (c *Client) Check(ctx context.Context, user, token, key string, policy Poli
 }
 
 func (c *Client) fetch(ctx context.Context, token, key string) (Result, time.Duration, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/check?key="+url.QueryEscape(key), nil)
+	var body checkBody
+	if err := c.get(ctx, token, "/check?key="+url.QueryEscape(key), &body); err != nil {
+		return Result{}, 0, err
+	}
+	return body.result(key)
+}
+
+// Prefix returns the user's values for every key under prefix in one call and caches each. It
+// has no stale fallback: any failure is returned, for callers that only display the values.
+func (c *Client) Prefix(ctx context.Context, user, token, prefix string) ([]Result, error) {
+	var body struct {
+		Results []checkBody `json:"results"`
+	}
+	if err := c.get(ctx, token, "/check/batch?prefix="+url.QueryEscape(prefix), &body); err != nil {
+		return nil, err
+	}
+	out := make([]Result, 0, len(body.Results))
+	for _, b := range body.Results {
+		res, ttl, err := b.result(b.Key)
+		if err != nil {
+			return nil, err
+		}
+		c.store(user+"\x00"+b.Key, res, ttl)
+		out = append(out, res)
+	}
+	return out, nil
+}
+
+// get calls path with the user's token and decodes a 200 body into out.
+func (c *Client) get(ctx context.Context, token, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
-		return Result{}, 0, fmt.Errorf("entitlements: build request: %w", err)
+		return fmt.Errorf("entitlements: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		slog.WarnContext(ctx, "entitlements call failed", "key", key, "error", err)
-		return Result{}, 0, ErrUnavailable
+		slog.WarnContext(ctx, "entitlements call failed", "path", path, "error", err)
+		return ErrUnavailable
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return decode(resp, key)
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out); err != nil {
+			return ErrUnavailable
+		}
+		return nil
 	case http.StatusUnauthorized:
-		return Result{}, 0, ErrUnauthorized
+		return ErrUnauthorized
 	case http.StatusNotFound:
-		return Result{}, 0, ErrUnknownKey
+		return ErrUnknownKey
 	default:
-		slog.WarnContext(ctx, "entitlements call rejected", "key", key, "status", resp.StatusCode)
-		return Result{}, 0, ErrUnavailable
+		slog.WarnContext(ctx, "entitlements call rejected", "path", path, "status", resp.StatusCode)
+		return ErrUnavailable
 	}
 }
 
-func decode(resp *http.Response, key string) (Result, time.Duration, error) {
-	var body struct {
-		Key   string `json:"key"`
-		Type  string `json:"type"`
-		Value any    `json:"value"`
-		TTL   int    `json:"ttl_seconds"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&body); err != nil {
-		return Result{}, 0, ErrUnavailable
-	}
-	res := Result{Key: key, Type: body.Type}
-	switch v := body.Value.(type) {
+type checkBody struct {
+	Key   string `json:"key"`
+	Type  string `json:"type"`
+	Value any    `json:"value"`
+	TTL   int    `json:"ttl_seconds"`
+}
+
+func (b checkBody) result(key string) (Result, time.Duration, error) {
+	res := Result{Key: key, Type: b.Type}
+	switch v := b.Value.(type) {
 	case bool:
 		res.Flag = v
 	case float64:
@@ -164,7 +195,7 @@ func decode(resp *http.Response, key string) (Result, time.Duration, error) {
 	default:
 		return Result{}, 0, ErrUnavailable
 	}
-	return res, min(time.Duration(body.TTL)*time.Second, maxTTL), nil
+	return res, min(time.Duration(b.TTL)*time.Second, maxTTL), nil
 }
 
 func (c *Client) fresh(ck string) (Result, bool) {

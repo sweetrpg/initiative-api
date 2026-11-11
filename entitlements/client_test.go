@@ -173,3 +173,27 @@ func TestFailOpenStaleIsBounded(t *testing.T) {
 type roundTripFail struct{}
 
 func (roundTripFail) RoundTrip(*http.Request) (*http.Response, error) { return nil, errors.New("down") }
+
+func TestPrefixReturnsAllAndCachesEach(t *testing.T) {
+	c, calls, _ := stub(t, 200, `{"results":[
+		{"key":"initiative.theme_slots","type":"limit","value":5,"ttl_seconds":60},
+		{"key":"initiative.deluxe","type":"flag","value":true,"ttl_seconds":60}]}`)
+	ctx := context.Background()
+	res, err := c.Prefix(ctx, "u1", "tok", "initiative.")
+	if err != nil || len(res) != 2 || res[0].Limit != 5 || !res[1].Flag {
+		t.Fatalf("got %+v, %v", res, err)
+	}
+	one, _ := c.Check(ctx, "u1", "tok", "initiative.deluxe", FailClosed)
+	if !one.Flag || calls.Load() != 1 {
+		t.Fatalf("single check after prefix should hit the cache: %+v, %d calls", one, calls.Load())
+	}
+}
+
+func TestPrefixErrors(t *testing.T) {
+	for status, want := range map[int]error{401: ErrUnauthorized, 404: ErrUnknownKey, 502: ErrUnavailable} {
+		c, _, _ := stub(t, status, "")
+		if _, err := c.Prefix(context.Background(), "u1", "t", "initiative."); !errors.Is(err, want) {
+			t.Errorf("status %d: err = %v, want %v", status, err, want)
+		}
+	}
+}

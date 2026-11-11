@@ -92,6 +92,11 @@ func (s *Rosters) List(ctx context.Context, owner string, q data.Query) (data.Pa
 	return s.rosters.List(ctx, owner, q)
 }
 
+// Count returns how many rosters owner holds.
+func (s *Rosters) Count(ctx context.Context, owner string) (int64, error) {
+	return s.rosters.Count(ctx, owner, nil)
+}
+
 // Rename sets the roster's name and favorite flag, compare-and-set on revision.
 func (s *Rosters) Rename(ctx context.Context, owner, actor, id string, rev int64, name string, favorite bool) (data.Roster, error) {
 	name = strings.TrimSpace(name)
