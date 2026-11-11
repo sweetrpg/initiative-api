@@ -29,3 +29,4 @@ data:
   # at startup (config.Load). No service token is involved (PADR-0037).
   AUTH_API_URL: http://api-v1.sweetrpg-auth.svc.cluster.local:8000
   USERS_API_URL: http://api-v1.sweetrpg-users.svc.cluster.local:8000
+  ENTITLEMENTS_API_URL: http://api-v1.sweetrpg-entitlements.svc.cluster.local:8000

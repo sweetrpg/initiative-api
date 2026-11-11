@@ -10,7 +10,7 @@ func lookupFrom(m map[string]string) func(string) (string, bool) {
 }
 
 func withAuth(m map[string]string) map[string]string {
-	out := map[string]string{"AUTH_API_URL": "http://auth-api:8000", "USERS_API_URL": "http://users-api:8000"}
+	out := map[string]string{"AUTH_API_URL": "http://auth-api:8000", "USERS_API_URL": "http://users-api:8000", "ENTITLEMENTS_API_URL": "http://entitlements-api:8000"}
 	for k, v := range m {
 		out[k] = v
 	}
@@ -37,6 +37,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad log level", map[string]string{"LOG_LEVEL": "loud"}, "LOG_LEVEL"},
 		{"relative otlp endpoint", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "tempo:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
 		{"missing auth-api url", map[string]string{"AUTH_API_URL": " "}, "AUTH_API_URL: required"},
+		{"missing entitlements-api url", map[string]string{"ENTITLEMENTS_API_URL": " "}, "ENTITLEMENTS_API_URL: required"},
 		{"non-http users-api url", map[string]string{"USERS_API_URL": "ftp://users"}, "USERS_API_URL"},
 		{"wildcard origin", map[string]string{"ALLOWED_ORIGINS": "https://a.example,*"}, "wildcard"},
 	}
