@@ -127,14 +127,14 @@ func (c *Client) fetch(ctx context.Context, token, key string) (Result, time.Dur
 		slog.WarnContext(ctx, "entitlements call failed", "key", key, "error", err)
 		return Result{}, 0, ErrUnavailable
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		return decode(resp, key)
-	case resp.StatusCode == http.StatusUnauthorized:
+	case http.StatusUnauthorized:
 		return Result{}, 0, ErrUnauthorized
-	case resp.StatusCode == http.StatusNotFound:
+	case http.StatusNotFound:
 		return Result{}, 0, ErrUnknownKey
 	default:
 		slog.WarnContext(ctx, "entitlements call rejected", "key", key, "status", resp.StatusCode)
