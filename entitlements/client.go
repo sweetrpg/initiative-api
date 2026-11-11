@@ -5,7 +5,7 @@
 // check only answers for the user holding that token. Results are cached per (user, key) for the
 // TTL the service returns. When the service cannot be reached, FailClosed callers (creates and
 // expansions) get ErrUnavailable and FailOpen callers (reads and edits) get the last known value
-// or a Degraded result they must not gate on.
+// (at most maxStale past its TTL) or a Degraded result they must not gate on.
 package entitlements
 
 import (
@@ -25,7 +25,10 @@ const (
 	// maxTTL bounds a service-supplied TTL so a bad value cannot pin a stale entitlement.
 	maxTTL = 5 * time.Minute
 	// maxEntries bounds the cache; past it, expired entries go first, then everything.
-	maxEntries  = 10000
+	maxEntries = 10000
+	// maxStale bounds how long FailOpen may serve an expired value during an outage; past it the
+	// result is Degraded and the caller skips gating.
+	maxStale    = time.Hour
 	callTimeout = 3 * time.Second
 	maxBody     = 64 << 10
 )
@@ -178,7 +181,7 @@ func (c *Client) stale(ck string) (Result, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.cache[ck]
-	return e.res, ok
+	return e.res, ok && c.now().Before(e.expires.Add(maxStale))
 }
 
 func (c *Client) store(ck string, res Result, ttl time.Duration) {

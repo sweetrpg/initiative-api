@@ -44,14 +44,13 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	c := Config{
-		BindAddress:  get("BIND_ADDRESS", ":8000"),
-		Env:          get("ENV", "dev"),
-		Version:      get("VERSION", "v0.0.0"),
-		LogLevel:     strings.ToUpper(get(constants.LOG_LEVEL, "WARN")),
-		OTLPEndpoint: get(constants.OTEL_EXPORTER_OTLP_ENDPOINT, ""),
-		AuthAPIURL:   strings.TrimRight(get(constants.AUTH_API_URL, ""), "/"),
-		UsersAPIURL:  strings.TrimRight(get(constants.USERS_API_URL, ""), "/"),
-
+		BindAddress:        get("BIND_ADDRESS", ":8000"),
+		Env:                get("ENV", "dev"),
+		Version:            get("VERSION", "v0.0.0"),
+		LogLevel:           strings.ToUpper(get(constants.LOG_LEVEL, "WARN")),
+		OTLPEndpoint:       get(constants.OTEL_EXPORTER_OTLP_ENDPOINT, ""),
+		AuthAPIURL:         strings.TrimRight(get(constants.AUTH_API_URL, ""), "/"),
+		UsersAPIURL:        strings.TrimRight(get(constants.USERS_API_URL, ""), "/"),
 		EntitlementsAPIURL: strings.TrimRight(get(constants.ENTITLEMENTS_API_URL, ""), "/"),
 	}
 	if origins := get(constants.ALLOWED_ORIGINS, ""); origins != "" {

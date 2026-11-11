@@ -155,3 +155,21 @@ func TestZeroTTLIsNotCached(t *testing.T) {
 		t.Fatalf("calls = %d, want 2", calls.Load())
 	}
 }
+
+func TestFailOpenStaleIsBounded(t *testing.T) {
+	c, _, _ := stub(t, 200, limitBody)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	_, _ = c.Check(context.Background(), "u1", "t", "initiative.theme_slots", FailClosed)
+	c.http.Transport = roundTripFail{}
+
+	now = now.Add(maxStale + 2*time.Minute)
+	res, err := c.Check(context.Background(), "u1", "t", "initiative.theme_slots", FailOpen)
+	if err != nil || !res.Degraded {
+		t.Fatalf("got %+v, %v; want Degraded past maxStale", res, err)
+	}
+}
+
+type roundTripFail struct{}
+
+func (roundTripFail) RoundTrip(*http.Request) (*http.Response, error) { return nil, errors.New("down") }
