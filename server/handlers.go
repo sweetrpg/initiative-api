@@ -14,6 +14,8 @@ type Services struct {
 	Authz        *authz.Client
 	Entitlements *entitlements.Client
 	Themes       *domain.Themes
+	Rosters      *domain.Rosters
+	Encounters   *domain.Encounters
 }
 
 // ProtectedGroup returns a route group whose every route requires a bearer token that auth-api
@@ -34,4 +36,5 @@ func SetupHandlers(r *gin.Engine, s Services) {
 
 	g := ProtectedGroup(r, s.Authz)
 	setupThemeHandlers(g, s.Themes, s.Entitlements)
+	setupEntitlementHandlers(g, s)
 }

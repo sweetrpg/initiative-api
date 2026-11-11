@@ -75,6 +75,11 @@ func (s *Encounters) List(ctx context.Context, owner string, q data.Query) (data
 	return s.repo.List(ctx, owner, q)
 }
 
+// Count returns how many encounters owner holds.
+func (s *Encounters) Count(ctx context.Context, owner string) (int64, error) {
+	return s.repo.Count(ctx, owner, nil)
+}
+
 // UpdateSettings sets the encounter's settings (name, game_system_id, ordering, tie_breaker,
 // display flags, theme_id, position). Combat state cannot be set here, but a new ordering, tie
 // breaker, or game system recomputes the turn queue in the same write.

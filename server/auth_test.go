@@ -24,6 +24,7 @@ func fakeAuthAPI(t *testing.T) *httptest.Server {
 	t.Helper()
 	verdicts := map[string]authz.CheckResponse{
 		"user-ok":  {Allowed: true, Roles: []string{authz.RoleUser}, Sub: "auth0|1"},
+		"user-two": {Allowed: true, Roles: []string{authz.RoleUser}, Sub: "auth0|5"},
 		"no-role":  {Allowed: true, Roles: []string{}, Sub: "auth0|2"},
 		"admin-ok": {Allowed: true, Roles: []string{authz.RoleAdmin}, Sub: "auth0|3"},
 		"denied":   {Allowed: false, Reason: "denied", Sub: "auth0|4"},
@@ -44,7 +45,11 @@ func fakeAuthAPI(t *testing.T) *httptest.Server {
 func fakeUsersAPI(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{"user_id": "u-1"})
+		id := "u-1"
+		if r.Header.Get("Authorization") == "Bearer user-two" {
+			id = "u-2"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"user_id": id})
 	}))
 	t.Cleanup(srv.Close)
 	return srv

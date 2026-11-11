@@ -28,7 +28,8 @@ func themeRouter(t *testing.T, slots, entStatus int) *gin.Engine {
 		_, _ = w.Write([]byte(`{"key":"initiative.theme_slots","type":"limit","value":` + strconv.Itoa(slots) + `,"ttl_seconds":0}`))
 	}))
 	t.Cleanup(ent.Close)
-	themes, err := domain.NewThemes(fake.NewDB())
+	db := fake.NewDB()
+	themes, err := domain.NewThemes(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +39,8 @@ func themeRouter(t *testing.T, slots, entStatus int) *gin.Engine {
 		Authz:        authz.NewClient(fakeAuthAPI(t).URL, fakeUsersAPI(t).URL),
 		Entitlements: entitlements.New(ent.URL),
 		Themes:       themes,
+		Rosters:      domain.NewRosters(db),
+		Encounters:   domain.NewEncounters(db),
 	})
 	return r
 }

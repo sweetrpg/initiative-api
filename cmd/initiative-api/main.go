@@ -63,6 +63,8 @@ func main() {
 		Authz:        authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
 		Entitlements: entitlements.New(cfg.EntitlementsAPIURL),
 		Themes:       themes,
+		Rosters:      domain.NewRosters(db),
+		Encounters:   domain.NewEncounters(db),
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc), ReadHeaderTimeout: 10 * time.Second}
 
