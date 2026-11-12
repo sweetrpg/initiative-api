@@ -43,7 +43,7 @@ func TestFamilyFieldSets(t *testing.T) {
 		{"pathfinder2", "[current doomed dying maximum temporary wounded]"},
 		{"shadowofthedemonlord", "[damage health]"},
 		{"shadowoftheweirdwizard", "[damage health]"},
-		{"twilight2000", "[damage hitCapacity stress]"},
+		{"twilight2000", "[damage hitCapacity stress stressCapacity]"},
 	}
 	defs := byID(t)
 	for _, tt := range tests {
@@ -159,9 +159,28 @@ func TestSupportedSystemsResolveByFoundryID(t *testing.T) {
 }
 
 func TestPathfinder2UsesItsOwnBounds(t *testing.T) {
+	want := map[string][2]int{"dying": {0, 4}, "wounded": {0, 4}, "doomed": {0, 4}}
+	found := map[string]bool{}
 	for _, f := range byID(t)["pathfinder2"].Fields {
-		if f.Key == "dying" && (*f.Min != 0 || *f.Max != 4) {
-			t.Fatalf("dying bounds = %d..%d, want 0..4", *f.Min, *f.Max)
+		b, ok := want[f.Key]
+		if !ok {
+			continue
+		}
+		found[f.Key] = true
+		if f.Min == nil || f.Max == nil || *f.Min != b[0] || *f.Max != b[1] {
+			t.Errorf("%s bounds = %v..%v, want %d..%d", f.Key, f.Min, f.Max, b[0], b[1])
 		}
 	}
+	if len(found) != len(want) {
+		t.Fatalf("found %v, want all of %v", found, want)
+	}
+}
+
+func TestTwilight2000StressIsBoundedByItsCapacity(t *testing.T) {
+	for _, f := range byID(t)["twilight2000"].Fields {
+		if f.Key == "stress" && f.MaxRef == "stressCapacity" {
+			return
+		}
+	}
+	t.Fatal("stress has no max_ref to stressCapacity")
 }

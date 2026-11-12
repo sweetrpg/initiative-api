@@ -229,7 +229,56 @@
       "min": 0
     }
   ],
-  "pf2e": [
+  "damage": [
+    {
+      "key": "damage",
+      "label": "initiative.health.damage",
+      "kind": "counter",
+      "default": 0,
+      "min": 0,
+      "max_ref": "health"
+    },
+    {
+      "key": "health",
+      "label": "initiative.health.health",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    }
+  ],
+  "twilight2000": [
+    {
+      "key": "damage",
+      "label": "initiative.health.damage",
+      "kind": "counter",
+      "default": 0,
+      "min": 0,
+      "max_ref": "hitCapacity"
+    },
+    {
+      "key": "hitCapacity",
+      "label": "initiative.health.hitCapacity",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    },
+    {
+      "key": "stress",
+      "label": "initiative.health.stress",
+      "kind": "counter",
+      "default": 0,
+      "min": 0,
+      "max_ref": "stressCapacity"
+    },
+    {
+      "key": "stressCapacity",
+      "label": "initiative.health.stressCapacity",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    }
+  ],
+  "pathfinder2": [
     {
       "key": "current",
       "label": "initiative.health.current",
@@ -275,47 +324,6 @@
       "default": 0,
       "min": 0,
       "max": 4
-    }
-  ],
-  "damage": [
-    {
-      "key": "damage",
-      "label": "initiative.health.damage",
-      "kind": "counter",
-      "default": 0,
-      "min": 0,
-      "max_ref": "health"
-    },
-    {
-      "key": "health",
-      "label": "initiative.health.health",
-      "kind": "counter",
-      "default": 1,
-      "min": 1
-    }
-  ],
-  "twilight2000": [
-    {
-      "key": "damage",
-      "label": "initiative.health.damage",
-      "kind": "counter",
-      "default": 0,
-      "min": 0,
-      "max_ref": "hitCapacity"
-    },
-    {
-      "key": "hitCapacity",
-      "label": "initiative.health.hitCapacity",
-      "kind": "counter",
-      "default": 1,
-      "min": 1
-    },
-    {
-      "key": "stress",
-      "label": "initiative.health.stress",
-      "kind": "counter",
-      "default": 0,
-      "min": 0
     }
   ]
 }
