@@ -87,6 +87,7 @@ func main() {
 		Credentials:  creds,
 		Rosters:      rosters,
 		Encounters:   encounters,
+		Sessions:     domain.NewSessions(db),
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc), ReadHeaderTimeout: 10 * time.Second}
 

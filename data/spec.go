@@ -102,6 +102,42 @@ var (
 		},
 	}
 
+	// SessionSpec: a session is owned by its GM, so owner-scoped create and soft delete apply to
+	// the GM only. Reads by members go through Sessions.
+	SessionSpec = Spec{
+		Name:        CollectionSessions,
+		Filterable:  []string{"name"},
+		Sortable:    []string{"name", "created_at"},
+		Projectable: []string{"name", "revision", "owner_user_id", "created_at", "updated_at", "created_by", "updated_by"},
+		Updatable:   []string{"name"},
+		Indexes:     []store.IndexSpec{{Name: "owner_created", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "created_at", Value: -1}}}},
+	}
+
+	// The membership collections are addressed by session_id, set from a record the caller was
+	// already authorized for, never from request input alone.
+	SessionMemberSpec = Spec{
+		Name: CollectionSessionMembers, Sortable: []string{"created_at"},
+		Indexes: []store.IndexSpec{
+			{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true},
+			{Name: "user", Keys: asc("user_id")},
+		},
+	}
+	SessionInviteSpec = Spec{
+		Name: CollectionSessionInvites, Sortable: []string{"created_at"},
+		Indexes: []store.IndexSpec{
+			{Name: "code_hash", Keys: asc("code_hash"), Unique: true},
+			{Name: "session", Keys: asc("session_id")},
+		},
+	}
+	SessionRequestSpec = Spec{
+		Name: CollectionSessionRequests, Sortable: []string{"created_at"}, Filterable: []string{"status"},
+		Indexes: []store.IndexSpec{{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true}},
+	}
+	SessionBlockSpec = Spec{
+		Name: CollectionSessionBlocks, Sortable: []string{"created_at"},
+		Indexes: []store.IndexSpec{{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true}},
+	}
+
 	// SystemSpec: aliases (including Foundry system IDs) are unique across systems.
 	// SystemSpec has no Updatable fields: definitions change only through SystemRepo.Upsert.
 	SystemSpec = Spec{
@@ -118,7 +154,8 @@ var (
 
 // AllSpecs lists every collection the service owns.
 func AllSpecs() []Spec {
-	return []Spec{RosterSpec, EncounterSpec, ThemeSpec, CredentialSpec, SystemSpec}
+	return []Spec{RosterSpec, EncounterSpec, ThemeSpec, CredentialSpec, SystemSpec,
+		SessionSpec, SessionMemberSpec, SessionInviteSpec, SessionRequestSpec, SessionBlockSpec}
 }
 
 // EnsureIndexes creates every collection's indexes. Safe to run at each startup.

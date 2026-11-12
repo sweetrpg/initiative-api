@@ -45,7 +45,7 @@ func credRouterDB(t *testing.T, limit string, db store.Database) (*gin.Engine, *
 		Authz:        authz.NewClient(fakeAuthAPI(t).URL, fakeUsersAPI(t).URL),
 		Entitlements: entitlements.New(ent.URL),
 		Themes:       themes, Credentials: creds,
-		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db),
+		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
 	}
 	r := gin.New()
 	r.Use(Correlation())
