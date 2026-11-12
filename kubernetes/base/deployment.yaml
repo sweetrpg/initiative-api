@@ -40,6 +40,10 @@ spec:
                 name: api-db
             - secretRef:
                 name: api-cache
+            # NATS_PASSWORD for the AUTH_EVENTS consumer; optional so envs without NATS still start.
+            - secretRef:
+                name: api-nats
+                optional: true
           env:
             - name: GOMEMLIMIT
               value: "200MiB"

@@ -31,5 +31,6 @@ data:
   USERS_API_URL: http://api-v1.sweetrpg-users.svc.cluster.local:8000
   ENTITLEMENTS_API_URL: http://api-v1.sweetrpg-entitlements.svc.cluster.local:8000
   # In-cluster NATS (infrastructure repo, common/messaging/nats). Publishes initiative events and
-  # consumes auth.events.> (AUTH_EVENTS stream, PADR-0039). No NATS credential yet; see PR body.
+  # consumes auth.events.> (AUTH_EVENTS stream, PADR-0039). NATS_PASSWORD comes from api-nats (secrets.yaml).
   NATS_URL: nats://nats.nats-system.svc.cluster.local:4222
+  NATS_USER: initiative-api
