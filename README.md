@@ -43,6 +43,9 @@ Invalid values stop the process at startup with every problem listed.
 - `PUT /entitlements/active/{themes|rosters|encounters|credentials}` (body `ids`): choose which items stay active when a limit is below the number owned.
   Over-limit items go inactive (`inactive_at`), never deleted: readable and deletable, not editable (403 `item_inactive`),
   and an inactive credential stops authenticating. Limits are re-read on the owner's own requests (at most every 30 s).
+- Without the `initiative.game_systems_extra` flag, encounters using a game system other than No System are locked (`locked_at`):
+  readable and deletable, not editable or runnable (403 `entitlement_required`), and unlocked unchanged when the flag returns.
+  Creating or switching to a gated system without the flag gets the same error.
 - `POST /credentials` (body `label`, `scopes`; the secret is returned once), `GET /credentials`,
   `POST /credentials/{id}/revoke`. Integrations send the secret as `Authorization: Bearer ic_...`;
   it acts as its owner with the user role, `read` allows GET and `write` allows other methods.

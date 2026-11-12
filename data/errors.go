@@ -17,6 +17,9 @@ var (
 	// ErrInactive: the record is over the owner's current limit and cannot be changed or used; it
 	// stays readable and deletable (403).
 	ErrInactive = errors.New("data: record is inactive")
+	// ErrLocked: the record uses a game system its owner no longer holds the entitlement for. It
+	// stays readable and deletable (403, typed entitlement error).
+	ErrLocked = errors.New("data: record is locked by a missing entitlement")
 	// ErrInvalid: the call itself is malformed (empty owner, reserved field, bad query) (400/422).
 	ErrInvalid = errors.New("data: invalid argument")
 )

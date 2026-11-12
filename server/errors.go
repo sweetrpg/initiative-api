@@ -39,6 +39,7 @@ func writeError(c *gin.Context, err error, current any) {
 
 func classifyError(err error) (ErrorBody, int) {
 	var ee *domain.EntitlementError
+	var er *domain.EntitlementRequiredError
 	switch {
 	case errors.As(err, &ee):
 		return ErrorBody{Code: "entitlement_limit_reached", Message: "Your plan's limit for this item has been reached.", Key: ee.Key, Limit: &ee.Limit}, http.StatusForbidden
@@ -52,6 +53,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "unauthorized", Message: "Your session is not valid."}, http.StatusUnauthorized
 	case errors.Is(err, data.ErrNotFound):
 		return ErrorBody{Code: "not_found", Message: "Not found."}, http.StatusNotFound
+	case errors.Is(err, data.ErrLocked), errors.As(err, &er):
+		return ErrorBody{Code: "entitlement_required", Message: "This needs an entitlement your account does not currently hold.", Key: domain.KeyGameSystemsExtra}, http.StatusForbidden
 	case errors.Is(err, data.ErrInactive):
 		return ErrorBody{Code: "item_inactive", Message: "This item is over your plan's limit. You can still view or delete it; choose which items stay active to use it again."}, http.StatusForbidden
 	case errors.Is(err, data.ErrForbidden):

@@ -16,6 +16,7 @@ type Services struct {
 	Themes       *domain.Themes
 	Credentials  *domain.Credentials
 	Limits       *domain.Limits
+	Locks        *domain.Locks
 	Rosters      *domain.Rosters
 	Encounters   *domain.Encounters
 }
@@ -37,7 +38,8 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupStatusHandlers(r)
 
 	g := ProtectedGroup(r, s.Authz, s.Credentials)
-	if s.Limits != nil {
+	g.Use(withChecker(s.Entitlements))
+	if s.Limits != nil || s.Locks != nil {
 		g.Use(reconcileLimits(s))
 	}
 	u := g.Group("", userOnly)

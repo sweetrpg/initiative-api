@@ -50,6 +50,9 @@ func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.E
 	if err != nil {
 		return data.Encounter{}, err
 	}
+	if err := requireSystem(ctx, enc.GameSystemID); err != nil {
+		return data.Encounter{}, err
+	}
 	combatants := make([]data.Combatant, 0, len(enc.Combatants))
 	for _, c := range enc.Combatants {
 		n, err := newCombatant(c, s.newID())
@@ -84,6 +87,11 @@ func (s *Encounters) Count(ctx context.Context, owner string) (int64, error) {
 // display flags, theme_id, position). Combat state cannot be set here, but a new ordering, tie
 // breaker, or game system recomputes the turn queue in the same write.
 func (s *Encounters) UpdateSettings(ctx context.Context, owner, actor, id string, rev int64, set map[string]any) (data.Encounter, error) {
+	if sysID, ok := set["game_system_id"].(string); ok {
+		if err := requireSystem(ctx, sysID); err != nil {
+			return data.Encounter{}, err
+		}
+	}
 	_, ord := set["ordering"]
 	_, tie := set["tie_breaker"]
 	_, sys := set["game_system_id"]

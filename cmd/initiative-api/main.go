@@ -74,6 +74,7 @@ func main() {
 	}
 	rosters, encounters := domain.NewRosters(db), domain.NewEncounters(db)
 	svc := server.Services{
+		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(
 			domain.Kind{Name: "themes", Key: domain.KeyThemeSlots, Repo: themes.Items()},
 			domain.Kind{Name: "rosters", Key: domain.KeySavedRosters, Repo: rosters.Items()},

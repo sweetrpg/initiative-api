@@ -9,7 +9,8 @@ import (
 	"github.com/sweetrpg/initiative-api/store/fake"
 )
 
-var ctx = context.Background()
+// ctx carries a checker that grants every flag, so encounter tests can use a gated system.
+var ctx = WithChecker(context.Background(), stubChecker{flag: true})
 
 func newService(t *testing.T) *Rosters {
 	t.Helper()

@@ -12,11 +12,12 @@ import (
 
 type stubChecker struct {
 	limit int
+	flag  bool
 	err   error
 }
 
 func (c stubChecker) Check(_ context.Context, key string, _ entitlements.Policy) (entitlements.Result, error) {
-	return entitlements.Result{Key: key, Type: "limit", Limit: c.limit}, c.err
+	return entitlements.Result{Key: key, Type: "limit", Limit: c.limit, Flag: c.flag}, c.err
 }
 
 func newThemes(t *testing.T) *Themes {
