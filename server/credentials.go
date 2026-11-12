@@ -135,17 +135,26 @@ func setupAdminCredentialHandlers(g *gin.RouterGroup, creds *domain.Credentials)
 	g.DELETE("/admin/credentials/:id", func(c *gin.Context) { adminDeleteCredential(c, creds) })
 }
 
-// adminListCredentials lists any owner's credentials; ?owner= narrows it. Secrets and hashes are
-// never in the model's JSON.
-func adminListCredentials(c *gin.Context, creds *domain.Credentials) {
+// pageQuery reads ?cursor and ?limit; it answers 400 and returns false on a bad limit.
+func pageQuery(c *gin.Context) (data.Query, bool) {
 	q := data.Query{Cursor: c.Query("cursor")}
 	if v := c.Query("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
 			badRequest(c, "limit must be a positive integer")
-			return
+			return q, false
 		}
 		q.Limit = n
+	}
+	return q, true
+}
+
+// adminListCredentials lists any owner's credentials; ?owner= narrows it. Secrets and hashes are
+// never in the model's JSON.
+func adminListCredentials(c *gin.Context, creds *domain.Credentials) {
+	q, ok := pageQuery(c)
+	if !ok {
+		return
 	}
 	page, err := creds.ListAll(c.Request.Context(), c.Query("owner"), q)
 	if err != nil {
@@ -156,12 +165,16 @@ func adminListCredentials(c *gin.Context, creds *domain.Credentials) {
 }
 
 func adminDeletions(c *gin.Context, creds *domain.Credentials) {
-	items, err := creds.Deletions(c.Request.Context(), c.Query("owner"))
+	q, ok := pageQuery(c)
+	if !ok {
+		return
+	}
+	page, err := creds.Deletions(c.Request.Context(), c.Query("owner"), q)
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	c.JSON(http.StatusOK, gin.H{"items": page.Items, "next_cursor": page.NextCursor})
 }
 
 // adminDeleteCredential deletes a credential permanently. The reason is required; the audit entry
@@ -176,8 +189,13 @@ func adminDeleteCredential(c *gin.Context, creds *domain.Credentials) {
 	}
 	actor := authz.Viewer(c)
 	entry, err := creds.DeletePermanently(c.Request.Context(), actor, c.Param("id"), b.Reason)
-	if err != nil {
+	if errors.Is(err, data.ErrNotFound) || errors.Is(err, data.ErrInvalid) {
 		writeError(c, err, nil)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(c.Request.Context(), "credential deletion did not complete", "actor", actor, "credential_id", c.Param("id"), "error", err, "correlation_id", CorrelationID(c))
+		c.AbortWithStatusJSON(http.StatusInternalServerError, ErrorBody{Code: "deletion_incomplete", Message: "The deletion did not complete and may be partly done. Retry the same request.", CorrelationID: CorrelationID(c)})
 		return
 	}
 	slog.WarnContext(c.Request.Context(), "audit: integration credential deleted", "audit", true, "actor", actor,

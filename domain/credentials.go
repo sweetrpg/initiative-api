@@ -178,8 +178,8 @@ func (s *Credentials) DeletePermanently(ctx context.Context, admin, id, reason s
 }
 
 // Deletions lists the audit entries of administrator deletions, optionally for one owner.
-func (s *Credentials) Deletions(ctx context.Context, owner string) ([]data.CredentialDeletion, error) {
-	return s.repo.Deletions(ctx, owner)
+func (s *Credentials) Deletions(ctx context.Context, owner string, q data.Query) (data.Page[data.CredentialDeletion], error) {
+	return s.repo.Deletions(ctx, owner, q)
 }
 
 // Live reports whether credential id can still authenticate. A stream authenticated by a

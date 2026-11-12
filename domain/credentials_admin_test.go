@@ -130,9 +130,24 @@ func TestDeletionsFiltersByOwner(t *testing.T) {
 		}
 	}
 
-	got, err := s.Deletions(ctx, "u2")
+	got, err := s.Deletions(ctx, "u2", data.Query{})
 
-	if err != nil || len(got) != 1 || got[0].CredentialID != b.ID {
+	if err != nil || len(got.Items) != 1 || got.Items[0].CredentialID != b.ID {
 		t.Fatalf("got %v, %v", got, err)
+	}
+}
+
+func TestPermanentDeleteRetryReturnsTheStoredEntry(t *testing.T) {
+	s, db := newCreds(t)
+	c, _, _ := s.Create(ctx, "u1", "a", []string{"read"}, stubChecker{limit: 5})
+	pre := data.CredentialDeletion{CredentialID: c.ID, OwnerUserID: "u1", Label: "a", Reason: "first try", CreatedBy: "admin-1"}
+	if err := db.Collection(data.CollectionCredentialDeletions).InsertOne(ctx, pre); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.DeletePermanently(ctx, "admin-2", c.ID, "retry")
+
+	if err != nil || got.Reason != "first try" || got.CreatedBy != "admin-1" {
+		t.Fatalf("got %+v, %v; want the stored entry", got, err)
 	}
 }

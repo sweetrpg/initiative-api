@@ -94,6 +94,12 @@ func TestAdminCredentialRoutesRejectNonAdmins(t *testing.T) {
 			t.Fatalf("%s %s with a credential = %d, want 401", rt[0], rt[1], w.Code)
 		}
 	}
+	if w := callAs(r, "user-ok", "GET", "/credentials", ""); len(decodeBody(t, w)["items"].([]any)) != 1 {
+		t.Fatal("a rejected DELETE removed the credential")
+	}
+	if w := callAs(r, "admin-ok", "GET", "/admin/credentials/deletions", ""); len(decodeBody(t, w)["items"].([]any)) != 0 {
+		t.Fatal("a rejected DELETE wrote an audit entry")
+	}
 }
 
 func TestAdminDeleteUnknownCredentialIs404(t *testing.T) {
@@ -133,5 +139,21 @@ func TestAdminOwnerFilterMustBeAPlainUserID(t *testing.T) {
 		if w := callAs(r, "admin-ok", "GET", path, ""); w.Code != http.StatusUnprocessableEntity && w.Code != http.StatusBadRequest {
 			t.Fatalf("%s = %d, want a client error", path, w.Code)
 		}
+	}
+}
+
+func TestAdminDeletionsPage(t *testing.T) {
+	r := credRouter(t, "5")
+	for range 3 {
+		id, _ := issue(t, r, "user-two", `["read"]`)
+		callAs(r, "admin-ok", "DELETE", "/admin/credentials/"+id, `{"reason":"x"}`)
+	}
+
+	first := decodeBody(t, callAs(r, "admin-ok", "GET", "/admin/credentials/deletions?limit=2", ""))
+	next, _ := first["next_cursor"].(string)
+	second := decodeBody(t, callAs(r, "admin-ok", "GET", "/admin/credentials/deletions?limit=2&cursor="+next, ""))
+
+	if len(first["items"].([]any)) != 2 || next == "" || len(second["items"].([]any)) != 1 || second["next_cursor"] != "" {
+		t.Fatalf("first = %v, second = %v", first, second)
 	}
 }

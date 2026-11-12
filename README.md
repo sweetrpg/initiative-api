@@ -59,7 +59,7 @@ Invalid values stop the process at startup with every problem listed.
   Administrator routes (admin bearer only, no credentials): `GET /admin/credentials[?owner=]` lists
   any owner's credentials (never the secret or hash); `DELETE /admin/credentials/{id}` with
   `{"reason": "..."}` removes one for good, at once; `GET /admin/credentials/deletions[?owner=]`
-  lists the audit entries. The entry (administrator, owner, credential id, label, scopes, reason,
+  lists the audit entries (paged with `limit` and `cursor`). A 500 `deletion_incomplete` means retry the same request. The entry (administrator, owner, credential id, label, scopes, reason,
   time) goes to `integration_credential_deletions` before the credential is removed, and has no
   update or delete path. `Credentials.Live(id)` is what an open stream re-checks.
   Delete class (PADR-0027): `integration_credentials` are soft delete for the owner's own removal

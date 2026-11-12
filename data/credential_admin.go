@@ -94,7 +94,13 @@ func (r *Credentials) DeletePermanently(ctx context.Context, actor, id, reason s
 		CredentialID: c.ID, OwnerUserID: c.OwnerUserID, Label: c.Label, Scopes: c.Scopes,
 		Reason: strings.TrimSpace(reason), CreatedBy: actor, CreatedAt: r.now(),
 	}
-	if err := r.deletions.InsertOne(ctx, out); err != nil && !errors.Is(err, store.ErrDuplicate) {
+	// A duplicate means an earlier attempt wrote the entry: return that stored row, so the
+	// response and log match what the audit collection holds.
+	if err := r.deletions.InsertOne(ctx, out); errors.Is(err, store.ErrDuplicate) {
+		if err := r.deletions.FindOne(ctx, bson.D{{Key: "_id", Value: id}}, &out); err != nil {
+			return CredentialDeletion{}, err
+		}
+	} else if err != nil {
 		return CredentialDeletion{}, err
 	}
 	if err := r.c.DeleteOne(ctx, bson.D{{Key: "_id", Value: id}}); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -103,17 +109,23 @@ func (r *Credentials) DeletePermanently(ctx context.Context, actor, id, reason s
 	return out, nil
 }
 
-// Deletions lists the audit entries for credentials deleted from owner's account (all owners
-// when owner is empty), newest first.
-func (r *Credentials) Deletions(ctx context.Context, owner string) ([]CredentialDeletion, error) {
+// DeletionSpec pages the audit entries, newest first.
+var DeletionSpec = Spec{
+	Name:     CollectionCredentialDeletions,
+	Sortable: []string{"created_at"},
+}
+
+// Deletions returns one page of audit entries, newest first; a non-empty NextCursor means more.
+// owner narrows it to one owner's deleted credentials.
+func (r *Credentials) Deletions(ctx context.Context, owner string, q Query) (Page[CredentialDeletion], error) {
 	if err := checkOwner(owner); err != nil {
-		return nil, err
+		return Page[CredentialDeletion]{}, err
 	}
-	filter := bson.D{}
-	if owner != "" {
-		filter = bson.D{{Key: "owner_user_id", Value: owner}}
+	if len(q.Sort) == 0 {
+		q.Sort = []SortKey{{Field: "created_at", Desc: true}}
 	}
-	var out []CredentialDeletion
-	err := r.deletions.Find(ctx, filter, store.FindOptions{Sort: bson.D{{Key: "created_at", Value: -1}}, Limit: 200}, &out)
-	return out, err
+	if owner == "" {
+		return runQuery[CredentialDeletion](ctx, r.deletions, DeletionSpec, bson.D{}, q)
+	}
+	return runQuery[CredentialDeletion](ctx, r.deletions, DeletionSpec, bson.D{{Key: "owner_user_id", Value: owner}}, q)
 }
