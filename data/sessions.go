@@ -40,6 +40,10 @@ type Member struct {
 	Role      string    `bson:"role" json:"role"`
 	CreatedAt time.Time `bson:"created_at" json:"joined_at"`
 	CreatedBy string    `bson:"created_by" json:"-"`
+	// Live is set while the record is not deleted, so unique indexes can ignore deleted ones.
+	Live      bool       `bson:"live,omitempty" json:"-"`
+	DeletedAt *time.Time `bson:"deleted_at,omitempty" json:"-"`
+	DeletedBy *string    `bson:"deleted_by,omitempty" json:"-"`
 }
 
 // Invite is a join code. Only its hash is stored, so the code is shown once, at creation.
@@ -51,6 +55,10 @@ type Invite struct {
 	RevokedAt *time.Time `bson:"revoked_at,omitempty" json:"revoked_at,omitempty"`
 	CreatedAt time.Time  `bson:"created_at" json:"created_at"`
 	CreatedBy string     `bson:"created_by" json:"created_by"`
+	// Live is set while the record is not deleted, so unique indexes can ignore deleted ones.
+	Live      bool       `bson:"live,omitempty" json:"-"`
+	DeletedAt *time.Time `bson:"deleted_at,omitempty" json:"-"`
+	DeletedBy *string    `bson:"deleted_by,omitempty" json:"-"`
 }
 
 // JoinRequest is a user's pending, approved, or rejected request to join.
@@ -64,6 +72,10 @@ type JoinRequest struct {
 	DecidedBy string     `bson:"decided_by,omitempty" json:"decided_by,omitempty"`
 	DecidedAt *time.Time `bson:"decided_at,omitempty" json:"decided_at,omitempty"`
 	CreatedAt time.Time  `bson:"created_at" json:"created_at"`
+	// Live is set while the record is not deleted, so unique indexes can ignore deleted ones.
+	Live      bool       `bson:"live,omitempty" json:"-"`
+	DeletedAt *time.Time `bson:"deleted_at,omitempty" json:"-"`
+	DeletedBy *string    `bson:"deleted_by,omitempty" json:"-"`
 }
 
 // Block keeps a user from rejoining a session.
@@ -73,6 +85,10 @@ type Block struct {
 	UserID    string    `bson:"user_id" json:"user_id"`
 	CreatedAt time.Time `bson:"created_at" json:"created_at"`
 	CreatedBy string    `bson:"created_by" json:"created_by"`
+	// Live is set while the record is not deleted, so unique indexes can ignore deleted ones.
+	Live      bool       `bson:"live,omitempty" json:"-"`
+	DeletedAt *time.Time `bson:"deleted_at,omitempty" json:"-"`
+	DeletedBy *string    `bson:"deleted_by,omitempty" json:"-"`
 }
 
 // Sessions is the repository for sessions and their membership records. The session document is
@@ -96,10 +112,28 @@ func NewSessions(db store.Database) *Sessions {
 
 func newID() string { return primitive.NewObjectID().Hex() }
 
-func sessionScope(sessionID string) bson.D { return bson.D{{Key: "session_id", Value: sessionID}} }
+// Every read of a membership collection filters deleted_at (PADR-0027: these records are soft
+// deleted), so the two scope helpers carry it.
+func sessionScope(sessionID string) bson.D {
+	return bson.D{{Key: "session_id", Value: sessionID}, {Key: "deleted_at", Value: nil}}
+}
 
 func sessionUser(sessionID, userID string) bson.D {
-	return bson.D{{Key: "session_id", Value: sessionID}, {Key: "user_id", Value: userID}}
+	return bson.D{{Key: "session_id", Value: sessionID}, {Key: "user_id", Value: userID}, {Key: "deleted_at", Value: nil}}
+}
+
+// softDelete marks the first live record matching filter deleted by actor and returns ErrNotFound
+// when there is none.
+func (r *Sessions) softDelete(ctx context.Context, c store.Collection, filter bson.D, actor string) error {
+	var gone bson.M
+	err := c.FindOneAndUpdate(ctx, filter, bson.D{
+		{Key: "$set", Value: bson.D{{Key: "deleted_at", Value: r.now()}, {Key: "deleted_by", Value: actor}}},
+		{Key: "$unset", Value: bson.D{{Key: "live", Value: ""}}},
+	}, &gone)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrNotFound
+	}
+	return err
 }
 
 func (r *Sessions) pairFilterOK(sessionID, userID string) error {
@@ -134,7 +168,7 @@ func (r *Sessions) Live(ctx context.Context, sessionID string) (Session, error) 
 
 // AddMember records userID in the session with role. An existing member is ErrConflict.
 func (r *Sessions) AddMember(ctx context.Context, sessionID, userID, role, actor string) (Member, error) {
-	m := Member{ID: newID(), SessionID: sessionID, UserID: userID, Role: role, CreatedAt: r.now(), CreatedBy: actor}
+	m := Member{ID: newID(), SessionID: sessionID, UserID: userID, Role: role, CreatedAt: r.now(), CreatedBy: actor, Live: true}
 	if err := r.pairFilterOK(sessionID, userID); err != nil {
 		return m, err
 	}
@@ -191,21 +225,17 @@ func (r *Sessions) SetRole(ctx context.Context, sessionID, userID, role string) 
 	return m, err
 }
 
-// RemoveMember ends a membership for good.
-func (r *Sessions) RemoveMember(ctx context.Context, sessionID, userID string) error {
+// RemoveMember ends a membership (soft delete).
+func (r *Sessions) RemoveMember(ctx context.Context, sessionID, userID, actor string) error {
 	if err := r.pairFilterOK(sessionID, userID); err != nil {
 		return err
 	}
-	err := r.members.DeleteOne(ctx, sessionUser(sessionID, userID))
-	if errors.Is(err, store.ErrNotFound) {
-		return ErrNotFound
-	}
-	return err
+	return r.softDelete(ctx, r.members, sessionUser(sessionID, userID), actor)
 }
 
 // AddInvite stores an invite for the session.
 func (r *Sessions) AddInvite(ctx context.Context, sessionID, codeHash string, expires time.Time, actor string) (Invite, error) {
-	in := Invite{ID: newID(), SessionID: sessionID, CodeHash: codeHash, ExpiresAt: expires, CreatedAt: r.now(), CreatedBy: actor}
+	in := Invite{ID: newID(), SessionID: sessionID, CodeHash: codeHash, ExpiresAt: expires, CreatedAt: r.now(), CreatedBy: actor, Live: true}
 	return in, r.invites.InsertOne(ctx, in)
 }
 
@@ -215,7 +245,7 @@ func (r *Sessions) InviteByHash(ctx context.Context, codeHash string) (Invite, e
 	if codeHash == "" {
 		return in, ErrNotFound
 	}
-	err := r.invites.FindOne(ctx, bson.D{{Key: "code_hash", Value: codeHash}}, &in)
+	err := r.invites.FindOne(ctx, bson.D{{Key: "code_hash", Value: codeHash}, {Key: "deleted_at", Value: nil}}, &in)
 	if errors.Is(err, store.ErrNotFound) {
 		return in, ErrNotFound
 	}
@@ -264,7 +294,7 @@ func (r *Sessions) RequestJoin(ctx context.Context, sessionID, userID string) (J
 	err := r.requests.FindOne(ctx, sessionUser(sessionID, userID), &jr)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		jr = JoinRequest{ID: newID(), SessionID: sessionID, UserID: userID, Status: RequestPending, CreatedAt: r.now()}
+		jr = JoinRequest{ID: newID(), SessionID: sessionID, UserID: userID, Status: RequestPending, CreatedAt: r.now(), Live: true}
 		return jr, r.requests.InsertOne(ctx, jr)
 	case err != nil:
 		return jr, err
@@ -318,15 +348,14 @@ func (r *Sessions) Decide(ctx context.Context, sessionID, requestID, status, rol
 }
 
 // DropRequest removes userID's request, if any.
-func (r *Sessions) DropRequest(ctx context.Context, sessionID, userID string) error {
+func (r *Sessions) DropRequest(ctx context.Context, sessionID, userID, actor string) error {
 	if err := r.pairFilterOK(sessionID, userID); err != nil {
 		return err
 	}
-	err := r.requests.DeleteOne(ctx, sessionUser(sessionID, userID))
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
+	if err := r.softDelete(ctx, r.requests, sessionUser(sessionID, userID), actor); !errors.Is(err, ErrNotFound) {
+		return err
 	}
-	return err
+	return nil
 }
 
 // AddBlock keeps userID out of the session; blocking twice is harmless.
@@ -334,7 +363,7 @@ func (r *Sessions) AddBlock(ctx context.Context, sessionID, userID, actor string
 	if err := r.pairFilterOK(sessionID, userID); err != nil {
 		return err
 	}
-	err := r.blocks.InsertOne(ctx, Block{ID: newID(), SessionID: sessionID, UserID: userID, CreatedAt: r.now(), CreatedBy: actor})
+	err := r.blocks.InsertOne(ctx, Block{ID: newID(), SessionID: sessionID, UserID: userID, CreatedAt: r.now(), CreatedBy: actor, Live: true})
 	if errors.Is(err, store.ErrDuplicate) {
 		return nil
 	}
@@ -342,15 +371,11 @@ func (r *Sessions) AddBlock(ctx context.Context, sessionID, userID, actor string
 }
 
 // RemoveBlock lifts a block.
-func (r *Sessions) RemoveBlock(ctx context.Context, sessionID, userID string) error {
+func (r *Sessions) RemoveBlock(ctx context.Context, sessionID, userID, actor string) error {
 	if err := r.pairFilterOK(sessionID, userID); err != nil {
 		return err
 	}
-	err := r.blocks.DeleteOne(ctx, sessionUser(sessionID, userID))
-	if errors.Is(err, store.ErrNotFound) {
-		return ErrNotFound
-	}
-	return err
+	return r.softDelete(ctx, r.blocks, sessionUser(sessionID, userID), actor)
 }
 
 // Blocked reports whether userID is blocked from the session.
@@ -374,16 +399,16 @@ func (r *Sessions) Blocks(ctx context.Context, sessionID string, q Query) (Page[
 	return runQuery[Block](ctx, r.blocks, SessionBlockSpec, sessionScope(sessionID), q)
 }
 
-// DropSession removes every membership record of the session: members, invites, requests, and
-// blocks. The session document itself is soft-deleted by SoftDelete.
-func (r *Sessions) DropSession(ctx context.Context, sessionID string) error {
+// DropSession soft-deletes every membership record of the session: members, invites, requests,
+// and blocks. The session document itself is soft-deleted by SoftDelete.
+func (r *Sessions) DropSession(ctx context.Context, sessionID, actor string) error {
 	if _, ok := cleanID(sessionID); !ok {
 		return ErrNotFound
 	}
 	for _, c := range []store.Collection{r.members, r.invites, r.requests, r.blocks} {
 		for {
-			err := c.DeleteOne(ctx, sessionScope(sessionID))
-			if errors.Is(err, store.ErrNotFound) {
+			err := r.softDelete(ctx, c, sessionScope(sessionID), actor)
+			if errors.Is(err, ErrNotFound) {
 				break
 			}
 			if err != nil {

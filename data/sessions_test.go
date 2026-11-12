@@ -48,7 +48,7 @@ func TestSetRoleAndRemoveMemberReportMissingMembers(t *testing.T) {
 	if _, err := r.SetRole(ctx, id, "ghost", RolePlayer); !errors.Is(err, ErrNotFound) {
 		t.Errorf("set role = %v, want ErrNotFound", err)
 	}
-	if err := r.RemoveMember(ctx, id, "ghost"); !errors.Is(err, ErrNotFound) {
+	if err := r.RemoveMember(ctx, id, "ghost", "gm"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("remove = %v, want ErrNotFound", err)
 	}
 	if _, err := r.SetRole(ctx, "junk", "u", RolePlayer); !errors.Is(err, ErrNotFound) {
@@ -68,10 +68,10 @@ func TestBlocksAreIdempotentAndLiftable(t *testing.T) {
 	if blocked, err := r.Blocked(ctx, id, "bad"); err != nil || !blocked {
 		t.Fatalf("blocked = %v, %v", blocked, err)
 	}
-	if err := r.RemoveBlock(ctx, id, "bad"); err != nil {
+	if err := r.RemoveBlock(ctx, id, "bad", "gm"); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.RemoveBlock(ctx, id, "bad"); !errors.Is(err, ErrNotFound) {
+	if err := r.RemoveBlock(ctx, id, "bad", "gm"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("lift twice = %v, want ErrNotFound", err)
 	}
 	if err := r.AddBlock(ctx, "junk", "bad", "gm"); !errors.Is(err, ErrNotFound) {
@@ -128,16 +128,47 @@ func TestDropSessionRemovesEveryMembershipRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := r.DropSession(ctx, s.ID); err != nil {
+	if err := r.DropSession(ctx, s.ID, "gm"); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, c := range []string{CollectionSessionMembers, CollectionSessionInvites, CollectionSessionRequests, CollectionSessionBlocks} {
-		if n := len(db.Fake(c).Docs()); n != 0 {
-			t.Errorf("%s still holds %d records", c, n)
+		docs := db.Fake(c).Docs()
+		if len(docs) == 0 {
+			t.Errorf("%s was hard-deleted; PADR-0027 requires soft delete", c)
+		}
+		for _, d := range docs {
+			if d["deleted_at"] == nil || d["deleted_by"] != "gm" || d["live"] != nil {
+				t.Errorf("%s record not soft-deleted by gm: %v", c, d)
+			}
 		}
 	}
-	if err := r.DropSession(ctx, "junk"); !errors.Is(err, ErrNotFound) {
+	if _, err := r.Member(ctx, s.ID, "u1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("dropped member still readable: %v", err)
+	}
+	if _, err := r.InviteByHash(ctx, "hash"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("dropped invite still resolves: %v", err)
+	}
+	if err := r.DropSession(ctx, "junk", "gm"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("drop bad id = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRemovedMemberCanBeAddedAgain(t *testing.T) {
+	r, id := newSessionRepo(t)
+	if _, err := r.AddMember(ctx, id, "u1", RolePlayer, "gm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RemoveMember(ctx, id, "u1", "gm"); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := r.AddMember(ctx, id, "u1", RoleObserver, "gm")
+
+	if err != nil || m.Role != RoleObserver {
+		t.Fatalf("re-add = %+v, %v; the soft-deleted row must not block it", m, err)
+	}
+	if page, _ := r.Members(ctx, id, Query{}); len(page.Items) != 1 {
+		t.Fatalf("members = %d, want only the live one", len(page.Items))
 	}
 }

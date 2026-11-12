@@ -142,7 +142,7 @@ func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) erro
 	if err := s.repo.SoftDelete(ctx, actor, actor, sess.ID, rev); err != nil {
 		return err
 	}
-	return s.repo.DropSession(ctx, sess.ID)
+	return s.repo.DropSession(ctx, sess.ID, actor)
 }
 
 func hashCode(code string) string {
@@ -323,7 +323,7 @@ func (s *Sessions) Remove(ctx context.Context, actor, id, user string) error {
 	if _, err := s.target(ctx, sess.ID, user); err != nil {
 		return err
 	}
-	return s.repo.RemoveMember(ctx, sess.ID, user)
+	return s.repo.RemoveMember(ctx, sess.ID, user, actor)
 }
 
 // Leave removes actor from the session. The GM cannot leave; they delete the session.
@@ -335,7 +335,7 @@ func (s *Sessions) Leave(ctx context.Context, actor, id string) error {
 	if !Allowed(m.Role, ActLeave) {
 		return invalid("the GM cannot leave; delete the session instead")
 	}
-	return s.repo.RemoveMember(ctx, sess.ID, actor)
+	return s.repo.RemoveMember(ctx, sess.ID, actor, actor)
 }
 
 // Block keeps user out of the session, removing them and any pending request.
@@ -353,10 +353,10 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	if err := s.repo.AddBlock(ctx, sess.ID, user, actor); err != nil {
 		return err
 	}
-	if err := s.repo.DropRequest(ctx, sess.ID, user); err != nil {
+	if err := s.repo.DropRequest(ctx, sess.ID, user, actor); err != nil {
 		return err
 	}
-	if err := s.repo.RemoveMember(ctx, sess.ID, user); err != nil && !errors.Is(err, data.ErrNotFound) {
+	if err := s.repo.RemoveMember(ctx, sess.ID, user, actor); err != nil && !errors.Is(err, data.ErrNotFound) {
 		return err
 	}
 	return nil
@@ -368,7 +368,7 @@ func (s *Sessions) Unblock(ctx context.Context, actor, id, user string) error {
 	if err != nil {
 		return err
 	}
-	return s.repo.RemoveBlock(ctx, sess.ID, user)
+	return s.repo.RemoveBlock(ctx, sess.ID, user, actor)
 }
 
 // Blocks lists the blocked users.

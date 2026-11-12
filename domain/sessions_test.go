@@ -466,3 +466,17 @@ func TestJoinHealsAnApprovalThatNeverAddedTheMember(t *testing.T) {
 		t.Fatalf("approve after healing = %v", err)
 	}
 }
+
+func TestRemovedPlayerCanJoinAgainThroughAnInvite(t *testing.T) {
+	s, id := table(t)
+	if err := s.Remove(ctx, "gm", id, "p1"); err != nil {
+		t.Fatal(err)
+	}
+
+	join(t, s, id, "p1", data.RoleObserver)
+
+	v, err := s.Get(ctx, "p1", id)
+	if err != nil || v.Role != data.RoleObserver {
+		t.Fatalf("rejoined = %+v, %v", v, err)
+	}
+}

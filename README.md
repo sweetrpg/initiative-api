@@ -73,7 +73,8 @@ Invalid values stop the process at startup with every problem listed.
   {role}` or `/reject {reason}`. Blocks: `GET|POST /sessions/{id}/blocks`, `DELETE .../blocks/{user}`.
   Roles are `gm` (the creator, exactly one), `co_gm`, `player`, `observer`; `domain.Allowed` is the
   one role table. Membership collections are the source of truth for who holds a role. Membership,
-  invite, request and block records are hard-deleted (relationship edges); the session is soft-deleted.
+  invite, request and block records and the session are all soft-deleted (`deleted_at`, `deleted_by`;
+  PADR-0027), and a `live` marker lets the unique indexes ignore deleted rows.
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written

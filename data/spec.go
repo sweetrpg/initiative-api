@@ -118,7 +118,8 @@ var (
 	SessionMemberSpec = Spec{
 		Name: CollectionSessionMembers, Sortable: []string{"created_at"},
 		Indexes: []store.IndexSpec{
-			{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true},
+			{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true,
+				Partial: bson.D{{Key: "live", Value: bson.D{{Key: "$exists", Value: true}}}}},
 			{Name: "user", Keys: asc("user_id")},
 		},
 	}
@@ -131,11 +132,13 @@ var (
 	}
 	SessionRequestSpec = Spec{
 		Name: CollectionSessionRequests, Sortable: []string{"created_at"}, Filterable: []string{"status"},
-		Indexes: []store.IndexSpec{{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true}},
+		Indexes: []store.IndexSpec{{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true,
+			Partial: bson.D{{Key: "live", Value: bson.D{{Key: "$exists", Value: true}}}}}},
 	}
 	SessionBlockSpec = Spec{
 		Name: CollectionSessionBlocks, Sortable: []string{"created_at"},
-		Indexes: []store.IndexSpec{{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true}},
+		Indexes: []store.IndexSpec{{Name: "session_user", Keys: asc("session_id", "user_id"), Unique: true,
+			Partial: bson.D{{Key: "live", Value: bson.D{{Key: "$exists", Value: true}}}}}},
 	}
 
 	// SystemSpec: aliases (including Foundry system IDs) are unique across systems.
