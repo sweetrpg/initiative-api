@@ -43,6 +43,11 @@ Invalid values stop the process at startup with every problem listed.
   `POST /credentials/{id}/revoke`. Integrations send the secret as `Authorization: Bearer ic_...`;
   it acts as its owner with the user role, `read` allows GET and `write` allows other methods.
   Credentials cannot reach `/credentials`, `/entitlements` or `/themes`.
+  A deny or role removal in auth-api ends the owner's credentials (PADR-0039): the service consumes
+  the `AUTH_EVENTS` stream (`NATS_URL`, optional `NATS_DURABLE_NAME`, `NATS_CREDS` or
+  `NATS_USER`/`NATS_PASSWORD`). Credentials answer 503 `credentials_unavailable` until the consumer
+  has caught up, and stay off if `NATS_URL` is unset or the consumer fell behind the stream's
+  retention.
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written

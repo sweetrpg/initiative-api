@@ -8,11 +8,12 @@ import (
 
 // Collection names.
 const (
-	CollectionRosters     = "rosters"
-	CollectionEncounters  = "encounters"
-	CollectionThemes      = "themes"
-	CollectionGameSystems = "game_systems"
-	CollectionCredentials = "integration_credentials"
+	CollectionRosters        = "rosters"
+	CollectionEncounters     = "encounters"
+	CollectionThemes         = "themes"
+	CollectionGameSystems    = "game_systems"
+	CollectionCredentials    = "integration_credentials"
+	CollectionCredentialGate = "integration_credential_gate"
 )
 
 // Character kinds.
@@ -148,6 +149,8 @@ type IntegrationCredential struct {
 	SecretHash string     `bson:"secret_hash" json:"-"`
 	LastUsedAt *time.Time `bson:"last_used_at,omitempty" json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `bson:"revoked_at,omitempty" json:"revoked_at,omitempty"`
+	// RevokeReason is set when the platform, not the owner, ended the credential (PADR-0039).
+	RevokeReason string `bson:"revoke_reason,omitempty" json:"revoke_reason,omitempty"`
 }
 
 // Tracker field kinds.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
+	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
 	"github.com/sweetrpg/initiative-api/store/fake"
@@ -16,6 +18,12 @@ import (
 // credRouter serves the real handlers plus a probe route that echoes the principal. limit is the
 // entitled credential count.
 func credRouter(t *testing.T, limit string) *gin.Engine {
+	r, _ := credRouterWith(t, limit)
+	return r
+}
+
+// credRouterWith also returns the credential service, so a test can drive the auth-event paths.
+func credRouterWith(t *testing.T, limit string) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	ent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,10 +32,14 @@ func credRouter(t *testing.T, limit string) *gin.Engine {
 	t.Cleanup(ent.Close)
 	db := fake.NewDB()
 	themes, _ := domain.NewThemes(db)
+	creds := domain.NewCredentials(db)
+	if ok, err := creds.Open(context.Background()); err != nil || !ok {
+		t.Fatalf("open = %v, %v", ok, err)
+	}
 	svc := Services{
 		Authz:        authz.NewClient(fakeAuthAPI(t).URL, fakeUsersAPI(t).URL),
 		Entitlements: entitlements.New(ent.URL),
-		Themes:       themes, Credentials: domain.NewCredentials(db),
+		Themes:       themes, Credentials: creds,
 		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db),
 	}
 	r := gin.New()
@@ -35,7 +47,7 @@ func credRouter(t *testing.T, limit string) *gin.Engine {
 	SetupHandlers(r, svc)
 	probe := ProtectedGroup(r, svc.Authz, svc.Credentials)
 	probe.Any("/probe", func(c *gin.Context) { c.String(http.StatusOK, authz.Viewer(c)) })
-	return r
+	return r, creds
 }
 
 func callAs(r http.Handler, token, method, path, body string) *httptest.ResponseRecorder {
@@ -181,5 +193,58 @@ func TestCombatantLookupNeedsBothParamsAndReadScope(t *testing.T) {
 	}
 	if w := callAs(r, wo, "GET", "/combatants?ref_key=a&ref_value=b", ""); w.Code != http.StatusForbidden {
 		t.Errorf("write-only lookup = %d, want 403", w.Code)
+	}
+}
+
+func TestOwnerDenyRevokesOnlyThatOwnersCredentialsAtOnce(t *testing.T) {
+	r, creds := credRouterWith(t, "3")
+	_, a1 := issue(t, r, "user-ok", `["read"]`)
+	_, a2 := issue(t, r, "user-ok", `["write"]`)
+	_, other := issue(t, r, "user-two", `["read"]`)
+	n, err := creds.RevokeOwner(context.Background(), "u-1", data.ReasonOwnerDenied)
+	if err != nil || n != 2 {
+		t.Fatalf("revoked %d, %v; want 2", n, err)
+	}
+	for _, s := range []string{a1, a2} {
+		if w := callAs(r, s, "GET", "/probe", ""); w.Code != http.StatusUnauthorized {
+			t.Fatalf("denied owner's credential = %d, want 401", w.Code)
+		}
+	}
+	if w := callAs(r, other, "GET", "/probe", ""); w.Code != 200 {
+		t.Fatalf("other owner's credential = %d, want 200", w.Code)
+	}
+	items := decodeBody(t, callAs(r, "user-ok", "GET", "/credentials", ""))["items"].([]any)
+	if len(items) != 2 || items[0].(map[string]any)["revoke_reason"] != data.ReasonOwnerDenied {
+		t.Fatalf("list after deny = %v", items)
+	}
+}
+
+func TestRevokeOwnerRejectsUnknownReason(t *testing.T) {
+	_, creds := credRouterWith(t, "3")
+	if _, err := creds.RevokeOwner(context.Background(), "u-1", "because"); err == nil {
+		t.Fatal("unknown reason accepted")
+	}
+}
+
+func TestClosedGateFailsClosedAndSurvivesRestart(t *testing.T) {
+	r, creds := credRouterWith(t, "3")
+	_, secret := issue(t, r, "user-ok", `["read"]`)
+	if err := creds.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if w := callAs(r, secret, "GET", "/probe", ""); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("closed gate authenticate = %d, want 503", w.Code)
+	}
+	if w := callAs(r, "user-ok", "POST", "/credentials", `{"label":"x","scopes":["read"]}`); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("closed gate create = %d, want 503", w.Code)
+	}
+	if ok, err := creds.Open(context.Background()); err != nil || ok {
+		t.Fatalf("open after persisted close = %v, %v; want false", ok, err)
+	}
+	if err := creds.Reopen(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if w := callAs(r, secret, "GET", "/probe", ""); w.Code != 200 {
+		t.Fatalf("after reopen = %d, want 200", w.Code)
 	}
 }

@@ -14,11 +14,12 @@ import (
 // from Owned, plus the state changes (revoke, use) and the one lookup that is not owner-scoped.
 type Credentials struct {
 	*Owned[IntegrationCredential, *IntegrationCredential]
+	gate store.Collection
 }
 
 // NewCredentials builds the credential repository for db.
 func NewCredentials(db store.Database) *Credentials {
-	return &Credentials{NewOwned[IntegrationCredential](db, CredentialSpec)}
+	return &Credentials{NewOwned[IntegrationCredential](db, CredentialSpec), db.Collection(CollectionCredentialGate)}
 }
 
 // activeScope is owner's credentials that are neither revoked nor deleted.
@@ -85,4 +86,67 @@ func (r *Credentials) Authenticate(ctx context.Context, secretHash string) (Inte
 		return out, ErrNotFound
 	}
 	return out, err
+}
+
+// Revoke reasons the platform sets (PADR-0039).
+const (
+	ReasonOwnerDenied      = "owner_denied"
+	ReasonOwnerRoleRemoved = "owner_role_removed"
+)
+
+// RevokeAllByOwner ends every active credential of owner, recording reason, and returns how many
+// it ended. Each pass takes one credential, so a retry after a failure finishes the rest. This is
+// the auth-event path, so it sets updated_by to the reason rather than a user.
+func (r *Credentials) RevokeAllByOwner(ctx context.Context, owner, reason string) (int, error) {
+	if strings.TrimSpace(owner) == "" || strings.TrimSpace(reason) == "" {
+		return 0, fmt.Errorf("%w: owner and reason are required", ErrInvalid)
+	}
+	n := 0
+	for {
+		now := r.now()
+		update := bson.D{
+			{Key: "$set", Value: bson.D{{Key: "revoked_at", Value: now}, {Key: "revoke_reason", Value: reason}, {Key: "updated_at", Value: now}, {Key: "updated_by", Value: reason}}},
+			{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}},
+		}
+		var out IntegrationCredential
+		err := r.c.FindOneAndUpdate(ctx, activeScope(owner), update, &out)
+		if errors.Is(err, store.ErrNotFound) {
+			return n, nil
+		}
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+}
+
+const gateID = "gate"
+
+// GateClosed reports whether the persisted gate is closed. No document means open.
+func (r *Credentials) GateClosed(ctx context.Context) (bool, error) {
+	var doc struct {
+		Closed bool `bson:"closed"`
+	}
+	err := r.gate.FindOne(ctx, bson.D{{Key: "_id", Value: gateID}}, &doc)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return doc.Closed, err
+}
+
+// SetGate persists the gate state so a restart cannot reopen it before a reconcile.
+func (r *Credentials) SetGate(ctx context.Context, closed bool) error {
+	col := r.gate
+	filter := bson.D{{Key: "_id", Value: gateID}}
+	update := bson.D{{Key: "$set", Value: bson.D{{Key: "closed", Value: closed}, {Key: "updated_at", Value: r.now()}}}}
+	var out bson.M
+	err := col.FindOneAndUpdate(ctx, filter, update, &out)
+	if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	err = col.InsertOne(ctx, bson.D{{Key: "_id", Value: gateID}, {Key: "closed", Value: closed}, {Key: "updated_at", Value: r.now()}})
+	if errors.Is(err, store.ErrDuplicate) {
+		return col.FindOneAndUpdate(ctx, filter, update, &out)
+	}
+	return err
 }

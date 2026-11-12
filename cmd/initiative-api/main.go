@@ -24,6 +24,7 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/events"
 	"github.com/sweetrpg/initiative-api/server"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
@@ -59,11 +60,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("themes: %v", err)
 	}
+	creds := domain.NewCredentials(db)
+	// Credentials stay off (503) until the auth-event consumer is bound and caught up, so a deny
+	// published while the service was down is applied before any secret authenticates (PADR-0039).
+	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
+		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
+	} else {
+		consumer := events.New(creds, creds)
+		if err := consumer.Start(context.Background(), natsURL, os.Getenv("NATS_DURABLE_NAME")); err != nil {
+			log.Fatalf("auth events: %v", err)
+		}
+		defer consumer.Stop()
+	}
 	svc := server.Services{
 		Authz:        authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
 		Entitlements: entitlements.New(cfg.EntitlementsAPIURL),
 		Themes:       themes,
-		Credentials:  domain.NewCredentials(db),
+		Credentials:  creds,
 		Rosters:      domain.NewRosters(db),
 		Encounters:   domain.NewEncounters(db),
 	}
