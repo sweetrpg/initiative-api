@@ -33,7 +33,7 @@ func TestNATSConsumerRevokesAndOpens(t *testing.T) {
 		t.Skip("NATS_TEST_URL not set")
 	}
 	id := time.Now().UnixNano()
-	stream, prefix := fmt.Sprintf("TEST_%d_AUTH_EVENTS", id), fmt.Sprintf("test%d.auth.events", id)
+	stream, prefix := fmt.Sprintf("TEST_%d_AUTH_EVENTS", id), fmt.Sprintf("test.auth.events.%d", id)
 	opts := []nats.Option{nats.UserInfo(os.Getenv("NATS_USER"), os.Getenv("NATS_PASSWORD"))}
 	conn, err := nats.Connect(url, opts...)
 	if err != nil {
@@ -43,7 +43,7 @@ func TestNATSConsumerRevokesAndOpens(t *testing.T) {
 	js, _ := jetstream.New(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: stream, Subjects: []string{prefix + ".>"}, Storage: jetstream.MemoryStorage}); err != nil {
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: stream, Subjects: []string{prefix + ".>"}, Storage: jetstream.FileStorage, MaxBytes: 1 << 20, MaxAge: 10 * time.Minute}); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = js.DeleteStream(context.Background(), stream) }()
