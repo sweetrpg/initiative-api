@@ -253,8 +253,9 @@ func (r *Sessions) RevokeInvite(ctx context.Context, sessionID, inviteID string)
 	return in, err
 }
 
-// RequestJoin records a pending request from userID. A rejected earlier request becomes pending
-// again; an existing pending one is returned unchanged.
+// RequestJoin records a pending request from userID. An earlier settled request becomes pending
+// again (the caller has checked the user is not a member, so an approved one means the approval
+// never finished); an existing pending one is returned unchanged.
 func (r *Sessions) RequestJoin(ctx context.Context, sessionID, userID string) (JoinRequest, error) {
 	var jr JoinRequest
 	if err := r.pairFilterOK(sessionID, userID); err != nil {
@@ -267,7 +268,7 @@ func (r *Sessions) RequestJoin(ctx context.Context, sessionID, userID string) (J
 		return jr, r.requests.InsertOne(ctx, jr)
 	case err != nil:
 		return jr, err
-	case jr.Status != RequestRejected:
+	case jr.Status == RequestPending:
 		return jr, nil
 	}
 	// Decode into a fresh value: decoding over jr would keep the fields the update removed.

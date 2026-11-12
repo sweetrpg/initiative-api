@@ -447,3 +447,22 @@ func TestRevokeInviteTwiceIsHarmless(t *testing.T) {
 		t.Fatalf("invites = %+v", page.Items)
 	}
 }
+
+func TestJoinHealsAnApprovalThatNeverAddedTheMember(t *testing.T) {
+	s := newSessions(t)
+	sess, _ := s.Create(ctx, "gm", "Friday")
+	_, code, _ := s.CreateInvite(ctx, "gm", sess.ID, 0)
+	jr, _ := s.Join(ctx, "u", code)
+	if _, err := s.repo.Decide(ctx, sess.ID, jr.ID, data.RequestApproved, data.RolePlayer, "", "gm"); err != nil {
+		t.Fatal(err) // settled, but no member was added
+	}
+
+	again, err := s.Join(ctx, "u", code)
+
+	if err != nil || again.Status != data.RequestPending {
+		t.Fatalf("join = %+v, %v; want a fresh pending request", again, err)
+	}
+	if _, err := s.Approve(ctx, "gm", sess.ID, again.ID, data.RolePlayer); err != nil {
+		t.Fatalf("approve after healing = %v", err)
+	}
+}
