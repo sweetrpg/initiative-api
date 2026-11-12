@@ -70,9 +70,9 @@ func TestMongoFindByExternalRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Disconnect(ctx) }()
-	// Runs in the shared test database (sweetrpg-tests) under a unique collection prefix; only those collections
+	// Runs in the shared test database (sweetrpg-test) under a unique collection prefix; only those collections
 	// are dropped, never the database.
-	db := client.Database("sweetrpg-tests")
+	db := client.Database("sweetrpg-test")
 	pdb := prefixedDB{Database: store.MongoDatabase{DB: db}, prefix: fmt.Sprintf("it_%d_", time.Now().UnixNano())}
 	t.Cleanup(func() { _ = db.Collection(pdb.prefix + CollectionEncounters).Drop(ctx) })
 
