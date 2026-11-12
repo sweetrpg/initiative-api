@@ -40,6 +40,10 @@ func TestFamilyFieldSets(t *testing.T) {
 		{"cypher", "[intellect intellectMaximum might mightMaximum speed speedMaximum]"},
 		{"theonering", "[endurance enduranceRating fatigue hope hopeRating miserable shadow weary wounded]"},
 		{"shadowrun5", "[value1 value1Maximum value2 value2Maximum]"},
+		{"pathfinder2", "[current doomed dying maximum temporary wounded]"},
+		{"shadowofthedemonlord", "[damage health]"},
+		{"shadowoftheweirdwizard", "[damage health]"},
+		{"twilight2000", "[damage hitCapacity stress stressCapacity]"},
 	}
 	defs := byID(t)
 	for _, tt := range tests {
@@ -134,4 +138,49 @@ func TestExpandAcceptsDistinctIdentifiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestSupportedSystemsResolveByFoundryID(t *testing.T) {
+	db := fake.NewDB()
+	repo := data.NewSystemRepo(db)
+	if _, err := Load(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"dnd5e": "dnd5", "pf2e": "pathfinder2", "cyphersystem": "cypher", "demonlord": "shadowofthedemonlord",
+		"weirdwizard": "shadowoftheweirdwizard", "t2k4e": "twilight2000", "genesys": "genesys",
+	}
+	for foundry, id := range want {
+		got, err := repo.Get(context.Background(), foundry)
+		if err != nil || got.ID != id {
+			t.Errorf("Get(%q) = %q, %v; want %q", foundry, got.ID, err, id)
+		}
+	}
+}
+
+func TestPathfinder2UsesItsOwnBounds(t *testing.T) {
+	want := map[string][2]int{"dying": {0, 4}, "wounded": {0, 4}, "doomed": {0, 4}}
+	found := map[string]bool{}
+	for _, f := range byID(t)["pathfinder2"].Fields {
+		b, ok := want[f.Key]
+		if !ok {
+			continue
+		}
+		found[f.Key] = true
+		if f.Min == nil || f.Max == nil || *f.Min != b[0] || *f.Max != b[1] {
+			t.Errorf("%s bounds = %v..%v, want %d..%d", f.Key, f.Min, f.Max, b[0], b[1])
+		}
+	}
+	if len(found) != len(want) {
+		t.Fatalf("found %v, want all of %v", found, want)
+	}
+}
+
+func TestTwilight2000StressIsBoundedByItsCapacity(t *testing.T) {
+	for _, f := range byID(t)["twilight2000"].Fields {
+		if f.Key == "stress" && f.MaxRef == "stressCapacity" {
+			return
+		}
+	}
+	t.Fatal("stress has no max_ref to stressCapacity")
 }
