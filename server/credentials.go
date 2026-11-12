@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -129,4 +130,57 @@ func setupAdminCredentialHandlers(g *gin.RouterGroup, creds *domain.Credentials)
 		slog.WarnContext(c.Request.Context(), "audit: integration credentials reopened", "audit", true, "actor", actor, "correlation_id", CorrelationID(c))
 		c.JSON(http.StatusOK, gin.H{"open": true})
 	})
+	g.GET("/admin/credentials", func(c *gin.Context) { adminListCredentials(c, creds) })
+	g.GET("/admin/credentials/deletions", func(c *gin.Context) { adminDeletions(c, creds) })
+	g.DELETE("/admin/credentials/:id", func(c *gin.Context) { adminDeleteCredential(c, creds) })
+}
+
+// adminListCredentials lists any owner's credentials; ?owner= narrows it. Secrets and hashes are
+// never in the model's JSON.
+func adminListCredentials(c *gin.Context, creds *domain.Credentials) {
+	q := data.Query{Cursor: c.Query("cursor")}
+	if v := c.Query("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			badRequest(c, "limit must be a positive integer")
+			return
+		}
+		q.Limit = n
+	}
+	page, err := creds.ListAll(c.Request.Context(), c.Query("owner"), q)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": page.Items, "next_cursor": page.NextCursor})
+}
+
+func adminDeletions(c *gin.Context, creds *domain.Credentials) {
+	items, err := creds.Deletions(c.Request.Context(), c.Query("owner"))
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+// adminDeleteCredential deletes a credential permanently. The reason is required; the audit entry
+// is stored before the credential goes and is logged as well.
+func adminDeleteCredential(c *gin.Context, creds *domain.Credentials) {
+	var b struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&b); err != nil || strings.TrimSpace(b.Reason) == "" {
+		c.AbortWithStatusJSON(http.StatusUnprocessableEntity, ErrorBody{Code: "reason_required", Message: "A reason is required to delete a credential.", CorrelationID: CorrelationID(c)})
+		return
+	}
+	actor := authz.Viewer(c)
+	entry, err := creds.DeletePermanently(c.Request.Context(), actor, c.Param("id"), b.Reason)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	slog.WarnContext(c.Request.Context(), "audit: integration credential deleted", "audit", true, "actor", actor,
+		"credential_id", entry.CredentialID, "owner", entry.OwnerUserID, "label", entry.Label, "reason", entry.Reason, "correlation_id", CorrelationID(c))
+	c.JSON(http.StatusOK, entry)
 }

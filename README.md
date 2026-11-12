@@ -56,6 +56,14 @@ Invalid values stop the process at startup with every problem listed.
   has caught up, and stay off if `NATS_URL` is unset or the consumer fell behind the stream's
   retention. `POST /admin/credentials/reopen` (admin bearer only) clears that close and logs an audit
   entry; the gate records the actor.
+  Administrator routes (admin bearer only, no credentials): `GET /admin/credentials[?owner=]` lists
+  any owner's credentials (never the secret or hash); `DELETE /admin/credentials/{id}` with
+  `{"reason": "..."}` removes one for good, at once; `GET /admin/credentials/deletions[?owner=]`
+  lists the audit entries. The entry (administrator, owner, credential id, label, scopes, reason,
+  time) goes to `integration_credential_deletions` before the credential is removed, and has no
+  update or delete path. `Credentials.Live(id)` is what an open stream re-checks.
+  Delete class (PADR-0027): `integration_credentials` are soft delete for the owner's own removal
+  (revoke) and hard delete only through the administrator route above.
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written

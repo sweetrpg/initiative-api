@@ -163,5 +163,30 @@ func (s *Credentials) Authenticate(ctx context.Context, secret string) (data.Int
 	return s.repo.Authenticate(ctx, hashSecret(secret))
 }
 
+// ListAll returns credentials across owners for an administrator, optionally for one owner.
+func (s *Credentials) ListAll(ctx context.Context, owner string, q data.Query) (data.Page[data.IntegrationCredential], error) {
+	return s.repo.ListAll(ctx, owner, q)
+}
+
+// DeletePermanently removes a credential for good at an administrator's say-so and records the
+// reason. The next request with its secret fails, and Live turns false for open streams.
+func (s *Credentials) DeletePermanently(ctx context.Context, admin, id, reason string) (data.CredentialDeletion, error) {
+	return s.repo.DeletePermanently(ctx, admin, id, reason)
+}
+
+// Deletions lists the audit entries of administrator deletions, optionally for one owner.
+func (s *Credentials) Deletions(ctx context.Context, owner string) ([]data.CredentialDeletion, error) {
+	return s.repo.Deletions(ctx, owner)
+}
+
+// Live reports whether credential id can still authenticate. A stream authenticated by a
+// credential calls it on each heartbeat or event and closes when it turns false.
+func (s *Credentials) Live(ctx context.Context, id string) (bool, error) {
+	if !s.open.Load() {
+		return false, nil
+	}
+	return s.repo.Live(ctx, id)
+}
+
 // Items is the credential repository as limit enforcement sees it; revoked credentials are not counted.
 func (s *Credentials) Items() Limited { return s.repo }

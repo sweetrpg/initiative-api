@@ -14,12 +14,12 @@ import (
 // from Owned, plus the state changes (revoke, use) and the one lookup that is not owner-scoped.
 type Credentials struct {
 	*Owned[IntegrationCredential, *IntegrationCredential]
-	gate store.Collection
+	gate, deletions store.Collection
 }
 
 // NewCredentials builds the credential repository for db.
 func NewCredentials(db store.Database) *Credentials {
-	return &Credentials{NewOwned[IntegrationCredential](db, CredentialSpec), db.Collection(CollectionCredentialGate)}
+	return &Credentials{NewOwned[IntegrationCredential](db, CredentialSpec), db.Collection(CollectionCredentialGate), db.Collection(CollectionCredentialDeletions)}
 }
 
 // activeScope is owner's credentials that are neither revoked nor deleted.

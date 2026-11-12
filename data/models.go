@@ -14,6 +14,8 @@ const (
 	CollectionGameSystems    = "game_systems"
 	CollectionCredentials    = "integration_credentials"
 	CollectionCredentialGate = "integration_credential_gate"
+	// CollectionCredentialDeletions is the append-only audit of administrator deletions.
+	CollectionCredentialDeletions = "integration_credential_deletions"
 )
 
 // Character kinds.
