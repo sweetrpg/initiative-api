@@ -97,7 +97,7 @@ jobs:
 
       - name: Read git info
         id: git_info
-        uses: YunaBraska/git-info-action@3.0.17
+        uses: YunaBraska/git-info-action@3.0.18
         with:
           work-dir: "."
           branch-fallback: "master"
