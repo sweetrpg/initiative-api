@@ -148,7 +148,7 @@ func TestSupportedSystemsResolveByFoundryID(t *testing.T) {
 	}
 	want := map[string]string{
 		"dnd5e": "dnd5", "pf2e": "pathfinder2", "cyphersystem": "cypher", "demonlord": "shadowofthedemonlord",
-		"weirdwizard": "shadowoftheweirdwizard", "t2k4e": "twilight2000", "genesys": "genesys",
+		"weirdwizard": "shadowoftheweirdwizard", "t2k4e": "twilight2000", "genesys": "genesys", "tor2e": "theonering",
 	}
 	for foundry, id := range want {
 		got, err := repo.Get(context.Background(), foundry)
@@ -184,3 +184,34 @@ func TestTwilight2000StressIsBoundedByItsCapacity(t *testing.T) {
 	}
 	t.Fatal("stress has no max_ref to stressCapacity")
 }
+
+func TestTheOneRingBounds(t *testing.T) {
+	want := map[string]struct {
+		min  int
+		max  *int
+		ref  string
+		kind string
+	}{
+		"endurance": {0, nil, "enduranceRating", "pool"}, "hope": {0, nil, "hopeRating", "pool"},
+		"enduranceRating": {0, nil, "", "counter"}, "hopeRating": {0, nil, "", "counter"},
+		"fatigue": {0, nil, "", "counter"}, "shadow": {0, nil, "", "counter"},
+		"weary": {0, ptr(1), "", "flag"}, "wounded": {0, ptr(1), "", "flag"}, "miserable": {0, ptr(1), "", "flag"},
+	}
+	found := 0
+	for _, f := range byID(t)["theonering"].Fields {
+		w, ok := want[f.Key]
+		if !ok {
+			t.Errorf("unexpected field %q", f.Key)
+			continue
+		}
+		found++
+		if f.Min == nil || *f.Min != w.min || f.MaxRef != w.ref || f.Kind != w.kind || (w.max == nil) != (f.Max == nil) || (w.max != nil && *f.Max != *w.max) {
+			t.Errorf("%s = %+v, want %+v", f.Key, f, w)
+		}
+	}
+	if found != len(want) {
+		t.Fatalf("found %d of %d fields", found, len(want))
+	}
+}
+
+func ptr(n int) *int { return &n }
