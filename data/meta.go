@@ -19,8 +19,10 @@ type Meta struct {
 	Revision int64 `bson:"revision" json:"revision"`
 	// InactiveAt is set while the record is over the owner's limit: readable and deletable, not
 	// usable. KeepRank is the owner's choice order (1 first); zero means no choice was made.
-	InactiveAt       *time.Time `bson:"inactive_at,omitempty" json:"inactive_at,omitempty"`
-	KeepRank         int        `bson:"keep_rank,omitempty" json:"-"`
+	InactiveAt *time.Time `bson:"inactive_at,omitempty" json:"inactive_at,omitempty"`
+	KeepRank   int        `bson:"keep_rank,omitempty" json:"-"`
+	// LockedAt is set while the record uses a gated game system its owner is not entitled to.
+	LockedAt         *time.Time `bson:"locked_at,omitempty" json:"locked_at,omitempty"`
 	models.Auditable `bson:",inline"`
 }
 

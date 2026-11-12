@@ -9,6 +9,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
+	"github.com/sweetrpg/initiative-api/domain"
+	"github.com/sweetrpg/initiative-api/entitlements"
 )
 
 // reconcileEvery bounds how often one owner's limits are re-read on ordinary requests. The
@@ -25,8 +27,16 @@ func reconcileLimits(s Services) gin.HandlerFunc {
 	var last sync.Map // owner -> time of the last reconcile
 	run := func(c *gin.Context, owner string) {
 		last.Store(owner, time.Now())
-		if err := s.Limits.Reconcile(c.Request.Context(), owner, checkerFor(c, s.Entitlements)); err != nil {
-			slog.WarnContext(c.Request.Context(), "limit reconcile failed", "error", err)
+		chk := checkerFor(c, s.Entitlements)
+		if s.Limits != nil {
+			if err := s.Limits.Reconcile(c.Request.Context(), owner, chk); err != nil {
+				slog.WarnContext(c.Request.Context(), "limit reconcile failed", "error", err)
+			}
+		}
+		if s.Locks != nil {
+			if err := s.Locks.Reconcile(c.Request.Context(), owner, chk); err != nil {
+				slog.WarnContext(c.Request.Context(), "game-system lock reconcile failed", "error", err)
+			}
 		}
 	}
 	return func(c *gin.Context) {
@@ -47,6 +57,15 @@ func reconcileLimits(s Services) gin.HandlerFunc {
 			(c.Request.Method == http.MethodDelete || strings.HasSuffix(c.FullPath(), "/revoke")) {
 			run(c, owner)
 		}
+	}
+}
+
+// withChecker puts the caller's entitlement checker on the request context for domain rules that
+// check a flag mid-operation, such as choosing a gated game system.
+func withChecker(ent *entitlements.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request = c.Request.WithContext(domain.WithChecker(c.Request.Context(), checkerFor(c, ent)))
+		c.Next()
 	}
 }
 

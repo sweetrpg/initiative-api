@@ -213,7 +213,7 @@ func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id s
 	if !ok {
 		return out, ErrNotFound
 	}
-	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision}, bson.E{Key: "inactive_at", Value: nil})
+	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision}, bson.E{Key: "inactive_at", Value: nil}, bson.E{Key: "locked_at", Value: nil})
 	update := bson.D{
 		{Key: "$set", Value: setDoc(set,
 			bson.E{Key: "updated_at", Value: r.now()}, bson.E{Key: "updated_by", Value: actingUserID})},
@@ -222,9 +222,14 @@ func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id s
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &out)
 	if errors.Is(err, store.ErrNotFound) {
 		cur, cerr := r.classify(ctx, ownerUserID, id)
-		if errors.Is(cerr, ErrRevisionConflict) && P(&cur).GetMeta().InactiveAt != nil {
+		if errors.Is(cerr, ErrRevisionConflict) {
 			var zero T
-			return zero, ErrInactive
+			switch m := P(&cur).GetMeta(); {
+			case m.LockedAt != nil:
+				return zero, ErrLocked
+			case m.InactiveAt != nil:
+				return zero, ErrInactive
+			}
 		}
 		return cur, cerr
 	}

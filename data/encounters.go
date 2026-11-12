@@ -328,3 +328,35 @@ func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value st
 	}
 	return out, nil
 }
+
+// LockGated locks owner's encounters that use a game system other than No System, and returns how
+// many it locked. A locked encounter keeps all its data; only writes stop (spec
+// initiative-game-systems, "Losing the entitlement locks gated-system items"). Each pass takes one
+// encounter, so a retry after a failure finishes the rest.
+func (r *Encounters) LockGated(ctx context.Context, owner string) (int, error) {
+	filter := append(scope(owner),
+		bson.E{Key: "game_system_id", Value: bson.D{{Key: "$ne", Value: DefaultSystemID}}},
+		bson.E{Key: "locked_at", Value: nil})
+	return r.flip(ctx, filter, bson.D{{Key: "$set", Value: bson.D{{Key: "locked_at", Value: r.now()}}}})
+}
+
+// UnlockAll restores owner's locked encounters exactly as they were.
+func (r *Encounters) UnlockAll(ctx context.Context, owner string) (int, error) {
+	filter := append(scope(owner), bson.E{Key: "locked_at", Value: bson.D{{Key: "$ne", Value: nil}}})
+	return r.flip(ctx, filter, bson.D{{Key: "$unset", Value: bson.D{{Key: "locked_at", Value: ""}}}})
+}
+
+func (r *Encounters) flip(ctx context.Context, filter, update bson.D) (int, error) {
+	n := 0
+	for {
+		var out Encounter
+		err := r.c.FindOneAndUpdate(ctx, filter, update, &out)
+		if errors.Is(err, store.ErrNotFound) {
+			return n, nil
+		}
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+}
