@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,9 +25,23 @@ type CredentialDeletion struct {
 	CreatedAt    time.Time `bson:"created_at" json:"deleted_at"`
 }
 
+// ownerPattern is the shape of a user id (Auth0 subject or users-api id). An owner filter taken
+// from a request must match it, so only a plain id can reach a query.
+var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9_.|:-]{1,128}$`)
+
+func checkOwner(owner string) error {
+	if owner != "" && !ownerPattern.MatchString(owner) {
+		return invalid("owner is not a valid user id")
+	}
+	return nil
+}
+
 // ListAll returns one page of credentials across owners, newest first. owner narrows it to one
 // owner when set. Administrator use only: callers gate it on the admin role.
 func (r *Credentials) ListAll(ctx context.Context, owner string, q Query) (Page[IntegrationCredential], error) {
+	if err := checkOwner(owner); err != nil {
+		return Page[IntegrationCredential]{}, err
+	}
 	base := bson.D{{Key: "deleted_at", Value: nil}}
 	if owner != "" {
 		base = append(base, bson.E{Key: "owner_user_id", Value: owner})
@@ -89,6 +104,9 @@ func (r *Credentials) DeletePermanently(ctx context.Context, actor, id, reason s
 // Deletions lists the audit entries for credentials deleted from owner's account (all owners
 // when owner is empty), newest first.
 func (r *Credentials) Deletions(ctx context.Context, owner string) ([]CredentialDeletion, error) {
+	if err := checkOwner(owner); err != nil {
+		return nil, err
+	}
 	filter := bson.D{}
 	if owner != "" {
 		filter = bson.D{{Key: "owner_user_id", Value: owner}}

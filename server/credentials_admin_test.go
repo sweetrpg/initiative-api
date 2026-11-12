@@ -126,3 +126,12 @@ func TestAdminListPages(t *testing.T) {
 		t.Fatalf("first = %v, second = %v", first, second)
 	}
 }
+
+func TestAdminOwnerFilterMustBeAPlainUserID(t *testing.T) {
+	r := credRouter(t, "3")
+	for _, path := range []string{"/admin/credentials?owner=%7B%22%24ne%22%3A1%7D", "/admin/credentials/deletions?owner=a%20b"} {
+		if w := callAs(r, "admin-ok", "GET", path, ""); w.Code != http.StatusUnprocessableEntity && w.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want a client error", path, w.Code)
+		}
+	}
+}
