@@ -193,6 +193,7 @@ func TestTheOneRingBounds(t *testing.T) {
 		kind string
 	}{
 		"endurance": {0, nil, "enduranceRating", "pool"}, "hope": {0, nil, "hopeRating", "pool"},
+		"enduranceRating": {0, nil, "", "counter"}, "hopeRating": {0, nil, "", "counter"},
 		"fatigue": {0, nil, "", "counter"}, "shadow": {0, nil, "", "counter"},
 		"weary": {0, ptr(1), "", "flag"}, "wounded": {0, ptr(1), "", "flag"}, "miserable": {0, ptr(1), "", "flag"},
 	}
@@ -200,6 +201,7 @@ func TestTheOneRingBounds(t *testing.T) {
 	for _, f := range byID(t)["theonering"].Fields {
 		w, ok := want[f.Key]
 		if !ok {
+			t.Errorf("unexpected field %q", f.Key)
 			continue
 		}
 		found++
