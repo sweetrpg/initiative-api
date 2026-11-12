@@ -64,6 +64,17 @@ Invalid values stop the process at startup with every problem listed.
   update or delete path. `Credentials.Live(id)` is what an open stream re-checks.
   Delete class (PADR-0027): `integration_credentials` are soft delete for the owner's own removal
   (revoke) and hard delete only through the administrator route above.
+- Sessions (user bearer only, no integration credentials): `POST /sessions`, `GET /sessions`,
+  `GET|DELETE /sessions/{id}` (delete is the GM's, with `?revision=`), `POST /sessions/{id}/leave`.
+  Members: `GET /sessions/{id}/members`, `PATCH|DELETE /sessions/{id}/members/{user}`. Invites:
+  `POST|GET /sessions/{id}/invites` (the code is returned once, only its hash is stored),
+  `DELETE /sessions/{id}/invites/{invite}` revokes. Joining: `POST /sessions/join {code}` makes a
+  pending request that grants nothing; `GET /sessions/{id}/requests`, `POST .../requests/{id}/approve
+  {role}` or `/reject {reason}`. Blocks: `GET|POST /sessions/{id}/blocks`, `DELETE .../blocks/{user}`.
+  Roles are `gm` (the creator, exactly one), `co_gm`, `player`, `observer`; `domain.Allowed` is the
+  one role table. Membership collections are the source of truth for who holds a role. Membership,
+  invite, request and block records and the session are all soft-deleted (`deleted_at`, `deleted_by`;
+  PADR-0027), and a `live` marker lets the unique indexes ignore deleted rows.
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written

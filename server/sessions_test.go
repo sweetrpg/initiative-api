@@ -1,0 +1,204 @@
+package server
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+)
+
+// sessionTable has user-ok (u-1) as GM, user-two (u-2) as a player; user-three (u-3) is outside.
+func sessionTable(t *testing.T) (r http.Handler, id string) {
+	t.Helper()
+	router, _ := credRouterWith(t, "3")
+	w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", w.Code, w.Body)
+	}
+	id = decodeBody(t, w)["id"].(string)
+	code := inviteCode(t, router, "user-ok", id)
+	w = callAs(router, "user-two", "POST", "/sessions/join", `{"code":"`+code+`"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("join = %d %s", w.Code, w.Body)
+	}
+	reqID := decodeBody(t, w)["id"].(string)
+	if w := callAs(router, "user-ok", "POST", "/sessions/"+id+"/requests/"+reqID+"/approve", `{"role":"player"}`); w.Code != 200 {
+		t.Fatalf("approve = %d %s", w.Code, w.Body)
+	}
+	return router, id
+}
+
+func inviteCode(t *testing.T, r http.Handler, token, id string) string {
+	t.Helper()
+	w := callAs(r, token, "POST", "/sessions/"+id+"/invites", "")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("invite = %d %s", w.Code, w.Body)
+	}
+	return decodeBody(t, w)["code"].(string)
+}
+
+func TestSessionLifecycleOverHTTP(t *testing.T) {
+	r, id := sessionTable(t)
+
+	get := callAs(r, "user-two", "GET", "/sessions/"+id, "")
+	list := callAs(r, "user-two", "GET", "/sessions", "")
+	members := callAs(r, "user-two", "GET", "/sessions/"+id+"/members", "")
+
+	if get.Code != 200 || decodeBody(t, get)["role"] != "player" {
+		t.Fatalf("get = %d %s", get.Code, get.Body)
+	}
+	if n := len(decodeBody(t, list)["items"].([]any)); n != 1 {
+		t.Fatalf("player lists %d sessions", n)
+	}
+	items := decodeBody(t, members)["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("members = %v", items)
+	}
+	for _, it := range items {
+		m := it.(map[string]any)
+		if m["user_id"] == nil || m["role"] == nil || m["email"] != nil {
+			t.Fatalf("member entry = %v, want user_id and role and no email", m)
+		}
+	}
+}
+
+func TestNonMemberAndPendingUserGetNothing(t *testing.T) {
+	r, id := sessionTable(t)
+	code := inviteCode(t, r, "user-ok", id)
+	w := callAs(r, "user-three", "POST", "/sessions/join", `{"code":"`+code+`"}`)
+
+	for _, path := range []string{"/sessions/" + id, "/sessions/" + id + "/members", "/sessions/" + id + "/requests"} {
+		if got := callAs(r, "user-three", "GET", path, ""); got.Code != http.StatusForbidden {
+			t.Errorf("pending user GET %s = %d, want 403", path, got.Code)
+		}
+	}
+	body := decodeBody(t, w)
+	if w.Code != http.StatusAccepted || body["status"] != "pending" || body["session_id"] != nil || body["name"] != nil {
+		t.Fatalf("join = %d %v, want only an id and a pending state", w.Code, body)
+	}
+}
+
+func TestPlayerCannotManage(t *testing.T) {
+	r, id := sessionTable(t)
+	routes := [][3]string{
+		{"POST", "/sessions/" + id + "/invites", ""},
+		{"GET", "/sessions/" + id + "/invites", ""},
+		{"GET", "/sessions/" + id + "/requests", ""},
+		{"DELETE", "/sessions/" + id + "/members/u-1", ""},
+		{"PATCH", "/sessions/" + id + "/members/u-1", `{"role":"observer"}`},
+		{"POST", "/sessions/" + id + "/blocks", `{"user_id":"u-3"}`},
+		{"DELETE", "/sessions/" + id + "?revision=1", ""},
+	}
+	for _, rt := range routes {
+		if w := callAs(r, "user-two", rt[0], rt[1], rt[2]); w.Code != http.StatusForbidden {
+			t.Errorf("player %s %s = %d, want 403", rt[0], rt[1], w.Code)
+		}
+	}
+	if w := callAs(r, "user-ok", "GET", "/sessions/"+id, ""); w.Code != 200 {
+		t.Fatalf("session after refused calls = %d", w.Code)
+	}
+}
+
+func TestGMDeletesSessionAndMembersLoseAccess(t *testing.T) {
+	r, id := sessionTable(t)
+	v := decodeBody(t, callAs(r, "user-ok", "GET", "/sessions/"+id, ""))
+
+	w := callAs(r, "user-ok", "DELETE", "/sessions/"+id+"?revision=1", "")
+
+	if v["revision"] != float64(1) || w.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", w.Code, w.Body)
+	}
+	if w := callAs(r, "user-two", "GET", "/sessions/"+id, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("former member = %d, want 404", w.Code)
+	}
+}
+
+func TestRemoveAndBlockOverHTTP(t *testing.T) {
+	r, id := sessionTable(t)
+	code := inviteCode(t, r, "user-ok", id)
+
+	if w := callAs(r, "user-ok", "POST", "/sessions/"+id+"/blocks", `{"user_id":"u-2"}`); w.Code != http.StatusNoContent {
+		t.Fatalf("block = %d %s", w.Code, w.Body)
+	}
+
+	if w := callAs(r, "user-two", "GET", "/sessions/"+id, ""); w.Code != http.StatusForbidden {
+		t.Errorf("blocked member = %d, want 403", w.Code)
+	}
+	w := callAs(r, "user-two", "POST", "/sessions/join", `{"code":"`+code+`"}`)
+	if w.Code != http.StatusUnprocessableEntity || decodeBody(t, w)["code"] != "invalid" {
+		t.Errorf("blocked join = %d %s", w.Code, w.Body)
+	}
+	blocks := decodeBody(t, callAs(r, "user-ok", "GET", "/sessions/"+id+"/blocks", ""))["items"].([]any)
+	if len(blocks) != 1 {
+		t.Errorf("blocks = %v", blocks)
+	}
+	if w := callAs(r, "user-ok", "DELETE", "/sessions/"+id+"/blocks/u-2", ""); w.Code != http.StatusNoContent {
+		t.Errorf("unblock = %d", w.Code)
+	}
+}
+
+func TestInviteRevokeRejectAndLeaveOverHTTP(t *testing.T) {
+	r, id := sessionTable(t)
+	w := callAs(r, "user-ok", "POST", "/sessions/"+id+"/invites", `{"ttl_hours":2}`)
+	inv := decodeBody(t, w)
+	invID := inv["invite"].(map[string]any)["id"].(string)
+	code := inv["code"].(string)
+
+	if w := callAs(r, "user-ok", "DELETE", "/sessions/"+id+"/invites/"+invID, ""); w.Code != 200 {
+		t.Fatalf("revoke = %d %s", w.Code, w.Body)
+	}
+	if w := callAs(r, "user-three", "POST", "/sessions/join", `{"code":"`+code+`"}`); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("revoked invite = %d, want 422", w.Code)
+	}
+	live := inviteCode(t, r, "user-ok", id)
+	reqID := decodeBody(t, callAs(r, "user-three", "POST", "/sessions/join", `{"code":"`+live+`"}`))["id"].(string)
+	if w := callAs(r, "user-ok", "POST", "/sessions/"+id+"/requests/"+reqID+"/reject", `{}`); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("reject without reason = %d, want 422", w.Code)
+	}
+	if w := callAs(r, "user-ok", "POST", "/sessions/"+id+"/requests/"+reqID+"/reject", `{"reason":"no"}`); w.Code != 200 {
+		t.Errorf("reject = %d %s", w.Code, w.Body)
+	}
+	if w := callAs(r, "user-two", "POST", "/sessions/"+id+"/leave", ""); w.Code != http.StatusNoContent {
+		t.Errorf("leave = %d", w.Code)
+	}
+	if w := callAs(r, "user-ok", "POST", "/sessions/"+id+"/leave", ""); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("GM leave = %d, want 422", w.Code)
+	}
+}
+
+func TestSessionRoutesRejectBadInput(t *testing.T) {
+	r, id := sessionTable(t)
+	tests := []struct {
+		name, method, path, body string
+		want                     int
+	}{
+		{"create without a name", "POST", "/sessions", `{}`, http.StatusUnprocessableEntity},
+		{"create with bad json", "POST", "/sessions", `nope`, http.StatusBadRequest},
+		{"join without a code", "POST", "/sessions/join", `{}`, http.StatusBadRequest},
+		{"delete without revision", "DELETE", "/sessions/" + id, "", http.StatusBadRequest},
+		{"bad limit", "GET", "/sessions?limit=abc", "", http.StatusBadRequest},
+		{"unknown session", "GET", "/sessions/64b7f0f0f0f0f0f0f0f0f0f0", "", http.StatusNotFound},
+		{"set role with bad json", "PATCH", "/sessions/" + id + "/members/u-2", `x`, http.StatusBadRequest},
+		{"set role to gm", "PATCH", "/sessions/" + id + "/members/u-2", `{"role":"gm"}`, http.StatusUnprocessableEntity},
+		{"bad invite lifetime", "POST", "/sessions/" + id + "/invites", `{"ttl_hours":1000}`, http.StatusUnprocessableEntity},
+		{"approve with no role", "POST", "/sessions/" + id + "/requests/x/approve", `{}`, http.StatusUnprocessableEntity},
+		{"block with a non-id", "POST", "/sessions/" + id + "/blocks", `{"user_id":"a b"}`, http.StatusUnprocessableEntity},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if w := callAs(r, "user-ok", tt.method, tt.path, tt.body); w.Code != tt.want {
+				t.Fatalf("%s %s = %d %s, want %d", tt.method, tt.path, w.Code, w.Body, tt.want)
+			}
+		})
+	}
+}
+
+func TestIntegrationCredentialsCannotUseSessions(t *testing.T) {
+	r, id := sessionTable(t)
+	_, secret := issue(t, r, "user-ok", `["read","write"]`)
+	for _, path := range []string{"/sessions", "/sessions/" + id} {
+		w := callAs(r, secret, "GET", path, "")
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "user_token_required") {
+			t.Errorf("credential GET %s = %d %s, want 403 user_token_required", path, w.Code, w.Body)
+		}
+	}
+}
