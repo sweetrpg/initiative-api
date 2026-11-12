@@ -33,7 +33,14 @@ type event struct {
 	EventID  string `json:"event_id"`
 	EntityID string `json:"entity_id"`
 	Action   string `json:"action"`
+	Data     struct {
+		Service string `json:"service"`
+	} `json:"data"`
 }
+
+// ServiceID is the name auth-api's deny entries use for this service. A deny of any other service
+// says nothing about initiative credentials.
+const ServiceID = "initiative-api"
 
 // Revoker ends a subject's credentials. domain.Credentials implements it.
 type Revoker interface {
@@ -55,7 +62,7 @@ func handle(ctx context.Context, rev Revoker, body []byte) error {
 		return nil
 	}
 	reason := map[string]string{kindDeny: data.ReasonOwnerDenied, kindRoleRemoved: data.ReasonOwnerRoleRemoved}[ev.Action]
-	if reason == "" || ev.EntityID == "" {
+	if reason == "" || ev.EntityID == "" || (ev.Action == kindDeny && ev.Data.Service != ServiceID) {
 		return nil
 	}
 	n, err := rev.RevokeOwner(ctx, ev.EntityID, reason)

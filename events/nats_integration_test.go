@@ -48,7 +48,7 @@ func TestNATSConsumerRevokesAndOpens(t *testing.T) {
 	}
 	defer func() { _ = js.DeleteStream(context.Background(), stream) }()
 	// Published before the consumer exists: replay must still revoke.
-	if _, err := js.Publish(ctx, prefix+".deny", []byte(`{"event_id":"e1","entity_id":"auth0|a","action":"deny"}`)); err != nil {
+	if _, err := js.Publish(ctx, prefix+".deny", []byte(`{"event_id":"e1","entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	rev, gate := chanRevoker{make(chan [2]string, 4)}, fakeGate{make(chan struct{})}

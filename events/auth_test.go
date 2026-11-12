@@ -18,8 +18,10 @@ func (r *rec) RevokeOwner(_ context.Context, owner, reason string) (int, error) 
 
 func TestHandleMapsKindToReason(t *testing.T) {
 	tests := []struct{ name, body, owner, reason string }{
-		{"deny", `{"event_id":"e1","entity_id":"auth0|a","action":"deny"}`, "auth0|a", "owner_denied"},
+		{"deny", `{"event_id":"e1","entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`, "auth0|a", "owner_denied"},
 		{"role removed", `{"event_id":"e2","entity_id":"auth0|b","action":"role_removed"}`, "auth0|b", "owner_role_removed"},
+		{"deny of another service", `{"entity_id":"auth0|a","action":"deny","data":{"service":"catalog-api"}}`, "", ""},
+		{"deny without a service", `{"entity_id":"auth0|a","action":"deny"}`, "", ""},
 		{"unrelated action", `{"entity_id":"auth0|c","action":"role_added"}`, "", ""},
 		{"no subject", `{"action":"deny"}`, "", ""},
 		{"not json", `nope`, "", ""},
@@ -39,7 +41,7 @@ func TestHandleMapsKindToReason(t *testing.T) {
 
 func TestHandleFailedRevokeIsRetried(t *testing.T) {
 	r := &rec{err: errors.New("db down")}
-	if err := handle(context.Background(), r, []byte(`{"entity_id":"auth0|a","action":"deny"}`)); err == nil {
+	if err := handle(context.Background(), r, []byte(`{"entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`)); err == nil {
 		t.Fatal("failed revoke was acked; the deny would be lost")
 	}
 }
