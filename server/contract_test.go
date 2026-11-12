@@ -32,7 +32,9 @@ func normalize(v any) any {
 		for k, val := range x {
 			switch k {
 			case "created_at", "updated_at", "last_used_at", "revoked_at", "deleted_at":
-				x[k] = "TIMESTAMP"
+				if val != nil { // null is part of the contract and stays null
+					x[k] = "TIMESTAMP"
+				}
 			case "id", "credential_id":
 				x[k] = "GENERATED_ID"
 			case "correlation_id":
