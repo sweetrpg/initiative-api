@@ -83,12 +83,12 @@ func (s *Credentials) Open(ctx context.Context) (bool, error) {
 // Close turns credentials off and persists that, so a restart stays closed until Reopen.
 func (s *Credentials) Close(ctx context.Context) error {
 	s.open.Store(false)
-	return s.repo.SetGate(ctx, true)
+	return s.repo.SetGate(ctx, true, "retention-gap")
 }
 
-// Reopen clears a persisted close after an administrator's reconcile.
-func (s *Credentials) Reopen(ctx context.Context) error {
-	if err := s.repo.SetGate(ctx, false); err != nil {
+// Reopen clears a persisted close on an administrator's say-so; actor is recorded on the gate.
+func (s *Credentials) Reopen(ctx context.Context, actor string) error {
+	if err := s.repo.SetGate(ctx, false, actor); err != nil {
 		return err
 	}
 	s.open.Store(true)

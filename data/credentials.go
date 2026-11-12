@@ -135,16 +135,16 @@ func (r *Credentials) GateClosed(ctx context.Context) (bool, error) {
 }
 
 // SetGate persists the gate state so a restart cannot reopen it before a reconcile.
-func (r *Credentials) SetGate(ctx context.Context, closed bool) error {
+func (r *Credentials) SetGate(ctx context.Context, closed bool, actor string) error {
 	col := r.gate
 	filter := bson.D{{Key: "_id", Value: gateID}}
-	update := bson.D{{Key: "$set", Value: bson.D{{Key: "closed", Value: closed}, {Key: "updated_at", Value: r.now()}}}}
+	update := bson.D{{Key: "$set", Value: bson.D{{Key: "closed", Value: closed}, {Key: "updated_at", Value: r.now()}, {Key: "updated_by", Value: actor}}}}
 	var out bson.M
 	err := col.FindOneAndUpdate(ctx, filter, update, &out)
 	if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	err = col.InsertOne(ctx, bson.D{{Key: "_id", Value: gateID}, {Key: "closed", Value: closed}, {Key: "updated_at", Value: r.now()}})
+	err = col.InsertOne(ctx, bson.D{{Key: "_id", Value: gateID}, {Key: "closed", Value: closed}, {Key: "updated_at", Value: r.now()}, {Key: "updated_by", Value: actor}})
 	if errors.Is(err, store.ErrDuplicate) {
 		return col.FindOneAndUpdate(ctx, filter, update, &out)
 	}

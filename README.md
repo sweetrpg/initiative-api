@@ -47,7 +47,8 @@ Invalid values stop the process at startup with every problem listed.
   the `AUTH_EVENTS` stream (`NATS_URL`, optional `NATS_DURABLE_NAME`, `NATS_CREDS` or
   `NATS_USER`/`NATS_PASSWORD`). Credentials answer 503 `credentials_unavailable` until the consumer
   has caught up, and stay off if `NATS_URL` is unset or the consumer fell behind the stream's
-  retention.
+  retention. `POST /admin/credentials/reopen` (admin bearer only) clears that close and logs an audit
+  entry; the gate records the actor.
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written

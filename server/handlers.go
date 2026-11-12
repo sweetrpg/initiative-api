@@ -41,4 +41,7 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupEntitlementHandlers(u, s)
 	setupCredentialHandlers(u, s)
 	setupRefHandlers(g, s.Encounters)
+	if s.Credentials != nil {
+		setupAdminCredentialHandlers(ProtectedGroup(r, s.Authz, nil, authz.RoleAdmin), s.Credentials)
+	}
 }

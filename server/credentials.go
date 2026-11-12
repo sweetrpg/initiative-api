@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -114,4 +115,18 @@ func (h credentialHandlers) revoke(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, cred)
+}
+
+// setupAdminCredentialHandlers registers the administrator's reopen. The group takes no integration
+// credentials, so only an admin's own bearer reaches it.
+func setupAdminCredentialHandlers(g *gin.RouterGroup, creds *domain.Credentials) {
+	g.POST("/admin/credentials/reopen", func(c *gin.Context) {
+		actor := authz.Viewer(c)
+		if err := creds.Reopen(c.Request.Context(), actor); err != nil {
+			writeError(c, err, nil)
+			return
+		}
+		slog.WarnContext(c.Request.Context(), "audit: integration credentials reopened", "audit", true, "actor", actor, "correlation_id", CorrelationID(c))
+		c.JSON(http.StatusOK, gin.H{"open": true})
+	})
 }

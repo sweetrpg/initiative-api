@@ -241,10 +241,30 @@ func TestClosedGateFailsClosedAndSurvivesRestart(t *testing.T) {
 	if ok, err := creds.Open(context.Background()); err != nil || ok {
 		t.Fatalf("open after persisted close = %v, %v; want false", ok, err)
 	}
-	if err := creds.Reopen(context.Background()); err != nil {
+	if err := creds.Reopen(context.Background(), "u-admin"); err != nil {
 		t.Fatal(err)
 	}
 	if w := callAs(r, secret, "GET", "/probe", ""); w.Code != 200 {
 		t.Fatalf("after reopen = %d, want 200", w.Code)
+	}
+}
+
+func TestAdminReopenNeedsAdminBearerNotCredential(t *testing.T) {
+	r, creds := credRouterWith(t, "3")
+	_, secret := issue(t, r, "user-ok", `["read","write"]`)
+	if err := creds.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if w := callAs(r, "user-ok", "POST", "/admin/credentials/reopen", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("plain user reopen = %d, want 403", w.Code)
+	}
+	if w := callAs(r, secret, "POST", "/admin/credentials/reopen", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("credential reopen = %d, want 401", w.Code)
+	}
+	if w := callAs(r, "admin-ok", "POST", "/admin/credentials/reopen", ""); w.Code != 200 {
+		t.Fatalf("admin reopen = %d %s", w.Code, w.Body)
+	}
+	if w := callAs(r, secret, "GET", "/probe", ""); w.Code != 200 {
+		t.Fatalf("after admin reopen = %d, want 200", w.Code)
 	}
 }
