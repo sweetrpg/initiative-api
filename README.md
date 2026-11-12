@@ -3,6 +3,7 @@
 [![License](https://img.shields.io/github/license/sweetrpg/initiative-api.svg)](LICENSE)
 [![Issues](https://img.shields.io/github/issues/sweetrpg/initiative-api.svg)](https://github.com/sweetrpg/initiative-api/issues)
 [![PRs](https://img.shields.io/github/issues-pr/sweetrpg/initiative-api.svg)](https://github.com/sweetrpg/initiative-api/pulls)
+[![Coverage](https://img.shields.io/endpoint?url=https://sweetrpg.github.io/initiative-api/coverage-badge.json)](https://sweetrpg.github.io/initiative-api/coverage.html)
 
 Go API behind Initiative!, the SweetRPG initiative tracker. All tracker rules live here; clients
 are presentation only (PADR-0033, proposed). Design and task list:
