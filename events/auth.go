@@ -20,7 +20,7 @@ import (
 const (
 	// StreamName is auth-api's JetStream stream, subject auth.events.>.
 	StreamName     = "AUTH_EVENTS"
-	filterSubject  = "auth.events.>"
+	FilterSubject  = "auth.events.>"
 	defaultDurable = "initiative-api-credential-revocation"
 	// Change kinds the event's action carries.
 	kindDeny        = "deny"
@@ -77,12 +77,16 @@ func behindRetention(exists bool, ackFloor, firstSeq uint64) bool {
 type Consumer struct {
 	rev  Revoker
 	gate Gate
-	conn *nats.Conn
-	cc   jetstream.ConsumeContext
+	// Stream and Filter default to AUTH_EVENTS and auth.events.>; tests point them at a prefixed stream.
+	Stream, Filter string
+	conn           *nats.Conn
+	cc             jetstream.ConsumeContext
 }
 
 // New builds a consumer. The gate must start closed.
-func New(rev Revoker, gate Gate) *Consumer { return &Consumer{rev: rev, gate: gate} }
+func New(rev Revoker, gate Gate) *Consumer {
+	return &Consumer{rev: rev, gate: gate, Stream: StreamName, Filter: FilterSubject}
+}
 
 // Start connects, binds the durable consumer, and begins revoking. The gate opens only after the
 // consumer has drained what was pending, and stays closed when the consumer fell behind the
@@ -106,9 +110,9 @@ func (c *Consumer) Start(ctx context.Context, natsURL, durable string) error {
 	if err != nil {
 		return fmt.Errorf("create JetStream context: %w", err)
 	}
-	stream, err := js.Stream(ctx, StreamName)
+	stream, err := js.Stream(ctx, c.Stream)
 	if err != nil {
-		return fmt.Errorf("stream %s: %w", StreamName, err)
+		return fmt.Errorf("stream %s: %w", c.Stream, err)
 	}
 	sinfo, err := stream.Info(ctx)
 	if err != nil {
@@ -132,7 +136,7 @@ func (c *Consumer) Start(ctx context.Context, natsURL, durable string) error {
 		}
 	}
 	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable: durable, FilterSubject: filterSubject, AckPolicy: jetstream.AckExplicitPolicy,
+		Durable: durable, FilterSubject: c.Filter, AckPolicy: jetstream.AckExplicitPolicy,
 	})
 	if err != nil {
 		return fmt.Errorf("bind durable consumer %q: %w", durable, err)
