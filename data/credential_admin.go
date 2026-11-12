@@ -36,20 +36,22 @@ func checkOwner(owner string) error {
 	return nil
 }
 
-// ListAll returns one page of credentials across owners, newest first. owner narrows it to one
-// owner when set. Administrator use only: callers gate it on the admin role.
-func (r *Credentials) ListAll(ctx context.Context, owner string, q Query) (Page[IntegrationCredential], error) {
-	if err := checkOwner(owner); err != nil {
-		return Page[IntegrationCredential]{}, err
-	}
-	base := bson.D{{Key: "deleted_at", Value: nil}}
-	if owner != "" {
-		base = append(base, bson.E{Key: "owner_user_id", Value: owner})
-	}
+// ListAll returns one page of credentials across owners, newest first. Administrator use only:
+// callers gate it on the admin role. Its filter has no request input; one owner's credentials go
+// through the owner-scoped List instead.
+func (r *Credentials) ListAll(ctx context.Context, q Query) (Page[IntegrationCredential], error) {
 	if len(q.Sort) == 0 {
 		q.Sort = []SortKey{{Field: "created_at", Desc: true}}
 	}
-	return runQuery[IntegrationCredential](ctx, r.c, r.spec, base, q)
+	return runQuery[IntegrationCredential](ctx, r.c, r.spec, bson.D{{Key: "deleted_at", Value: nil}}, q)
+}
+
+// ListOwned is the owner-scoped List for an owner id taken from an administrator's request.
+func (r *Credentials) ListOwned(ctx context.Context, owner string, q Query) (Page[IntegrationCredential], error) {
+	if err := checkOwner(owner); err != nil {
+		return Page[IntegrationCredential]{}, err
+	}
+	return r.List(ctx, owner, q)
 }
 
 // Live reports whether the credential can still authenticate: present, unrevoked, not over the

@@ -165,7 +165,10 @@ func (s *Credentials) Authenticate(ctx context.Context, secret string) (data.Int
 
 // ListAll returns credentials across owners for an administrator, optionally for one owner.
 func (s *Credentials) ListAll(ctx context.Context, owner string, q data.Query) (data.Page[data.IntegrationCredential], error) {
-	return s.repo.ListAll(ctx, owner, q)
+	if owner != "" {
+		return s.repo.ListOwned(ctx, owner, q)
+	}
+	return s.repo.ListAll(ctx, q)
 }
 
 // DeletePermanently removes a credential for good at an administrator's say-so and records the
