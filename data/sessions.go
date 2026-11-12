@@ -29,6 +29,11 @@ const (
 type Session struct {
 	Meta `bson:",inline"`
 	Name string `bson:"name" json:"name"`
+	// OwnerLimits holds the owner's entitled values for the session-related keys as last read with
+	// the owner's own token, and OwnerLimitsAt when. Members' checks use these because a member's
+	// token cannot read the owner's entitlements (initiative-entitlement-gating).
+	OwnerLimits   map[string]int `bson:"owner_limits,omitempty" json:"-"`
+	OwnerLimitsAt *time.Time     `bson:"owner_limits_at,omitempty" json:"-"`
 }
 
 // Member is one user's place in a session. This collection is the source of truth for who holds
@@ -232,6 +237,26 @@ func (r *Sessions) SessionIDsOf(ctx context.Context, userID string, q Query) (Pa
 		q.Sort = []SortKey{{Field: "created_at"}}
 	}
 	return runQuery[Member](ctx, r.members, SessionMemberSpec, bson.D{{Key: "user_id", Value: userID}, {Key: "deleted_at", Value: nil}}, q)
+}
+
+// RecordOwnerLimits stores the owner's current entitled values on the session. It changes neither
+// the revision nor the audit stamp: nobody edited the session.
+func (r *Sessions) RecordOwnerLimits(ctx context.Context, owner, sessionID string, limits map[string]int) error {
+	id, ok := cleanID(sessionID)
+	if !ok {
+		return ErrNotFound
+	}
+	if err := checkUserID(owner); err != nil {
+		return err
+	}
+	var discard Session
+	err := r.c.FindOneAndUpdate(ctx, scopeID(owner, id), bson.D{{Key: "$set", Value: bson.D{
+		{Key: "owner_limits", Value: limits}, {Key: "owner_limits_at", Value: r.now()},
+	}}}, &discard)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrNotFound
+	}
+	return err
 }
 
 // SetRole changes a member's role.

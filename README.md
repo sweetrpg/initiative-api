@@ -75,6 +75,11 @@ Invalid values stop the process at startup with every problem listed.
   one role table. Membership collections are the source of truth for who holds a role. Membership,
   invite, request and block records and the session are all soft-deleted (`deleted_at`, `deleted_by`;
   PADR-0027), and a `live` marker lets the unique indexes ignore deleted rows.
+  Limits follow the GM: creating a session checks `initiative.sessions_per_gm` (403
+  `entitlement_limit_reached`, 503 when entitlements are down); sessions beyond a reduced limit go
+  inactive (readable, deletable, leavable; no invites, approvals, or joins; 403 `item_inactive`). Each
+  GM request re-reads `initiative.members_per_session` with the GM's token and records it on the
+  session; member checks use that record only (503 `owner_entitlements_pending` until one exists).
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written

@@ -8,11 +8,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/entitlements"
 	"github.com/sweetrpg/initiative-api/store"
 )
 
@@ -59,6 +62,25 @@ const (
 // nothing about why it failed.
 var ErrInviteInvalid = fmt.Errorf("%w: invite is not valid", data.ErrInvalid)
 
+// ErrOwnerLimitsUnknown means the session has no recorded owner entitlements yet and the owner is
+// not the caller. It is retryable: the GM's next request records them.
+var ErrOwnerLimitsUnknown = errors.New("domain: session owner entitlements not recorded yet")
+
+// ownerLimitsRefreshEvery bounds how often an unchanged record is rewritten.
+const ownerLimitsRefreshEvery = time.Minute
+
+// sessionKeys are the owner entitlements recorded on a session.
+var sessionKeys = []string{KeyMembersPerSession}
+
+// OwnerLimit returns the owner's recorded value for key, or ErrOwnerLimitsUnknown if none yet.
+func OwnerLimit(sess data.Session, key string) (int, error) {
+	v, ok := sess.OwnerLimits[key]
+	if !ok {
+		return 0, ErrOwnerLimitsUnknown
+	}
+	return v, nil
+}
+
 // SessionView is a session with the caller's role in it.
 type SessionView struct {
 	data.Session
@@ -77,10 +99,27 @@ func NewSessions(db store.Database) *Sessions {
 }
 
 // Create makes actor the GM of a new session.
+// Sessions beyond the GM's entitled count are refused with *EntitlementError; inactive sessions
+// count, so a GM over a reduced limit cannot create.
 func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len([]rune(name)) > maxSessionName {
 		return SessionView{}, invalid("session name is required and at most %d characters", maxSessionName)
+	}
+	chk, ok := ctx.Value(checkerKey{}).(Checker)
+	if !ok {
+		return SessionView{}, entitlements.ErrUnavailable
+	}
+	res, err := chk.Check(ctx, KeySessionsPerGM, entitlements.FailClosed)
+	if err != nil {
+		return SessionView{}, err
+	}
+	owned, err := s.repo.Count(ctx, actor, nil)
+	if err != nil {
+		return SessionView{}, err
+	}
+	if owned >= int64(res.Limit) {
+		return SessionView{}, &EntitlementError{Key: KeySessionsPerGM, Limit: res.Limit}
 	}
 	sess := data.Session{Name: name}
 	if err := s.repo.Create(ctx, actor, actor, &sess); err != nil {
@@ -103,8 +142,51 @@ func (s *Sessions) as(ctx context.Context, actor, id string, a Action) (data.Ses
 	if errors.Is(err, data.ErrNotFound) || (err == nil && !Allowed(m.Role, a)) {
 		return sess, m, data.ErrForbidden
 	}
-	return sess, m, err
+	if err != nil {
+		return sess, m, err
+	}
+	if m.Role == data.RoleGM {
+		sess = s.refreshOwnerLimits(ctx, sess)
+	}
+	if sess.InactiveAt != nil && a != ActView && a != ActDelete && a != ActLeave {
+		return sess, m, data.ErrInactive
+	}
+	return sess, m, nil
 }
+
+// refreshOwnerLimits re-reads the GM's entitlements with the GM's own token (the checker in ctx)
+// and records them on the session. A failed or degraded read keeps the old record, is logged, and
+// never fails the request.
+func (s *Sessions) refreshOwnerLimits(ctx context.Context, sess data.Session) data.Session {
+	chk, ok := ctx.Value(checkerKey{}).(Checker)
+	if !ok {
+		return sess
+	}
+	limits := make(map[string]int, len(sessionKeys))
+	for _, key := range sessionKeys {
+		res, err := chk.Check(ctx, key, entitlements.FailOpen)
+		if err != nil || res.Degraded {
+			slog.WarnContext(ctx, "session owner entitlements not refreshed", "session", sess.ID, "key", key, "error", err)
+			return sess
+		}
+		limits[key] = res.Limit
+	}
+	fresh := sess.OwnerLimitsAt != nil && s.now().Sub(*sess.OwnerLimitsAt) < ownerLimitsRefreshEvery
+	if fresh && maps.Equal(limits, sess.OwnerLimits) {
+		return sess
+	}
+	if err := s.repo.RecordOwnerLimits(ctx, sess.OwnerUserID, sess.ID, limits); err != nil {
+		slog.WarnContext(ctx, "session owner entitlements not recorded", "session", sess.ID, "error", err)
+		return sess
+	}
+	now := s.now()
+	sess.OwnerLimits, sess.OwnerLimitsAt = limits, &now
+	return sess
+}
+
+// Items exposes the sessions as limited items, so the limit reconciler can deactivate those beyond
+// the owner's entitled count.
+func (s *Sessions) Items() Limited { return s.repo }
 
 // Get returns the session with actor's role. Only members may read it.
 func (s *Sessions) Get(ctx context.Context, actor, id string) (SessionView, error) {
@@ -210,10 +292,11 @@ func (s *Sessions) Join(ctx context.Context, actor, code string) (data.JoinReque
 	if in.RevokedAt != nil || !s.now().Before(in.ExpiresAt) {
 		return data.JoinRequest{}, ErrInviteInvalid
 	}
-	if _, err := s.repo.Live(ctx, actor, in.SessionID); err != nil {
-		if errors.Is(err, data.ErrNotFound) {
-			return data.JoinRequest{}, ErrInviteInvalid
-		}
+	sess, err := s.repo.Live(ctx, actor, in.SessionID)
+	if errors.Is(err, data.ErrNotFound) || (err == nil && sess.InactiveAt != nil) {
+		return data.JoinRequest{}, ErrInviteInvalid
+	}
+	if err != nil {
 		return data.JoinRequest{}, err
 	}
 	if blocked, err := s.repo.Blocked(ctx, actor, in.SessionID, actor); err != nil {
