@@ -1,10 +1,34 @@
 package server
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/store"
+	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson"
 )
+
+// failingDelete is a database whose credential collection cannot delete.
+type failingDelete struct{ store.Database }
+
+func (f failingDelete) Collection(name string) store.Collection {
+	c := f.Database.Collection(name)
+	if name == data.CollectionCredentials {
+		return noDelete{c}
+	}
+	return c
+}
+
+type noDelete struct{ store.Collection }
+
+func (noDelete) DeleteOne(context.Context, bson.D) error { return errors.New("mongo down") }
 
 func TestAdminListsAnyOwnersCredentialsWithoutSecrets(t *testing.T) {
 	r := credRouter(t, "3")
@@ -155,5 +179,33 @@ func TestAdminDeletionsPage(t *testing.T) {
 
 	if len(first["items"].([]any)) != 2 || next == "" || len(second["items"].([]any)) != 1 || second["next_cursor"] != "" {
 		t.Fatalf("first = %v, second = %v", first, second)
+	}
+}
+
+func TestAdminDeleteFailureAfterAuditTellsOperatorToRetry(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	db := fake.NewDB()
+	r, _ := credRouterDB(t, "3", failingDelete{db})
+	id, secret := issue(t, r, "user-two", `["read"]`)
+
+	w := callAs(r, "admin-ok", "DELETE", "/admin/credentials/"+id, `{"reason":"leaked"}`)
+
+	body := decodeBody(t, w)
+	if w.Code != http.StatusInternalServerError || body["code"] != "deletion_incomplete" ||
+		!strings.Contains(body["message"].(string), "Retry the same request") || strings.Contains(w.Body.String(), "mongo down") {
+		t.Fatalf("got %d %s", w.Code, w.Body)
+	}
+	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "credential deletion did not complete") ||
+		!strings.Contains(logs.String(), "mongo down") || !strings.Contains(logs.String(), id) {
+		t.Fatalf("log = %s", logs.String())
+	}
+	if n := len(db.Fake(data.CollectionCredentialDeletions).Docs()); n != 1 {
+		t.Fatalf("audit entries = %d, want the entry written before the failure", n)
+	}
+	if w := callAs(r, secret, "GET", "/probe", ""); w.Code != http.StatusOK {
+		t.Fatalf("credential after failed delete = %d, want still live (retry finishes it)", w.Code)
 	}
 }
