@@ -58,7 +58,10 @@ func TestCredentialCreateValidatesAndHonorsTheLimit(t *testing.T) {
 
 func TestRevokeOwnerEndsCredentialsAndRejectsUnknownReasons(t *testing.T) {
 	s, _ := newCreds(t)
-	_, secret, _ := s.Create(ctx, "u1", "a", []string{"read"}, stubChecker{limit: 2})
+	_, secret, err := s.Create(ctx, "u1", "a", []string{"read"}, stubChecker{limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	n, err := s.RevokeOwner(ctx, "u1", data.ReasonOwnerDenied)
 
@@ -75,7 +78,10 @@ func TestRevokeOwnerEndsCredentialsAndRejectsUnknownReasons(t *testing.T) {
 
 func TestClosedCredentialsFailClosedUntilReopened(t *testing.T) {
 	s, _ := newCreds(t)
-	_, secret, _ := s.Create(ctx, "u1", "a", []string{"read"}, stubChecker{limit: 2})
+	_, secret, err := s.Create(ctx, "u1", "a", []string{"read"}, stubChecker{limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
