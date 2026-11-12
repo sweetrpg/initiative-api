@@ -70,9 +70,9 @@ func TestMongoFindByExternalRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Disconnect(ctx) }()
-	// Runs in the shared test database under a unique collection prefix; only those collections
+	// Runs in the shared test database (sweetrpg-tests) under a unique collection prefix; only those collections
 	// are dropped, never the database.
-	db := client.Database("sweetrpg-test")
+	db := client.Database("sweetrpg-tests")
 	pdb := prefixedDB{Database: store.MongoDatabase{DB: db}, prefix: fmt.Sprintf("it_%d_", time.Now().UnixNano())}
 	t.Cleanup(func() { _ = db.Collection(pdb.prefix + CollectionEncounters).Drop(ctx) })
 
@@ -81,7 +81,7 @@ func TestMongoFindByExternalRef(t *testing.T) {
 		e := &Encounter{Name: "e", Ordering: OrderHighToLow, TieBreaker: TieRandom, Status: StatusDraft,
 			Combatants: []Combatant{{ID: "c1", Name: "Orc", Kind: KindAdversary, Removed: removed,
 				ExternalRefs: map[string]string{"foundry.actor": "abc"}}, {ID: "c2", Name: "Elf", Kind: KindPC}}}
-		if err := encs.Owned.Create(ctx, owner, owner, e); err != nil {
+		if err := encs.Create(ctx, owner, owner, e); err != nil {
 			t.Fatal(err)
 		}
 	}
