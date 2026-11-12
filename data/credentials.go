@@ -27,6 +27,11 @@ func activeScope(owner string) bson.D {
 	return append(scope(owner), bson.E{Key: "revoked_at", Value: nil})
 }
 
+// ItemStates lists owner's unrevoked credentials; a revoked one no longer counts toward the limit.
+func (r *Credentials) ItemStates(ctx context.Context, owner string) ([]ItemState, error) {
+	return r.itemStates(ctx, activeScope(owner))
+}
+
 // CountActive counts owner's credentials that can still authenticate.
 func (r *Credentials) CountActive(ctx context.Context, owner string) (int64, error) {
 	if strings.TrimSpace(owner) == "" {
@@ -79,7 +84,7 @@ func (r *Credentials) Authenticate(ctx context.Context, secretHash string) (Inte
 	if secretHash == "" {
 		return out, ErrNotFound
 	}
-	filter := bson.D{{Key: "secret_hash", Value: secretHash}, {Key: "revoked_at", Value: nil}, {Key: "deleted_at", Value: nil}}
+	filter := bson.D{{Key: "secret_hash", Value: secretHash}, {Key: "revoked_at", Value: nil}, {Key: "deleted_at", Value: nil}, {Key: "inactive_at", Value: nil}}
 	update := bson.D{{Key: "$set", Value: bson.D{{Key: "last_used_at", Value: r.now()}}}}
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &out)
 	if errors.Is(err, store.ErrNotFound) {

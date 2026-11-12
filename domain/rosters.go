@@ -175,3 +175,6 @@ func (s *Rosters) RemoveCharacter(ctx context.Context, owner, actor, id string, 
 		return slices.Delete(cs, i, i+1), nil
 	})
 }
+
+// Items is the roster repository as limit enforcement sees it.
+func (s *Rosters) Items() Limited { return s.rosters }

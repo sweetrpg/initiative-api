@@ -162,3 +162,6 @@ func (s *Credentials) Authenticate(ctx context.Context, secret string) (data.Int
 	}
 	return s.repo.Authenticate(ctx, hashSecret(secret))
 }
+
+// Items is the credential repository as limit enforcement sees it; revoked credentials are not counted.
+func (s *Credentials) Items() Limited { return s.repo }
