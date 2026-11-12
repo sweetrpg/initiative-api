@@ -1,0 +1,78 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: api-v1
+
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: initiative-api
+      app.kubernetes.io/version: v1
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      annotations:
+        reloader.stakater.com/auto: "true"
+        openfeature.dev/enabled: "true"
+        openfeature.dev/featureflagsource: "sweetrpg-system/initiative-api"
+    spec:
+      serviceAccountName: api
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: sweetrpg-registry
+      containers:
+        - name: app
+          image: initiative-api
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: api-common
+            - configMapRef:
+                name: api-env
+            - secretRef:
+                name: api-db
+            - secretRef:
+                name: api-cache
+            # NATS_PASSWORD for the AUTH_EVENTS consumer; optional so envs without NATS still start.
+            - secretRef:
+                name: api-nats
+                optional: true
+          env:
+            - name: GOMEMLIMIT
+              value: "200MiB"
+            - name: GOGC
+              value: "90"
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "55Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          # Shallow /status/ping for both probes (PADR-0017): /status/health checks dependencies
+          # and must not gate routing or restarts.
+          livenessProbe:
+            httpGet:
+              path: /status/ping
+              port: http
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /status/ping
+              port: http
+            initialDelaySeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 10
+      restartPolicy: Always

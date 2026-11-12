@@ -1,0 +1,10 @@
+---
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: api-common
+
+data:
+  GIN_MODE: release
+  PORT: "8000"

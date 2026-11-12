@@ -1,0 +1,12 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+
+metadata:
+  name: strip-prefix-v1
+
+spec:
+  stripPrefix:
+    prefixes:
+      - /api/0/initiative
+      - /api/1/initiative

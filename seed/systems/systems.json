@@ -1,0 +1,57 @@
+[
+  {
+    "id": "none",
+    "name": "No System",
+    "family": "simple",
+    "aliases": [],
+    "gated": false
+  },
+  {
+    "id": "d20",
+    "name": "d20 System",
+    "family": "d20",
+    "aliases": [],
+    "gated": true
+  },
+  {
+    "id": "dnd5",
+    "name": "Dungeons & Dragons 5th Edition",
+    "family": "dnd5",
+    "aliases": [
+      "dnd5e"
+    ],
+    "gated": true
+  },
+  {
+    "id": "cypher",
+    "name": "Cypher System",
+    "family": "cypher",
+    "aliases": [
+      "cyphersystem"
+    ],
+    "gated": true
+  },
+  {
+    "id": "theonering",
+    "name": "The One Ring",
+    "family": "theonering",
+    "aliases": [],
+    "gated": true
+  },
+  {
+    "id": "shadowrun5",
+    "name": "Shadowrun 5th Edition",
+    "family": "twovalue",
+    "aliases": [
+      "shadowrun5e"
+    ],
+    "gated": true
+  },
+  {
+    "id": "genesys",
+    "name": "Genesys",
+    "family": "twovalue",
+    "aliases": [],
+    "gated": true
+  }
+]

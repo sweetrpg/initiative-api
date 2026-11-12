@@ -1,0 +1,232 @@
+{
+  "simple": [
+    {
+      "key": "health",
+      "label": "initiative.health.health",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    }
+  ],
+  "d20": [
+    {
+      "key": "current",
+      "label": "initiative.health.current",
+      "kind": "counter",
+      "default": 1,
+      "min": 0,
+      "max_ref": "maximum"
+    },
+    {
+      "key": "maximum",
+      "label": "initiative.health.maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    },
+    {
+      "key": "temporary",
+      "label": "initiative.health.temporary",
+      "kind": "counter",
+      "default": 0,
+      "min": 0
+    },
+    {
+      "key": "dead",
+      "label": "initiative.health.dead",
+      "kind": "flag",
+      "default": 0,
+      "min": 0,
+      "max": 1
+    }
+  ],
+  "dnd5": [
+    {
+      "key": "current",
+      "label": "initiative.health.current",
+      "kind": "counter",
+      "default": 1,
+      "min": 0,
+      "max_ref": "maximum"
+    },
+    {
+      "key": "maximum",
+      "label": "initiative.health.maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    },
+    {
+      "key": "temporary",
+      "label": "initiative.health.temporary",
+      "kind": "counter",
+      "default": 0,
+      "min": 0
+    },
+    {
+      "key": "successCount",
+      "label": "initiative.health.successCount",
+      "kind": "track",
+      "default": 0,
+      "min": 0,
+      "max": 3
+    },
+    {
+      "key": "failureCount",
+      "label": "initiative.health.failureCount",
+      "kind": "track",
+      "default": 0,
+      "min": 0,
+      "max": 3
+    }
+  ],
+  "cypher": [
+    {
+      "key": "might",
+      "label": "initiative.health.might",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "mightMaximum"
+    },
+    {
+      "key": "mightMaximum",
+      "label": "initiative.health.mightMaximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "intellect",
+      "label": "initiative.health.intellect",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "intellectMaximum"
+    },
+    {
+      "key": "intellectMaximum",
+      "label": "initiative.health.intellectMaximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "speed",
+      "label": "initiative.health.speed",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "speedMaximum"
+    },
+    {
+      "key": "speedMaximum",
+      "label": "initiative.health.speedMaximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    }
+  ],
+  "theonering": [
+    {
+      "key": "endurance",
+      "label": "initiative.health.endurance",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "enduranceRating"
+    },
+    {
+      "key": "enduranceRating",
+      "label": "initiative.health.enduranceRating",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "fatigue",
+      "label": "initiative.health.fatigue",
+      "kind": "counter",
+      "default": 0,
+      "min": 0
+    },
+    {
+      "key": "hope",
+      "label": "initiative.health.hope",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "hopeRating"
+    },
+    {
+      "key": "hopeRating",
+      "label": "initiative.health.hopeRating",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "shadow",
+      "label": "initiative.health.shadow",
+      "kind": "counter",
+      "default": 0,
+      "min": 0
+    },
+    {
+      "key": "weary",
+      "label": "initiative.health.weary",
+      "kind": "flag",
+      "default": 0,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "key": "wounded",
+      "label": "initiative.health.wounded",
+      "kind": "flag",
+      "default": 0,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "key": "miserable",
+      "label": "initiative.health.miserable",
+      "kind": "flag",
+      "default": 0,
+      "min": 0,
+      "max": 1
+    }
+  ],
+  "twovalue": [
+    {
+      "key": "value1",
+      "label": "initiative.health.value1",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value1Maximum"
+    },
+    {
+      "key": "value1Maximum",
+      "label": "initiative.health.value1Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "value2",
+      "label": "initiative.health.value2",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value2Maximum"
+    },
+    {
+      "key": "value2Maximum",
+      "label": "initiative.health.value2Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    }
+  ]
+}

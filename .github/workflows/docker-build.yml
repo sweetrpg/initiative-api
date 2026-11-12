@@ -1,0 +1,172 @@
+name: Docker Build
+
+concurrency: docker-${{ github.ref }}
+
+on:
+    push:
+        tags:
+            - "v*"
+        branches:
+            - develop
+    workflow_dispatch:
+
+permissions:
+    contents: read
+    packages: write
+
+jobs:
+    meta:
+        runs-on: ubuntu-latest
+        outputs:
+            tags: ${{ steps.meta.outputs.tags }}
+            json: ${{ steps.meta.outputs.json }}
+            build-date: ${{ steps.getbuilddate.outputs.isodate }}
+            build-version: ${{ steps.previoustag.outputs.tag }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+              with:
+                fetch-depth: 0
+            - name: "Get Previous tag"
+              id: previoustag
+              uses: actions-ecosystem/action-get-latest-tag@v1
+              with:
+                  semver_only: true
+                  initial_version: v0.0.0
+                  with_initial_version: true
+            - name: Get current date
+              id: getbuilddate
+              run: |
+                  echo "isodate=$(date -u '+%Y-%m-%dT%H:%M:%S')" >> $GITHUB_OUTPUT
+                  echo "tagdate=$(date -u '+%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+            - name: Docker metadata
+              id: meta
+              uses: docker/metadata-action@v6
+              with:
+                  images: |
+                      ghcr.io/sweetrpg/initiative-api
+                  tags: |
+                    type=raw,value=latest
+                    type=ref,event=tag
+                    type=ref,event=branch
+                    type=semver,pattern={{version}}
+                    type=semver,pattern={{major}}.{{minor}}
+                    type=semver,pattern={{major}}
+                    type=sha
+
+    # One native-runner job per platform - no QEMU emulation, and a per-platform GHA cache
+    # scope so the Go build layer only invalidates for the arch that actually changed. Each
+    # leg pushes its own image by digest rather than a tag; `merge` below stitches the digests
+    # into the one multi-arch manifest every tag in `meta` should point at.
+    build:
+        needs: meta
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: linux/amd64
+                      runner: ubuntu-latest
+                    - platform: linux/arm64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+              with:
+                fetch-depth: 0
+            - name: Prepare platform pair
+              run: |
+                  platform=${{ matrix.platform }}
+                  echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v4
+            - name: Login to registry
+              uses: docker/login-action@v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Build and push by digest
+              id: docker_build
+              uses: docker/build-push-action@v7
+              with:
+                  platforms: ${{ matrix.platform }}
+                  build-args: |
+                      BUILD_NUMBER=${{ github.run_number }}
+                      BUILD_JOB=${{ github.job }}
+                      BUILD_SHA=${{ github.sha }}
+                      BUILD_DATE=${{ needs.meta.outputs.build-date }}
+                      BUILD_VERSION=${{ needs.meta.outputs.build-version }}
+                  cache-from: type=gha,scope=initiative-api-${{ env.PLATFORM_PAIR }}
+                  cache-to: type=gha,mode=max,scope=initiative-api-${{ env.PLATFORM_PAIR }}
+                  outputs: type=image,name=ghcr.io/sweetrpg/initiative-api,push-by-digest=true,name-canonical=true,push=true
+            - name: Export digest
+              run: |
+                  mkdir -p /tmp/digests
+                  digest="${{ steps.docker_build.outputs.digest }}"
+                  touch "/tmp/digests/${digest#sha256:}"
+            - name: Upload digest
+              uses: actions/upload-artifact@v7
+              with:
+                  name: digests-${{ env.PLATFORM_PAIR }}
+                  path: /tmp/digests/*
+                  if-no-files-found: error
+                  retention-days: 1
+
+    merge:
+        needs: [meta, build]
+        runs-on: ubuntu-latest
+        steps:
+            # This job doesn't need source to merge Docker manifests, but the Sentry release
+            # step below shells out to `sentry-cli releases propose-version`, which needs an
+            # actual git checkout to derive a release name from - without this, it fails with
+            # "could not find repository at '.'".
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+            - name: Download digests
+              uses: actions/download-artifact@v8
+              with:
+                  path: /tmp/digests
+                  pattern: digests-*
+                  merge-multiple: true
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v4
+            - name: Login to registry
+              uses: docker/login-action@v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Create manifest list and push
+              working-directory: /tmp/digests
+              env:
+                  DOCKER_METADATA_OUTPUT_JSON: ${{ needs.meta.outputs.json }}
+              run: |
+                  docker buildx imagetools create \
+                    $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+                    $(printf 'ghcr.io/sweetrpg/initiative-api@sha256:%s ' *)
+            - name: Inspect image
+              run: |
+                  docker buildx imagetools inspect ghcr.io/sweetrpg/initiative-api:${{ needs.meta.outputs.build-version }}
+            - name: Create Sentry release
+              if: github.ref_name != 'develop'
+              # Release tracking is best-effort - a missing/misconfigured Sentry project
+              # shouldn't be able to block the image tag bump downstream from ever running.
+              continue-on-error: true
+              uses: getsentry/action-release@v3
+              env:
+                  SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+                  SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+                  SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+              with:
+                  environment: ${{ vars.SENTRY_ENV }}
+
+    update-deployment:
+        needs: merge
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: sweetrpg/github-actions/.github/workflows/argocd-update-deployment.yaml@master
+        with:
+            image-name: initiative-api
+            manifest-path: clusters/dev/initiative/api.yaml
+        secrets: inherit

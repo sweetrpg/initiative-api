@@ -1,0 +1,33 @@
+{
+  "aliases": [
+    "dnd5"
+  ],
+  "created_at": "2026-01-01T00:00:00Z",
+  "created_by": "system",
+  "deleted_at": null,
+  "deleted_by": null,
+  "family": "dnd5",
+  "fields": [
+    {
+      "default": 1,
+      "key": "current",
+      "kind": "counter",
+      "label": "initiative.health.current",
+      "max_ref": "maximum",
+      "min": 0
+    },
+    {
+      "default": 1,
+      "key": "maximum",
+      "kind": "counter",
+      "label": "initiative.health.maximum",
+      "min": 1
+    }
+  ],
+  "gated": true,
+  "id": "dnd5e",
+  "name": "Dungeons \u0026 Dragons 5th Edition",
+  "revision": 1,
+  "updated_at": "2026-01-01T00:00:00Z",
+  "updated_by": "system"
+}

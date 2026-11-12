@@ -1,0 +1,49 @@
+{
+  "colorblind": false,
+  "combatants": [
+    {
+      "conditions": [],
+      "health": {
+        "hp": 10,
+        "max_hp": 10
+      },
+      "id": "c1",
+      "initiative": 18,
+      "kind": "adversary",
+      "name": "Orc Chief",
+      "notes": "",
+      "removed": false
+    },
+    {
+      "conditions": [],
+      "health": {
+        "hp": 10,
+        "max_hp": 10
+      },
+      "id": "c2",
+      "initiative": 12,
+      "kind": "adversary",
+      "name": "Orc Scout",
+      "notes": "",
+      "removed": false
+    }
+  ],
+  "created_at": "2026-01-01T00:00:00Z",
+  "created_by": "user-1",
+  "deleted_at": null,
+  "deleted_by": null,
+  "game_system_id": "test",
+  "id": "GENERATED_ID",
+  "labels": false,
+  "name": "Ambush",
+  "ordering": "highToLow",
+  "owner_user_id": "user-1",
+  "position": 0,
+  "revision": 4,
+  "round": 0,
+  "status": "draft",
+  "tie_breaker": "query",
+  "turn_queue": [],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "updated_by": "user-1"
+}

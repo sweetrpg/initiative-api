@@ -1,0 +1,36 @@
+---
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: api-env
+
+data:
+  ENV: dev
+  LOG_LEVEL: WARN
+  # Database connection parts; only the password (DB_PW, in secrets.yaml) is sensitive.
+  DB_SCHEME: mongodb+srv
+  DB_HOST: cluster0.z9nxg.mongodb.net
+  DB_USER: initiative-api
+  DB_NAME: sweetrpg-initiative
+  DB_OPTS: retryWrites=true&w=majority
+  BUILD_INFO_PATH: /app/config/build-info.json
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo-distributor.observability.svc.cluster.local:4318/
+  PYROSCOPE_SERVER_ADDRESS: http://pyroscope.observability.svc.cluster.local:4040
+  PYROSCOPE_TENANT_ID: psw
+  # Namespace cache Service (infrastructure repo, initiative/cache; Application in
+  # clusters/dev/initiative/cache.yaml).
+  REDIS_HOST: cache.sweetrpg-initiative.svc.cluster.local
+  REDIS_PORT: "6379"
+  INGRESS_BASE_PATH: /api/0/initiative
+  INGRESS_HOST: dev.sweetrpg.com
+  INGRESS_SCHEMES: http,https
+  # Bearer tokens are verified at auth-api and the caller resolved at users-api; both required
+  # at startup (config.Load). No service token is involved (PADR-0037).
+  AUTH_API_URL: http://api-v1.sweetrpg-auth.svc.cluster.local:8000
+  USERS_API_URL: http://api-v1.sweetrpg-users.svc.cluster.local:8000
+  ENTITLEMENTS_API_URL: http://api-v1.sweetrpg-entitlements.svc.cluster.local:8000
+  # In-cluster NATS (infrastructure repo, common/messaging/nats). Publishes initiative events and
+  # consumes auth.events.> (AUTH_EVENTS stream, PADR-0039). NATS_PASSWORD comes from api-nats (secrets.yaml).
+  NATS_URL: nats://nats.nats-system.svc.cluster.local:4222
+  NATS_USER: initiative-api
