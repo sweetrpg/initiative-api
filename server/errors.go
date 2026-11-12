@@ -44,6 +44,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "entitlement_limit_reached", Message: "Your plan's limit for this item has been reached.", Key: ee.Key, Limit: &ee.Limit}, http.StatusForbidden
 	case errors.Is(err, domain.ErrReadOnly):
 		return ErrorBody{Code: "packaged_theme_read_only", Message: "Packaged themes cannot be changed. Create a custom theme from it instead."}, http.StatusForbidden
+	case errors.Is(err, domain.ErrCredentialsClosed):
+		return ErrorBody{Code: "credentials_unavailable", Message: "Integration credentials are temporarily unavailable."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnavailable):
 		return ErrorBody{Code: "entitlements_unavailable", Message: "Entitlements are temporarily unavailable. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnauthorized):

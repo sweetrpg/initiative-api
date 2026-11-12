@@ -421,3 +421,75 @@ func TestHealthErrorNamesTheFieldAndReason(t *testing.T) {
 		t.Fatalf("message %q should name the field and reason", msg)
 	}
 }
+
+func TestFindByExternalRefRejectsBadInput(t *testing.T) {
+	e := NewEncounters(fake.NewDB())
+	long := strings.Repeat("x", maxRefLen+1)
+	for _, tt := range []struct{ owner, key, val string }{{"", "k", "v"}, {"u1", "", "v"}, {"u1", "k", ""}, {"u1", long, "v"}, {"u1", "k", long}} {
+		if _, err := e.FindByExternalRef(ctx, tt.owner, tt.key, tt.val); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%+v err = %v, want ErrInvalid", tt, err)
+		}
+	}
+}
+
+func refEncounter(refs map[string]string, removed bool) *Encounter {
+	return &Encounter{Name: "e", Ordering: OrderHighToLow, TieBreaker: TieRandom, Status: StatusDraft,
+		Combatants: []Combatant{{ID: "c1", Name: "Orc", Kind: KindAdversary, Removed: removed, ExternalRefs: refs}}}
+}
+
+func TestFindByExternalRefMatchesExactPairOnly(t *testing.T) {
+	r := newEncounters(t)
+	if err := r.Create(ctx, "u1", "u1", refEncounter(map[string]string{"foundry.actor": "abc"}, false)); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, owner, key, val string
+		want                  int
+	}{
+		{"match", "u1", "foundry.actor", "abc", 1},
+		{"wrong value", "u1", "foundry.actor", "abd", 0},
+		{"wrong key", "u1", "foundry.token", "abc", 0},
+		{"other owner", "u2", "foundry.actor", "abc", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := r.FindByExternalRef(ctx, tt.owner, tt.key, tt.val)
+			if err != nil || len(got) != tt.want {
+				t.Fatalf("got %d err=%v, want %d", len(got), err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRefKeysFollowStateWritesAndDelete(t *testing.T) {
+	r := newEncounters(t)
+	e := refEncounter(map[string]string{"foundry.actor": "abc"}, false)
+	if err := r.Create(ctx, "u1", "u1", e); err != nil {
+		t.Fatal(err)
+	}
+	find := func(v string) int {
+		got, err := r.FindByExternalRef(ctx, "u1", "foundry.actor", v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got)
+	}
+	st := func(refs map[string]string, removed bool) EncounterState {
+		return EncounterState{Status: StatusDraft, Combatants: refEncounter(refs, removed).Combatants}
+	}
+	cur, err := r.SetState(ctx, "u1", "u1", e.ID, 1, st(map[string]string{"foundry.actor": "xyz"}, false))
+	if err != nil || find("abc") != 0 || find("xyz") != 1 {
+		t.Fatalf("after ref change: old=%d new=%d err=%v", find("abc"), find("xyz"), err)
+	}
+	cur, err = r.SetState(ctx, "u1", "u1", e.ID, cur.Revision, st(map[string]string{"foundry.actor": "xyz"}, true))
+	if err != nil || find("xyz") != 0 {
+		t.Fatalf("removed combatant still found: err=%v", err)
+	}
+	cur, _ = r.SetState(ctx, "u1", "u1", e.ID, cur.Revision, st(map[string]string{"foundry.actor": "xyz"}, false))
+	if find("xyz") != 1 {
+		t.Fatal("restored combatant not found")
+	}
+	if err := r.SoftDelete(ctx, "u1", "u1", e.ID, cur.Revision); err != nil || find("xyz") != 0 {
+		t.Fatalf("deleted encounter still found: err=%v", err)
+	}
+}

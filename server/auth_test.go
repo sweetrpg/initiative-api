@@ -60,7 +60,7 @@ func protectedRouter(t *testing.T, roles ...string) (*gin.Engine, *int) {
 	gin.SetMode(gin.TestMode)
 	client := authz.NewClient(fakeAuthAPI(t).URL, fakeUsersAPI(t).URL)
 	r := gin.New()
-	g := ProtectedGroup(r, client, roles...)
+	g := ProtectedGroup(r, client, nil, roles...)
 	reached := 0
 	// A route added after the group is created, with no auth code of its own.
 	g.GET("/probe", func(c *gin.Context) {
@@ -135,7 +135,7 @@ func TestValidUserIsAttributedToHandler(t *testing.T) {
 func TestAuthAPIOutageFailsClosed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	ProtectedGroup(r, authz.NewClient("http://127.0.0.1:1", "")).GET("/probe", func(c *gin.Context) { c.Status(http.StatusOK) })
+	ProtectedGroup(r, authz.NewClient("http://127.0.0.1:1", ""), nil).GET("/probe", func(c *gin.Context) { c.Status(http.StatusOK) })
 	if got := get(r, "Bearer user-ok").Code; got != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", got)
 	}

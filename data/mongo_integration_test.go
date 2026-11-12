@@ -4,9 +4,11 @@ package data
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sweetrpg/initiative-api/store"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -55,4 +57,52 @@ func TestMongoConcurrentWritersExactlyOneWins(t *testing.T) {
 	if wins != 1 {
 		t.Fatalf("wins = %d, want 1", wins)
 	}
+}
+
+// Proves the derived-key lookup against a real server, including a dotted key and owner scoping.
+func TestMongoFindByExternalRef(t *testing.T) {
+	uri := os.Getenv("MONGODB_TEST_URI")
+	if uri == "" {
+		t.Skip("MONGODB_TEST_URI not set")
+	}
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Disconnect(ctx) }()
+	// Runs in the shared test database (sweetrpg-test) under a unique collection prefix; only those collections
+	// are dropped, never the database.
+	db := client.Database("sweetrpg-test")
+	pdb := prefixedDB{Database: store.MongoDatabase{DB: db}, prefix: fmt.Sprintf("it_%d_", time.Now().UnixNano())}
+	t.Cleanup(func() { _ = db.Collection(pdb.prefix + CollectionEncounters).Drop(ctx) })
+
+	encs := NewEncounters(pdb)
+	mk := func(owner string, removed bool) {
+		e := &Encounter{Name: "e", Ordering: OrderHighToLow, TieBreaker: TieRandom, Status: StatusDraft,
+			Combatants: []Combatant{{ID: "c1", Name: "Orc", Kind: KindAdversary, Removed: removed,
+				ExternalRefs: map[string]string{"foundry.actor": "abc"}}, {ID: "c2", Name: "Elf", Kind: KindPC}}}
+		if err := encs.Create(ctx, owner, owner, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("u1", false)
+	mk("u1", true)
+	mk("u2", false)
+	got, err := encs.FindByExternalRef(ctx, "u1", "foundry.actor", "abc")
+	if err != nil || len(got) != 1 || got[0].Combatant.ID != "c1" {
+		t.Fatalf("got %+v err=%v, want u1's one live match", got, err)
+	}
+	if got, _ := encs.FindByExternalRef(ctx, "u1", "foundry.actor", "zzz"); len(got) != 0 {
+		t.Fatalf("non-matching value returned %+v", got)
+	}
+}
+
+// prefixedDB namespaces every collection so a test can share a database safely.
+type prefixedDB struct {
+	store.Database
+	prefix string
+}
+
+func (p prefixedDB) Collection(name string) store.Collection {
+	return p.Database.Collection(p.prefix + name)
 }
