@@ -41,8 +41,7 @@ spec:
           atlas.mongodb.com/type: credentials
     creationPolicy: Owner
   dataFrom:
-    # NOT YET PROVISIONED: /sweetrpg/initiative/api/db needs a DB_PASSWORD field in Akeyless before
-    # this resolves and the Atlas Operator can create the user with that password.
+    # /sweetrpg/initiative/api/db holds DB_PASSWORD; the Atlas Operator creates the user with it.
     - extract:
         key: /sweetrpg/initiative/api/db
       rewrite:
