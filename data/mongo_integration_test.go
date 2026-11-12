@@ -4,9 +4,11 @@ package data
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sweetrpg/initiative-api/store"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -57,8 +59,7 @@ func TestMongoConcurrentWritersExactlyOneWins(t *testing.T) {
 	}
 }
 
-// Proves the derived-key lookup against a real server, including a dotted key, the multikey index,
-// and owner scoping.
+// Proves the derived-key lookup against a real server, including a dotted key and owner scoping.
 func TestMongoFindByExternalRef(t *testing.T) {
 	uri := os.Getenv("MONGODB_TEST_URI")
 	if uri == "" {
@@ -69,10 +70,13 @@ func TestMongoFindByExternalRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = client.Disconnect(ctx) }()
-	db := client.Database("initiative_api_refs_test")
-	t.Cleanup(func() { _ = db.Drop(ctx) })
+	// Runs in the shared test database under a unique collection prefix; only those collections
+	// are dropped, never the database.
+	db := client.Database("sweetrpg-test")
+	pdb := prefixedDB{Database: store.MongoDatabase{DB: db}, prefix: fmt.Sprintf("it_%d_", time.Now().UnixNano())}
+	t.Cleanup(func() { _ = db.Collection(pdb.prefix + CollectionEncounters).Drop(ctx) })
 
-	encs := NewEncounters(store.MongoDatabase{DB: db})
+	encs := NewEncounters(pdb)
 	mk := func(owner string, removed bool) {
 		e := &Encounter{Name: "e", Ordering: OrderHighToLow, TieBreaker: TieRandom, Status: StatusDraft,
 			Combatants: []Combatant{{ID: "c1", Name: "Orc", Kind: KindAdversary, Removed: removed,
@@ -91,4 +95,14 @@ func TestMongoFindByExternalRef(t *testing.T) {
 	if got, _ := encs.FindByExternalRef(ctx, "u1", "foundry.actor", "zzz"); len(got) != 0 {
 		t.Fatalf("non-matching value returned %+v", got)
 	}
+}
+
+// prefixedDB namespaces every collection so a test can share a database safely.
+type prefixedDB struct {
+	store.Database
+	prefix string
+}
+
+func (p prefixedDB) Collection(name string) store.Collection {
+	return p.Database.Collection(p.prefix + name)
 }
