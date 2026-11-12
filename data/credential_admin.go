@@ -51,6 +51,9 @@ func (r *Credentials) ListOwned(ctx context.Context, owner string, q Query) (Pag
 	if err := checkOwner(owner); err != nil {
 		return Page[IntegrationCredential]{}, err
 	}
+	if len(q.Sort) == 0 {
+		q.Sort = []SortKey{{Field: "created_at", Desc: true}}
+	}
 	return r.List(ctx, owner, q)
 }
 
