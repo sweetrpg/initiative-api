@@ -112,6 +112,14 @@ func (s *Themes) Create(ctx context.Context, owner, actor string, in ThemeInput,
 	if err != nil {
 		return data.Theme{}, err
 	}
+	// Inactive themes count toward the total owned, so a user over a reduced limit cannot create.
+	owned, err := s.themes.Count(ctx, owner, nil)
+	if err != nil {
+		return data.Theme{}, err
+	}
+	if owned >= int64(res.Limit) {
+		return data.Theme{}, &EntitlementError{Key: KeyThemeSlots, Limit: res.Limit}
+	}
 	for range slotRetries {
 		slot, err := s.freeSlot(ctx, owner, res.Limit)
 		if err != nil {
@@ -167,6 +175,9 @@ func (s *Themes) Delete(ctx context.Context, owner, actor, id string, rev int64)
 	}
 	return s.themes.SoftDelete(ctx, owner, actor, id, rev)
 }
+
+// Items is the theme repository as limit enforcement sees it.
+func (s *Themes) Items() Limited { return s.themes }
 
 // Count returns how many custom themes owner holds.
 func (s *Themes) Count(ctx context.Context, owner string) (int64, error) {

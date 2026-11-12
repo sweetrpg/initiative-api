@@ -151,3 +151,6 @@ func (s *Encounters) edit(ctx context.Context, owner, actor, id string, rev int6
 func (s *Encounters) FindByExternalRef(ctx context.Context, owner, key, value string) ([]data.RefMatch, error) {
 	return s.repo.FindByExternalRef(ctx, owner, key, value)
 }
+
+// Items is the encounter repository as limit enforcement sees it.
+func (s *Encounters) Items() Limited { return s.repo }
