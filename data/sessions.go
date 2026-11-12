@@ -53,6 +53,7 @@ type Invite struct {
 	CodeHash  string     `bson:"code_hash" json:"-"`
 	ExpiresAt time.Time  `bson:"expires_at" json:"expires_at"`
 	RevokedAt *time.Time `bson:"revoked_at,omitempty" json:"revoked_at,omitempty"`
+	RevokedBy string     `bson:"revoked_by,omitempty" json:"revoked_by,omitempty"`
 	CreatedAt time.Time  `bson:"created_at" json:"created_at"`
 	CreatedBy string     `bson:"created_by" json:"created_by"`
 	// Live is set while the record is not deleted, so unique indexes can ignore deleted ones.
@@ -136,7 +137,22 @@ func (r *Sessions) softDelete(ctx context.Context, c store.Collection, filter bs
 	return err
 }
 
-func (r *Sessions) pairFilterOK(sessionID, userID string) error {
+// sessionOK refuses a call with no valid acting user or a malformed session id. The data layer
+// never reads or writes session data anonymously; whether actor may is the domain's decision.
+func (r *Sessions) sessionOK(actor, sessionID string) error {
+	if err := checkUserID(actor); err != nil {
+		return err
+	}
+	if _, ok := cleanID(sessionID); !ok {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Sessions) pairFilterOK(actor, sessionID, userID string) error {
+	if err := checkUserID(actor); err != nil {
+		return err
+	}
 	if _, ok := cleanID(sessionID); !ok {
 		return ErrNotFound
 	}
@@ -153,8 +169,11 @@ func checkUserID(u string) error {
 }
 
 // Live returns the session if it exists and is not deleted. It does not check access.
-func (r *Sessions) Live(ctx context.Context, sessionID string) (Session, error) {
+func (r *Sessions) Live(ctx context.Context, actor, sessionID string) (Session, error) {
 	var s Session
+	if err := checkUserID(actor); err != nil {
+		return s, err
+	}
 	id, ok := cleanID(sessionID)
 	if !ok {
 		return s, ErrNotFound
@@ -167,9 +186,9 @@ func (r *Sessions) Live(ctx context.Context, sessionID string) (Session, error) 
 }
 
 // AddMember records userID in the session with role. An existing member is ErrConflict.
-func (r *Sessions) AddMember(ctx context.Context, sessionID, userID, role, actor string) (Member, error) {
+func (r *Sessions) AddMember(ctx context.Context, actor, sessionID, userID, role string) (Member, error) {
 	m := Member{ID: newID(), SessionID: sessionID, UserID: userID, Role: role, CreatedAt: r.now(), CreatedBy: actor, Live: true}
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return m, err
 	}
 	if err := r.members.InsertOne(ctx, m); errors.Is(err, store.ErrDuplicate) {
@@ -181,9 +200,9 @@ func (r *Sessions) AddMember(ctx context.Context, sessionID, userID, role, actor
 }
 
 // Member returns userID's membership, or ErrNotFound.
-func (r *Sessions) Member(ctx context.Context, sessionID, userID string) (Member, error) {
+func (r *Sessions) Member(ctx context.Context, actor, sessionID, userID string) (Member, error) {
 	var m Member
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return m, err
 	}
 	err := r.members.FindOne(ctx, sessionUser(sessionID, userID), &m)
@@ -194,7 +213,10 @@ func (r *Sessions) Member(ctx context.Context, sessionID, userID string) (Member
 }
 
 // Members lists the session's members, oldest first.
-func (r *Sessions) Members(ctx context.Context, sessionID string, q Query) (Page[Member], error) {
+func (r *Sessions) Members(ctx context.Context, actor, sessionID string, q Query) (Page[Member], error) {
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return Page[Member]{}, err
+	}
 	if len(q.Sort) == 0 {
 		q.Sort = []SortKey{{Field: "created_at"}}
 	}
@@ -209,13 +231,13 @@ func (r *Sessions) SessionIDsOf(ctx context.Context, userID string, q Query) (Pa
 	if len(q.Sort) == 0 {
 		q.Sort = []SortKey{{Field: "created_at"}}
 	}
-	return runQuery[Member](ctx, r.members, SessionMemberSpec, bson.D{{Key: "user_id", Value: userID}}, q)
+	return runQuery[Member](ctx, r.members, SessionMemberSpec, bson.D{{Key: "user_id", Value: userID}, {Key: "deleted_at", Value: nil}}, q)
 }
 
 // SetRole changes a member's role.
-func (r *Sessions) SetRole(ctx context.Context, sessionID, userID, role string) (Member, error) {
+func (r *Sessions) SetRole(ctx context.Context, actor, sessionID, userID, role string) (Member, error) {
 	var m Member
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return m, err
 	}
 	err := r.members.FindOneAndUpdate(ctx, sessionUser(sessionID, userID), bson.D{{Key: "$set", Value: bson.D{{Key: "role", Value: role}}}}, &m)
@@ -226,22 +248,28 @@ func (r *Sessions) SetRole(ctx context.Context, sessionID, userID, role string) 
 }
 
 // RemoveMember ends a membership (soft delete).
-func (r *Sessions) RemoveMember(ctx context.Context, sessionID, userID, actor string) error {
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+func (r *Sessions) RemoveMember(ctx context.Context, actor, sessionID, userID string) error {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return err
 	}
 	return r.softDelete(ctx, r.members, sessionUser(sessionID, userID), actor)
 }
 
 // AddInvite stores an invite for the session.
-func (r *Sessions) AddInvite(ctx context.Context, sessionID, codeHash string, expires time.Time, actor string) (Invite, error) {
+func (r *Sessions) AddInvite(ctx context.Context, actor, sessionID, codeHash string, expires time.Time) (Invite, error) {
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return Invite{}, err
+	}
 	in := Invite{ID: newID(), SessionID: sessionID, CodeHash: codeHash, ExpiresAt: expires, CreatedAt: r.now(), CreatedBy: actor, Live: true}
 	return in, r.invites.InsertOne(ctx, in)
 }
 
 // InviteByHash resolves a presented code's hash to its invite, whatever its state.
-func (r *Sessions) InviteByHash(ctx context.Context, codeHash string) (Invite, error) {
+func (r *Sessions) InviteByHash(ctx context.Context, actor, codeHash string) (Invite, error) {
 	var in Invite
+	if err := checkUserID(actor); err != nil {
+		return in, err
+	}
 	if codeHash == "" {
 		return in, ErrNotFound
 	}
@@ -253,7 +281,10 @@ func (r *Sessions) InviteByHash(ctx context.Context, codeHash string) (Invite, e
 }
 
 // Invites lists the session's invites, oldest first.
-func (r *Sessions) Invites(ctx context.Context, sessionID string, q Query) (Page[Invite], error) {
+func (r *Sessions) Invites(ctx context.Context, actor, sessionID string, q Query) (Page[Invite], error) {
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return Page[Invite]{}, err
+	}
 	if len(q.Sort) == 0 {
 		q.Sort = []SortKey{{Field: "created_at"}}
 	}
@@ -261,8 +292,11 @@ func (r *Sessions) Invites(ctx context.Context, sessionID string, q Query) (Page
 }
 
 // RevokeInvite ends an invite; revoking twice is harmless.
-func (r *Sessions) RevokeInvite(ctx context.Context, sessionID, inviteID string) (Invite, error) {
+func (r *Sessions) RevokeInvite(ctx context.Context, actor, sessionID, inviteID string) (Invite, error) {
 	var in Invite
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return in, err
+	}
 	id, ok := cleanID(inviteID)
 	if !ok {
 		return in, ErrNotFound
@@ -276,7 +310,7 @@ func (r *Sessions) RevokeInvite(ctx context.Context, sessionID, inviteID string)
 		return in, err
 	}
 	err = r.invites.FindOneAndUpdate(ctx, append(filter, bson.E{Key: "revoked_at", Value: nil}),
-		bson.D{{Key: "$set", Value: bson.D{{Key: "revoked_at", Value: r.now()}}}}, &in)
+		bson.D{{Key: "$set", Value: bson.D{{Key: "revoked_at", Value: r.now()}, {Key: "revoked_by", Value: actor}}}}, &in)
 	if errors.Is(err, store.ErrNotFound) { // revoked concurrently
 		return in, r.invites.FindOne(ctx, filter, &in)
 	}
@@ -288,7 +322,7 @@ func (r *Sessions) RevokeInvite(ctx context.Context, sessionID, inviteID string)
 // never finished); an existing pending one is returned unchanged.
 func (r *Sessions) RequestJoin(ctx context.Context, sessionID, userID string) (JoinRequest, error) {
 	var jr JoinRequest
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+	if err := r.pairFilterOK(userID, sessionID, userID); err != nil {
 		return jr, err
 	}
 	err := r.requests.FindOne(ctx, sessionUser(sessionID, userID), &jr)
@@ -311,7 +345,10 @@ func (r *Sessions) RequestJoin(ctx context.Context, sessionID, userID string) (J
 }
 
 // Requests lists the session's requests, optionally only those with status.
-func (r *Sessions) Requests(ctx context.Context, sessionID, status string, q Query) (Page[JoinRequest], error) {
+func (r *Sessions) Requests(ctx context.Context, actor, sessionID, status string, q Query) (Page[JoinRequest], error) {
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return Page[JoinRequest]{}, err
+	}
 	if len(q.Sort) == 0 {
 		q.Sort = []SortKey{{Field: "created_at"}}
 	}
@@ -323,8 +360,11 @@ func (r *Sessions) Requests(ctx context.Context, sessionID, status string, q Que
 
 // Decide settles a pending request as approved (with role) or rejected (with reason). A request
 // already settled is ErrConflict.
-func (r *Sessions) Decide(ctx context.Context, sessionID, requestID, status, role, reason, actor string) (JoinRequest, error) {
+func (r *Sessions) Decide(ctx context.Context, actor, sessionID, requestID, status, role, reason string) (JoinRequest, error) {
 	var jr JoinRequest
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return jr, err
+	}
 	id, ok := cleanID(requestID)
 	if !ok {
 		return jr, ErrNotFound
@@ -348,8 +388,8 @@ func (r *Sessions) Decide(ctx context.Context, sessionID, requestID, status, rol
 }
 
 // DropRequest removes userID's request, if any.
-func (r *Sessions) DropRequest(ctx context.Context, sessionID, userID, actor string) error {
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+func (r *Sessions) DropRequest(ctx context.Context, actor, sessionID, userID string) error {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return err
 	}
 	if err := r.softDelete(ctx, r.requests, sessionUser(sessionID, userID), actor); !errors.Is(err, ErrNotFound) {
@@ -359,8 +399,8 @@ func (r *Sessions) DropRequest(ctx context.Context, sessionID, userID, actor str
 }
 
 // AddBlock keeps userID out of the session; blocking twice is harmless.
-func (r *Sessions) AddBlock(ctx context.Context, sessionID, userID, actor string) error {
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+func (r *Sessions) AddBlock(ctx context.Context, actor, sessionID, userID string) error {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return err
 	}
 	err := r.blocks.InsertOne(ctx, Block{ID: newID(), SessionID: sessionID, UserID: userID, CreatedAt: r.now(), CreatedBy: actor, Live: true})
@@ -371,16 +411,16 @@ func (r *Sessions) AddBlock(ctx context.Context, sessionID, userID, actor string
 }
 
 // RemoveBlock lifts a block.
-func (r *Sessions) RemoveBlock(ctx context.Context, sessionID, userID, actor string) error {
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+func (r *Sessions) RemoveBlock(ctx context.Context, actor, sessionID, userID string) error {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return err
 	}
 	return r.softDelete(ctx, r.blocks, sessionUser(sessionID, userID), actor)
 }
 
 // Blocked reports whether userID is blocked from the session.
-func (r *Sessions) Blocked(ctx context.Context, sessionID, userID string) (bool, error) {
-	if err := r.pairFilterOK(sessionID, userID); err != nil {
+func (r *Sessions) Blocked(ctx context.Context, actor, sessionID, userID string) (bool, error) {
+	if err := r.pairFilterOK(actor, sessionID, userID); err != nil {
 		return false, err
 	}
 	var b Block
@@ -392,7 +432,10 @@ func (r *Sessions) Blocked(ctx context.Context, sessionID, userID string) (bool,
 }
 
 // Blocks lists the session's blocked users.
-func (r *Sessions) Blocks(ctx context.Context, sessionID string, q Query) (Page[Block], error) {
+func (r *Sessions) Blocks(ctx context.Context, actor, sessionID string, q Query) (Page[Block], error) {
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return Page[Block]{}, err
+	}
 	if len(q.Sort) == 0 {
 		q.Sort = []SortKey{{Field: "created_at"}}
 	}
@@ -401,9 +444,9 @@ func (r *Sessions) Blocks(ctx context.Context, sessionID string, q Query) (Page[
 
 // DropSession soft-deletes every membership record of the session: members, invites, requests,
 // and blocks. The session document itself is soft-deleted by SoftDelete.
-func (r *Sessions) DropSession(ctx context.Context, sessionID, actor string) error {
-	if _, ok := cleanID(sessionID); !ok {
-		return ErrNotFound
+func (r *Sessions) DropSession(ctx context.Context, actor, sessionID string) error {
+	if err := r.sessionOK(actor, sessionID); err != nil {
+		return err
 	}
 	for _, c := range []store.Collection{r.members, r.invites, r.requests, r.blocks} {
 		for {

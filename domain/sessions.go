@@ -86,7 +86,7 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 	if err := s.repo.Create(ctx, actor, actor, &sess); err != nil {
 		return SessionView{}, err
 	}
-	if _, err := s.repo.AddMember(ctx, sess.ID, actor, data.RoleGM, actor); err != nil {
+	if _, err := s.repo.AddMember(ctx, actor, sess.ID, actor, data.RoleGM); err != nil {
 		return SessionView{}, err
 	}
 	return SessionView{Session: sess, Role: data.RoleGM}, nil
@@ -95,11 +95,11 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 // as returns actor's membership in session id when it may take action. An unknown session is
 // ErrNotFound; a user without the right (including a non-member) is ErrForbidden.
 func (s *Sessions) as(ctx context.Context, actor, id string, a Action) (data.Session, data.Member, error) {
-	sess, err := s.repo.Live(ctx, id)
+	sess, err := s.repo.Live(ctx, actor, id)
 	if err != nil {
 		return sess, data.Member{}, err
 	}
-	m, err := s.repo.Member(ctx, sess.ID, actor)
+	m, err := s.repo.Member(ctx, actor, sess.ID, actor)
 	if errors.Is(err, data.ErrNotFound) || (err == nil && !Allowed(m.Role, a)) {
 		return sess, m, data.ErrForbidden
 	}
@@ -120,7 +120,7 @@ func (s *Sessions) List(ctx context.Context, actor string, q data.Query) (data.P
 	}
 	out := data.Page[SessionView]{NextCursor: page.NextCursor, Items: []SessionView{}}
 	for _, m := range page.Items {
-		sess, err := s.repo.Live(ctx, m.SessionID)
+		sess, err := s.repo.Live(ctx, actor, m.SessionID)
 		if errors.Is(err, data.ErrNotFound) {
 			continue // deleted while we listed
 		}
@@ -142,7 +142,7 @@ func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) erro
 	if err := s.repo.SoftDelete(ctx, actor, actor, sess.ID, rev); err != nil {
 		return err
 	}
-	return s.repo.DropSession(ctx, sess.ID, actor)
+	return s.repo.DropSession(ctx, actor, sess.ID)
 }
 
 func hashCode(code string) string {
@@ -175,7 +175,7 @@ func (s *Sessions) CreateInvite(ctx context.Context, actor, id string, ttl time.
 	if err != nil {
 		return data.Invite{}, "", err
 	}
-	in, err := s.repo.AddInvite(ctx, sess.ID, hashCode(code), s.now().Add(ttl), actor)
+	in, err := s.repo.AddInvite(ctx, actor, sess.ID, hashCode(code), s.now().Add(ttl))
 	return in, code, err
 }
 
@@ -185,7 +185,7 @@ func (s *Sessions) Invites(ctx context.Context, actor, id string, q data.Query) 
 	if err != nil {
 		return data.Page[data.Invite]{}, err
 	}
-	return s.repo.Invites(ctx, sess.ID, q)
+	return s.repo.Invites(ctx, actor, sess.ID, q)
 }
 
 // RevokeInvite ends an invite at once.
@@ -194,13 +194,13 @@ func (s *Sessions) RevokeInvite(ctx context.Context, actor, id, inviteID string)
 	if err != nil {
 		return data.Invite{}, err
 	}
-	return s.repo.RevokeInvite(ctx, sess.ID, inviteID)
+	return s.repo.RevokeInvite(ctx, actor, sess.ID, inviteID)
 }
 
 // Join turns a presented code into a pending request. A pending request grants nothing. A code
 // that is unknown, expired, revoked, or from a blocked user fails the same way and creates nothing.
 func (s *Sessions) Join(ctx context.Context, actor, code string) (data.JoinRequest, error) {
-	in, err := s.repo.InviteByHash(ctx, hashCode(code))
+	in, err := s.repo.InviteByHash(ctx, actor, hashCode(code))
 	if errors.Is(err, data.ErrNotFound) {
 		return data.JoinRequest{}, ErrInviteInvalid
 	}
@@ -210,18 +210,18 @@ func (s *Sessions) Join(ctx context.Context, actor, code string) (data.JoinReque
 	if in.RevokedAt != nil || !s.now().Before(in.ExpiresAt) {
 		return data.JoinRequest{}, ErrInviteInvalid
 	}
-	if _, err := s.repo.Live(ctx, in.SessionID); err != nil {
+	if _, err := s.repo.Live(ctx, actor, in.SessionID); err != nil {
 		if errors.Is(err, data.ErrNotFound) {
 			return data.JoinRequest{}, ErrInviteInvalid
 		}
 		return data.JoinRequest{}, err
 	}
-	if blocked, err := s.repo.Blocked(ctx, in.SessionID, actor); err != nil {
+	if blocked, err := s.repo.Blocked(ctx, actor, in.SessionID, actor); err != nil {
 		return data.JoinRequest{}, err
 	} else if blocked {
 		return data.JoinRequest{}, ErrInviteInvalid
 	}
-	if _, err := s.repo.Member(ctx, in.SessionID, actor); err == nil {
+	if _, err := s.repo.Member(ctx, actor, in.SessionID, actor); err == nil {
 		return data.JoinRequest{}, data.ErrConflict
 	} else if !errors.Is(err, data.ErrNotFound) {
 		return data.JoinRequest{}, err
@@ -239,7 +239,7 @@ func (s *Sessions) Requests(ctx context.Context, actor, id string, pendingOnly b
 	if pendingOnly {
 		status = data.RequestPending
 	}
-	return s.repo.Requests(ctx, sess.ID, status, q)
+	return s.repo.Requests(ctx, actor, sess.ID, status, q)
 }
 
 // Approve makes the requester a member with role. The request settles first, so two approvals
@@ -252,17 +252,17 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 	if err != nil {
 		return data.Member{}, err
 	}
-	jr, err := s.repo.Decide(ctx, sess.ID, requestID, data.RequestApproved, role, "", actor)
+	jr, err := s.repo.Decide(ctx, actor, sess.ID, requestID, data.RequestApproved, role, "")
 	if err != nil {
 		return data.Member{}, err
 	}
-	if blocked, err := s.repo.Blocked(ctx, sess.ID, jr.UserID); err != nil || blocked {
+	if blocked, err := s.repo.Blocked(ctx, actor, sess.ID, jr.UserID); err != nil || blocked {
 		if err == nil {
 			err = data.ErrForbidden
 		}
 		return data.Member{}, err
 	}
-	return s.repo.AddMember(ctx, sess.ID, jr.UserID, role, actor)
+	return s.repo.AddMember(ctx, actor, sess.ID, jr.UserID, role)
 }
 
 // Reject settles a pending request with a reason; the requester stays out.
@@ -275,7 +275,7 @@ func (s *Sessions) Reject(ctx context.Context, actor, id, requestID, reason stri
 	if err != nil {
 		return data.JoinRequest{}, err
 	}
-	return s.repo.Decide(ctx, sess.ID, requestID, data.RequestRejected, "", reason, actor)
+	return s.repo.Decide(ctx, actor, sess.ID, requestID, data.RequestRejected, "", reason)
 }
 
 // Members lists the session's members (user id, role). Any member may.
@@ -284,12 +284,12 @@ func (s *Sessions) Members(ctx context.Context, actor, id string, q data.Query) 
 	if err != nil {
 		return data.Page[data.Member]{}, err
 	}
-	return s.repo.Members(ctx, sess.ID, q)
+	return s.repo.Members(ctx, actor, sess.ID, q)
 }
 
 // target loads the member a manager acts on. Nobody can act on the GM.
-func (s *Sessions) target(ctx context.Context, sessID, user string) (data.Member, error) {
-	m, err := s.repo.Member(ctx, sessID, user)
+func (s *Sessions) target(ctx context.Context, actor, sessID, user string) (data.Member, error) {
+	m, err := s.repo.Member(ctx, actor, sessID, user)
 	if err != nil {
 		return m, err
 	}
@@ -308,10 +308,10 @@ func (s *Sessions) SetRole(ctx context.Context, actor, id, user, role string) (d
 	if err != nil {
 		return data.Member{}, err
 	}
-	if _, err := s.target(ctx, sess.ID, user); err != nil {
+	if _, err := s.target(ctx, actor, sess.ID, user); err != nil {
 		return data.Member{}, err
 	}
-	return s.repo.SetRole(ctx, sess.ID, user, role)
+	return s.repo.SetRole(ctx, actor, sess.ID, user, role)
 }
 
 // Remove ends a member's access.
@@ -320,10 +320,10 @@ func (s *Sessions) Remove(ctx context.Context, actor, id, user string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.target(ctx, sess.ID, user); err != nil {
+	if _, err := s.target(ctx, actor, sess.ID, user); err != nil {
 		return err
 	}
-	return s.repo.RemoveMember(ctx, sess.ID, user, actor)
+	return s.repo.RemoveMember(ctx, actor, sess.ID, user)
 }
 
 // Leave removes actor from the session. The GM cannot leave; they delete the session.
@@ -335,7 +335,7 @@ func (s *Sessions) Leave(ctx context.Context, actor, id string) error {
 	if !Allowed(m.Role, ActLeave) {
 		return invalid("the GM cannot leave; delete the session instead")
 	}
-	return s.repo.RemoveMember(ctx, sess.ID, actor, actor)
+	return s.repo.RemoveMember(ctx, actor, sess.ID, actor)
 }
 
 // Block keeps user out of the session, removing them and any pending request.
@@ -347,16 +347,16 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	if user == actor {
 		return invalid("you cannot block yourself")
 	}
-	if _, err := s.target(ctx, sess.ID, user); err != nil && !errors.Is(err, data.ErrNotFound) {
+	if _, err := s.target(ctx, actor, sess.ID, user); err != nil && !errors.Is(err, data.ErrNotFound) {
 		return err
 	}
-	if err := s.repo.AddBlock(ctx, sess.ID, user, actor); err != nil {
+	if err := s.repo.AddBlock(ctx, actor, sess.ID, user); err != nil {
 		return err
 	}
-	if err := s.repo.DropRequest(ctx, sess.ID, user, actor); err != nil {
+	if err := s.repo.DropRequest(ctx, actor, sess.ID, user); err != nil {
 		return err
 	}
-	if err := s.repo.RemoveMember(ctx, sess.ID, user, actor); err != nil && !errors.Is(err, data.ErrNotFound) {
+	if err := s.repo.RemoveMember(ctx, actor, sess.ID, user); err != nil && !errors.Is(err, data.ErrNotFound) {
 		return err
 	}
 	return nil
@@ -368,7 +368,7 @@ func (s *Sessions) Unblock(ctx context.Context, actor, id, user string) error {
 	if err != nil {
 		return err
 	}
-	return s.repo.RemoveBlock(ctx, sess.ID, user, actor)
+	return s.repo.RemoveBlock(ctx, actor, sess.ID, user)
 }
 
 // Blocks lists the blocked users.
@@ -377,5 +377,5 @@ func (s *Sessions) Blocks(ctx context.Context, actor, id string, q data.Query) (
 	if err != nil {
 		return data.Page[data.Block]{}, err
 	}
-	return s.repo.Blocks(ctx, sess.ID, q)
+	return s.repo.Blocks(ctx, actor, sess.ID, q)
 }

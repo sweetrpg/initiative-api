@@ -307,6 +307,19 @@ func TestRemovedMemberLosesAccessAtOnce(t *testing.T) {
 	}
 }
 
+func TestRemovedMemberDoesNotSeeTheSessionInList(t *testing.T) {
+	s, id := table(t)
+	if err := s.Remove(ctx, "cogm", id, "p1"); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := s.List(ctx, "p1", data.Query{})
+
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("list for removed member = %+v, %v; want empty", page.Items, err)
+	}
+}
+
 func TestBlockRemovesMemberAndStopsRejoining(t *testing.T) {
 	s, id := table(t)
 	_, code, _ := s.CreateInvite(ctx, "gm", id, 0)
@@ -453,7 +466,7 @@ func TestJoinHealsAnApprovalThatNeverAddedTheMember(t *testing.T) {
 	sess, _ := s.Create(ctx, "gm", "Friday")
 	_, code, _ := s.CreateInvite(ctx, "gm", sess.ID, 0)
 	jr, _ := s.Join(ctx, "u", code)
-	if _, err := s.repo.Decide(ctx, sess.ID, jr.ID, data.RequestApproved, data.RolePlayer, "", "gm"); err != nil {
+	if _, err := s.repo.Decide(ctx, "gm", sess.ID, jr.ID, data.RequestApproved, data.RolePlayer, ""); err != nil {
 		t.Fatal(err) // settled, but no member was added
 	}
 
