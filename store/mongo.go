@@ -63,6 +63,17 @@ func (m mongoCollection) FindOneAndUpdate(ctx context.Context, filter, update bs
 	return mapErr(m.c.FindOneAndUpdate(ctx, filter, update, opts).Decode(out))
 }
 
+func (m mongoCollection) DeleteOne(ctx context.Context, filter bson.D) error {
+	res, err := m.c.DeleteOne(ctx, filter)
+	if err != nil {
+		return mapErr(err)
+	}
+	if res.DeletedCount == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (m mongoCollection) CountDocuments(ctx context.Context, filter bson.D) (int64, error) {
 	n, err := m.c.CountDocuments(ctx, filter)
 	return n, mapErr(err)

@@ -42,6 +42,8 @@ type Collection interface {
 	Find(ctx context.Context, filter bson.D, opts FindOptions, out any) error
 	// FindOneAndUpdate applies update to the first match and decodes the post-update document.
 	FindOneAndUpdate(ctx context.Context, filter, update bson.D, out any) error
+	// DeleteOne removes the first match for good; ErrNotFound when nothing matched.
+	DeleteOne(ctx context.Context, filter bson.D) error
 	CountDocuments(ctx context.Context, filter bson.D) (int64, error)
 	EnsureIndexes(ctx context.Context, specs []IndexSpec) error
 }
