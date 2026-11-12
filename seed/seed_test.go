@@ -40,6 +40,10 @@ func TestFamilyFieldSets(t *testing.T) {
 		{"cypher", "[intellect intellectMaximum might mightMaximum speed speedMaximum]"},
 		{"theonering", "[endurance enduranceRating fatigue hope hopeRating miserable shadow weary wounded]"},
 		{"shadowrun5", "[value1 value1Maximum value2 value2Maximum]"},
+		{"pathfinder2", "[current doomed dying maximum temporary wounded]"},
+		{"shadowofthedemonlord", "[damage health]"},
+		{"shadowoftheweirdwizard", "[damage health]"},
+		{"twilight2000", "[damage hitCapacity stress]"},
 	}
 	defs := byID(t)
 	for _, tt := range tests {
@@ -133,5 +137,31 @@ func TestExpandAcceptsDistinctIdentifiers(t *testing.T) {
 	_, err := expand(fam, []systemFile{{ID: "alpha", Name: "A", Family: "f", Aliases: []string{"a1"}}, {ID: "beta", Name: "B", Family: "f"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSupportedSystemsResolveByFoundryID(t *testing.T) {
+	db := fake.NewDB()
+	repo := data.NewSystemRepo(db)
+	if _, err := Load(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"dnd5e": "dnd5", "pf2e": "pathfinder2", "cyphersystem": "cypher", "demonlord": "shadowofthedemonlord",
+		"weirdwizard": "shadowoftheweirdwizard", "t2k4e": "twilight2000", "genesys": "genesys",
+	}
+	for foundry, id := range want {
+		got, err := repo.Get(context.Background(), foundry)
+		if err != nil || got.ID != id {
+			t.Errorf("Get(%q) = %q, %v; want %q", foundry, got.ID, err, id)
+		}
+	}
+}
+
+func TestPathfinder2UsesItsOwnBounds(t *testing.T) {
+	for _, f := range byID(t)["pathfinder2"].Fields {
+		if f.Key == "dying" && (*f.Min != 0 || *f.Max != 4) {
+			t.Fatalf("dying bounds = %d..%d, want 0..4", *f.Min, *f.Max)
+		}
 	}
 }
