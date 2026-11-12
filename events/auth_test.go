@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 type rec struct {
@@ -65,5 +67,57 @@ func TestBehindRetention(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// fakeMsg records whether the consumer acknowledged or refused a message.
+type fakeMsg struct {
+	jetstream.Msg
+	body       string
+	acked, nak bool
+}
+
+func (m *fakeMsg) Data() []byte { return []byte(m.body) }
+func (m *fakeMsg) Ack() error   { m.acked = true; return nil }
+func (m *fakeMsg) Nak() error   { m.nak = true; return nil }
+
+func TestProcessAcksHandledEventsAndNaksFailures(t *testing.T) {
+	deny := `{"entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`
+	tests := []struct {
+		name      string
+		revokeErr error
+		wantAck   bool
+	}{
+		{"revoked", nil, true},
+		{"revoke fails, redelivered later", errors.New("db down"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(&rec{err: tt.revokeErr}, nil)
+			m := &fakeMsg{body: deny}
+
+			c.process(context.Background(), m)
+
+			if m.acked != tt.wantAck || m.nak == tt.wantAck {
+				t.Fatalf("acked = %v, nak = %v, want acked = %v", m.acked, m.nak, tt.wantAck)
+			}
+		})
+	}
+}
+
+func TestNewDefaultsToTheAuthStreamAndStopIsSafeBeforeStart(t *testing.T) {
+	c := New(&rec{}, nil)
+
+	c.Stop()
+
+	if c.Stream != StreamName || c.Filter != FilterSubject {
+		t.Fatalf("stream %q filter %q, want %q %q", c.Stream, c.Filter, StreamName, FilterSubject)
+	}
+}
+
+func TestStartFailsWhenTheBrokerIsUnreachable(t *testing.T) {
+	c := New(&rec{}, nil)
+	if err := c.Start(context.Background(), "nats://127.0.0.1:1", ""); err == nil {
+		t.Fatal("Start succeeded with no broker")
 	}
 }
