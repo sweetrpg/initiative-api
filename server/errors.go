@@ -47,6 +47,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "packaged_theme_read_only", Message: "Packaged themes cannot be changed. Create a custom theme from it instead."}, http.StatusForbidden
 	case errors.Is(err, domain.ErrCredentialsClosed):
 		return ErrorBody{Code: "credentials_unavailable", Message: "Integration credentials are temporarily unavailable."}, http.StatusServiceUnavailable
+	case errors.Is(err, domain.ErrOwnerLimitsUnknown):
+		return ErrorBody{Code: "owner_entitlements_pending", Message: "The session owner has not connected yet. Try again after they do."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnavailable):
 		return ErrorBody{Code: "entitlements_unavailable", Message: "Entitlements are temporarily unavailable. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnauthorized):

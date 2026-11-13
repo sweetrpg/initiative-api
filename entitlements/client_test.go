@@ -111,8 +111,8 @@ func TestUnreachableFailOpenServesStale(t *testing.T) {
 	down.Store(true)
 	now = now.Add(time.Hour)
 	res, err := c.Check(context.Background(), "u1", "t", "k", FailOpen)
-	if err != nil || res.Degraded || res.Limit != 5 {
-		t.Fatalf("got %+v, %v", res, err)
+	if err != nil || res.Degraded || !res.Stale || res.Limit != 5 {
+		t.Fatalf("got %+v, %v; want a stale, non-degraded 5", res, err)
 	}
 	if _, err := c.Check(context.Background(), "u1", "t", "k", FailClosed); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("fail-closed must not use stale values: %v", err)

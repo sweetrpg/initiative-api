@@ -13,6 +13,9 @@ import (
 const (
 	KeySavedRosters    = "initiative.saved_rosters"
 	KeySavedEncounters = "initiative.saved_encounters"
+	KeySessionsPerGM   = "initiative.sessions_per_gm"
+	// KeyMembersPerSession is recorded on each session; 7.12 enforces it.
+	KeyMembersPerSession = "initiative.members_per_session"
 )
 
 // Limited is a repository whose items can go inactive when the owner's limit falls.

@@ -72,13 +72,14 @@ func main() {
 		}
 		defer consumer.Stop()
 	}
-	rosters, encounters := domain.NewRosters(db), domain.NewEncounters(db)
+	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
 	svc := server.Services{
 		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(
 			domain.Kind{Name: "themes", Key: domain.KeyThemeSlots, Repo: themes.Items()},
 			domain.Kind{Name: "rosters", Key: domain.KeySavedRosters, Repo: rosters.Items()},
 			domain.Kind{Name: "encounters", Key: domain.KeySavedEncounters, Repo: encounters.Items()},
+			domain.Kind{Name: "sessions", Key: domain.KeySessionsPerGM, Repo: sessions.Items()},
 			domain.Kind{Name: "credentials", Key: domain.KeyIntegrationCredentials, Repo: creds.Items()},
 		),
 		Authz:        authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
@@ -87,7 +88,7 @@ func main() {
 		Credentials:  creds,
 		Rosters:      rosters,
 		Encounters:   encounters,
-		Sessions:     domain.NewSessions(db),
+		Sessions:     sessions,
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc), ReadHeaderTimeout: 10 * time.Second}
 

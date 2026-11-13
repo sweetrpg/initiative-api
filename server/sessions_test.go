@@ -202,3 +202,17 @@ func TestIntegrationCredentialsCannotUseSessions(t *testing.T) {
 		}
 	}
 }
+
+func TestSecondSessionOverTheGMLimitIsTyped403(t *testing.T) {
+	r, _ := credRouterWith(t, "1")
+	if w := callAs(r, "user-ok", "POST", "/sessions", `{"name":"One"}`); w.Code != http.StatusCreated {
+		t.Fatalf("first = %d %s", w.Code, w.Body)
+	}
+
+	w := callAs(r, "user-ok", "POST", "/sessions", `{"name":"Two"}`)
+
+	body := decodeBody(t, w)
+	if w.Code != http.StatusForbidden || body["code"] != "entitlement_limit_reached" || body["key"] != "initiative.sessions_per_gm" {
+		t.Fatalf("second = %d %v", w.Code, body)
+	}
+}
