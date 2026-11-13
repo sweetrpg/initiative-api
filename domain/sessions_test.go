@@ -504,6 +504,7 @@ type meter struct {
 	limit    int
 	err      error
 	degraded bool
+	stale    bool
 	calls    int
 }
 
@@ -512,7 +513,7 @@ func (m *meter) Check(_ context.Context, key string, _ entitlements.Policy) (ent
 	if m.err != nil {
 		return entitlements.Result{}, m.err
 	}
-	return entitlements.Result{Key: key, Type: "limit", Limit: m.limit, Degraded: m.degraded}, nil
+	return entitlements.Result{Key: key, Type: "limit", Limit: m.limit, Degraded: m.degraded, Stale: m.stale}, nil
 }
 
 func TestCreateStopsAtTheSessionLimit(t *testing.T) {
@@ -658,18 +659,74 @@ func TestOutageOnRefreshKeepsTheRecordAndDoesNotFailTheGM(t *testing.T) {
 
 func TestSessionWithoutARecordReportsRetryableError(t *testing.T) {
 	s := newSessions(t)
-	sess, err := s.Create(context.Background(), "gm", "x")
-	if err == nil {
-		t.Fatalf("create without a checker succeeded: %+v", sess)
-	}
-	sess, err = s.Create(sctx, "gm", "Friday")
+	sess, err := s.Create(sctx, "gm", "Friday")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := recorded(t, s, sess.ID)
-	fresh.OwnerLimits = nil
 
-	if _, err := OwnerLimit(fresh, KeyMembersPerSession); !errors.Is(err, ErrOwnerLimitsUnknown) {
+	stored := recorded(t, s, sess.ID)
+
+	if stored.OwnerLimitsAt != nil {
+		t.Fatalf("a new session already has a record: %+v", stored.OwnerLimits)
+	}
+	if _, err := OwnerLimit(stored, KeyMembersPerSession); !errors.Is(err, ErrOwnerLimitsUnknown) {
 		t.Fatalf("no record = %v, want ErrOwnerLimitsUnknown", err)
+	}
+}
+
+func TestAbsentGMAfterDowngradeLeavesTheStoredRecordAlone(t *testing.T) {
+	s := newSessions(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	m := &meter{limit: 10}
+	sess, err := s.Create(WithChecker(context.Background(), m), "gm", "Friday")
+	if err != nil {
+		t.Fatal(err)
+	}
+	join(t, s, sess.ID, "p1", data.RolePlayer)
+	if _, err := s.Get(WithChecker(context.Background(), m), "gm", sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := recorded(t, s, sess.ID)
+
+	// The GM's plan lapses and the GM does not return; only the player acts, much later.
+	m.limit = 0
+	now = now.Add(48 * time.Hour)
+	for range 3 {
+		if _, err := s.Get(WithChecker(context.Background(), m), "p1", sess.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	after := recorded(t, s, sess.ID)
+	if v, err := OwnerLimit(after, KeyMembersPerSession); err != nil || v != 10 {
+		t.Fatalf("stored limit = %d, %v; want the recorded 10", v, err)
+	}
+	if !after.OwnerLimitsAt.Equal(*before.OwnerLimitsAt) {
+		t.Fatalf("recorded time moved from %v to %v without the GM", before.OwnerLimitsAt, after.OwnerLimitsAt)
+	}
+}
+
+func TestStaleReadDoesNotAdvanceTheRecord(t *testing.T) {
+	s := newSessions(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	m := &meter{limit: 10}
+	c := WithChecker(context.Background(), m)
+	sess, _ := s.Create(c, "gm", "Friday")
+	if _, err := s.Get(c, "gm", sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := recorded(t, s, sess.ID)
+
+	m.stale, m.limit = true, 3 // a cached value served during an outage
+	now = now.Add(time.Hour)
+	if _, err := s.Get(c, "gm", sess.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	after := recorded(t, s, sess.ID)
+	if v, _ := OwnerLimit(after, KeyMembersPerSession); v != 10 || !after.OwnerLimitsAt.Equal(*before.OwnerLimitsAt) {
+		t.Fatalf("record = %d at %v; want 10 at %v unchanged", v, after.OwnerLimitsAt, before.OwnerLimitsAt)
 	}
 }

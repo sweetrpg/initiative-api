@@ -155,7 +155,7 @@ func (s *Sessions) as(ctx context.Context, actor, id string, a Action) (data.Ses
 }
 
 // refreshOwnerLimits re-reads the GM's entitlements with the GM's own token (the checker in ctx)
-// and records them on the session. A failed or degraded read keeps the old record, is logged, and
+// and records them on the session. A failed, degraded, or stale (cached past its TTL) read keeps the old record, is logged, and
 // never fails the request.
 func (s *Sessions) refreshOwnerLimits(ctx context.Context, sess data.Session) data.Session {
 	chk, ok := ctx.Value(checkerKey{}).(Checker)
@@ -165,7 +165,7 @@ func (s *Sessions) refreshOwnerLimits(ctx context.Context, sess data.Session) da
 	limits := make(map[string]int, len(sessionKeys))
 	for _, key := range sessionKeys {
 		res, err := chk.Check(ctx, key, entitlements.FailOpen)
-		if err != nil || res.Degraded {
+		if err != nil || res.Degraded || res.Stale {
 			slog.WarnContext(ctx, "session owner entitlements not refreshed", "session", sess.ID, "key", key, "error", err)
 			return sess
 		}
