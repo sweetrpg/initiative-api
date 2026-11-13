@@ -157,13 +157,8 @@ func TestContractCasesAreUniqueAndTyped(t *testing.T) {
 		}
 		seen[c.Scenario] = true
 		if c.Status >= 400 {
-			// authz-client.go's middleware answers 401/403 as {"error", "message"}; every other
-			// error is {"code", "message", "correlation_id"}. Both are pinned in the fixture.
 			code, _ := c.Body["code"].(string)
-			if code == "" {
-				code, _ = c.Body["error"].(string)
-			}
-			if code == "" || strings.TrimSpace(fmt.Sprint(c.Body["message"])) == "" {
+			if _, old := c.Body["error"]; old || code == "" || strings.TrimSpace(fmt.Sprint(c.Body["message"])) == "" {
 				t.Errorf("%s: error body has no code and message: %v", c.Scenario, c.Body)
 			}
 		}
