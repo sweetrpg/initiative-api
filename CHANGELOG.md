@@ -38,6 +38,9 @@
 
 ## 0.1.0 - 2026-11-12
 
+
+## 0.1.0 - 2026-11-12
+
 ### Added
 - Add Go service skeleton with config, logging, tracing and status
 - Add bearer-token auth middleware on a protected route group
