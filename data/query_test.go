@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 func seedRosters(t *testing.T, r *Owned[Roster, *Roster], owner string, names ...string) {
@@ -221,5 +223,24 @@ func TestEqualSortValuesPageByIDTieBreak(t *testing.T) {
 	want := fmt.Sprint([]string{testID("d"), testID("a"), testID("b"), testID("c")})
 	if fmt.Sprint(ids) != want {
 		t.Fatalf("walked ids %v, want [d a b c] (other, then the three equal names by id)", ids)
+	}
+}
+
+func TestUnfilteredPlanHasNoEmptyAnd(t *testing.T) {
+	p, err := buildPlan(RosterSpec, bson.D{}, Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.filter) != 0 {
+		t.Fatalf("filter = %v, want empty: MongoDB rejects an empty $and", p.filter)
+	}
+}
+
+func TestFilterOfDropsEmptyAnd(t *testing.T) {
+	if got := filterOf(bson.A{}); len(got) != 0 {
+		t.Errorf("filterOf(empty) = %v, want empty filter", got)
+	}
+	if got := filterOf(bson.A{bson.D{{Key: "a", Value: 1}}}); len(got) != 1 || got[0].Key != "$and" {
+		t.Errorf("filterOf(one clause) = %v, want a $and", got)
 	}
 }
