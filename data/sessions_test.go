@@ -231,3 +231,26 @@ func TestRevokeInviteRecordsTheRevoker(t *testing.T) {
 		t.Fatalf("revoked = %+v, %v; want revoked_by co", got, err)
 	}
 }
+
+func TestScanMembersSeesEverySessionIncludingDeleted(t *testing.T) {
+	r, id := newSessionRepo(t)
+	if _, err := r.AddMember(ctx, "gm", id, "u1", RolePlayer); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RemoveMember(ctx, "gm", id, "u1"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := r.ScanMembers(ctx, Query{Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deleted int
+	for _, m := range page.Items {
+		if m.DeletedAt != nil {
+			deleted++
+		}
+	}
+	if len(page.Items) != 1 || deleted != 1 {
+		t.Fatalf("items=%d deleted=%d, want the one deleted member kept in the scan", len(page.Items), deleted)
+	}
+}

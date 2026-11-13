@@ -16,6 +16,7 @@ RUN go mod download && go mod verify
 
 ADD . .
 RUN CGO_ENABLED=0 GOOS=linux go build -v -o /bin/server ./cmd/initiative-api
+RUN CGO_ENABLED=0 GOOS=linux go build -v -o /bin/reconciler ./cmd/reconciler
 
 FROM alpine
 
@@ -36,6 +37,7 @@ WORKDIR /app/
 
 RUN mkdir -p /app/bin /app/config
 COPY --from=builder /bin/server /app/bin/
+COPY --from=builder /bin/reconciler /app/bin/
 
 RUN echo "{\"number\":\"${BUILD_NUMBER}\",\"job\":\"${BUILD_JOB}\",\"sha\":\"${BUILD_SHA}\",\"date\":\"${BUILD_DATE}\",\"version\":\"${BUILD_VERSION}\"}" > /app/config/build-info.json
 RUN chown -R ${USERNAME}:${USERNAME} /app
