@@ -3,7 +3,10 @@ package server
 import (
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/sweetrpg/initiative-api/store/fake"
 )
 
 // sessionTable has user-ok (u-1) as GM, user-two (u-2) as a player; user-three (u-3) is outside.
@@ -214,5 +217,70 @@ func TestSecondSessionOverTheGMLimitIsTyped403(t *testing.T) {
 	body := decodeBody(t, w)
 	if w.Code != http.StatusForbidden || body["code"] != "entitlement_limit_reached" || body["key"] != "initiative.sessions_per_gm" {
 		t.Fatalf("second = %d %v", w.Code, body)
+	}
+}
+
+func sessionRouterWith(t *testing.T, rel http.HandlerFunc) http.Handler {
+	t.Helper()
+	r, _ := credRouterRel(t, "3", fake.NewDB(), rel)
+	return r
+}
+
+func TestSessionRoutesAnswer503WhenAuthorizationIsDown(t *testing.T) {
+	var down atomic.Bool
+	router := sessionRouterWith(t, func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			http.Error(w, "openfga down", http.StatusBadGateway)
+			return
+		}
+		allowRelations(w, r)
+	})
+	w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", w.Code, w.Body)
+	}
+	id := decodeBody(t, w)["id"].(string)
+	down.Store(true)
+
+	for _, path := range []string{"/sessions/" + id, "/sessions/" + id + "/members", "/sessions"} {
+		w := callAs(router, "user-ok", "GET", path, "")
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "authorization_unavailable") {
+			t.Errorf("GET %s = %d %s, want 503 authorization_unavailable", path, w.Code, w.Body)
+		}
+	}
+	if w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Saturday"}`); w.Code != http.StatusCreated {
+		t.Errorf("create in an outage = %d %s, want 201: creating needs no relation check", w.Code, w.Body)
+	}
+}
+
+func TestPrivateRecordsWorkWhenAuthorizationIsDown(t *testing.T) {
+	router := sessionRouterWith(t, func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", http.StatusBadGateway) })
+
+	w := callAs(router, "user-ok", "GET", "/entitlements", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("entitlements in an outage = %d %s, want 200", w.Code, w.Body)
+	}
+}
+
+func TestDeniedRelationIs403WithNoSessionData(t *testing.T) {
+	router := sessionRouterWith(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"allowed":false}`)) })
+	id := strings.Repeat("a", 24)
+
+	w := callAs(router, "user-three", "GET", "/sessions/"+id, "")
+
+	if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "Friday") {
+		t.Fatalf("denied get = %d %s, want 403", w.Code, w.Body)
+	}
+}
+
+func TestRejectedTokenAtAuthAPIIs401(t *testing.T) {
+	router := sessionRouterWith(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) })
+	id := strings.Repeat("a", 24)
+
+	w := callAs(router, "user-ok", "GET", "/sessions/"+id, "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("get = %d %s, want 401", w.Code, w.Body)
 	}
 }

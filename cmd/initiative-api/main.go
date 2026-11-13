@@ -28,6 +28,7 @@ import (
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
 	"github.com/sweetrpg/initiative-api/events"
+	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/server"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
@@ -93,6 +94,7 @@ func main() {
 		Rosters:      rosters,
 		Encounters:   encounters,
 		Sessions:     sessions,
+		Relations:    relations.New(cfg.AuthAPIURL),
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc, pool), ReadHeaderTimeout: 10 * time.Second}
 

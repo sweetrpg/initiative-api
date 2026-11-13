@@ -5,8 +5,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
 	"github.com/sweetrpg/initiative-api/constants"
+	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/relations"
 )
 
 // Services are the dependencies the resource handlers need.
@@ -20,6 +22,9 @@ type Services struct {
 	Rosters      *domain.Rosters
 	Encounters   *domain.Encounters
 	Sessions     *domain.Sessions
+	// Relations answers session authorization checks (PADR-0035). Without it every session
+	// request fails closed with 503.
+	Relations *relations.Client
 }
 
 // ProtectedGroup returns a route group whose every route requires a bearer token that auth-api
@@ -39,7 +44,7 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupStatusHandlers(r)
 
 	g := ProtectedGroup(r, s.Authz, s.Credentials)
-	g.Use(withChecker(s.Entitlements))
+	g.Use(withChecker(s.Entitlements), withGate(s.Relations))
 	if s.Limits != nil || s.Locks != nil {
 		g.Use(reconcileLimits(s))
 	}
@@ -54,5 +59,17 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupRefHandlers(g, s.Encounters)
 	if s.Credentials != nil {
 		setupAdminCredentialHandlers(ProtectedGroup(r, s.Authz, nil, authz.RoleAdmin), s.Credentials)
+	}
+}
+
+// withGate gives the data layer the relation checker and the caller's own bearer token (PADR-0037),
+// so session data can be authorized per request. A nil client leaves ctx without a gate, which
+// makes session data fail closed.
+func withGate(c *relations.Client) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if c != nil {
+			ctx.Request = ctx.Request.WithContext(data.WithGate(ctx.Request.Context(), c, authz.Token(ctx)))
+		}
+		ctx.Next()
 	}
 }
