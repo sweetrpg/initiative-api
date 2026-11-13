@@ -114,7 +114,7 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 	if err != nil {
 		return SessionView{}, err
 	}
-	owned, err := s.repo.Count(ctx, actor, nil)
+	owned, err := s.repo.Count(ctx, actor)
 	if err != nil {
 		return SessionView{}, err
 	}
@@ -197,7 +197,7 @@ func (s *Sessions) refreshOwnerLimits(ctx context.Context, d data.Decision, sess
 
 // Items exposes the sessions as limited items, so the limit reconciler can deactivate those beyond
 // the owner's entitled count.
-func (s *Sessions) Items() Limited { return s.repo }
+func (s *Sessions) Items() Limited { return s.repo.Limits() }
 
 // Get returns the session with actor's role. Only members may read it.
 func (s *Sessions) Get(ctx context.Context, actor, id string) (SessionView, error) {
@@ -239,7 +239,7 @@ func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) erro
 	if err != nil {
 		return err
 	}
-	if err := s.repo.SoftDelete(ctx, actor, actor, d.SessionID(), rev); err != nil {
+	if err := s.repo.SoftDelete(ctx, d, rev); err != nil {
 		return err
 	}
 	return s.repo.DropSession(ctx, d)

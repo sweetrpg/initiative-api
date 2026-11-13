@@ -19,7 +19,7 @@ func newSessionRepo(t *testing.T) (*Sessions, string) {
 	r := NewSessions(db)
 	r.now = func() time.Time { return clock }
 	s := &Session{Name: "Friday"}
-	if err := r.Create(ctx, "gm", "gm", s); err != nil {
+	if err := r.owned.Create(ctx, "gm", "gm", s); err != nil {
 		t.Fatal(err)
 	}
 	return r, s.ID
@@ -102,7 +102,7 @@ func TestDropSessionRemovesEveryMembershipRecord(t *testing.T) {
 	db := fake.NewDB()
 	r := NewSessions(db)
 	s := &Session{Name: "Friday"}
-	if err := r.Create(ctx, "gm", "gm", s); err != nil {
+	if err := r.owned.Create(ctx, "gm", "gm", s); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.AddMember(ctx, dc(t, "gm", s.ID), "gm", RoleGM); err != nil {
@@ -380,5 +380,23 @@ func TestResolveInviteRefusesRevokedAndExpired(t *testing.T) {
 		if _, err := r.ResolveInvite(ctx, "u1", h, r.now()); !errors.Is(err, ErrNotFound) {
 			t.Errorf("ResolveInvite(%q) = %v, want ErrNotFound", h, err)
 		}
+	}
+}
+
+func TestJoinTicketIsBoundToItsActor(t *testing.T) {
+	r, id := newSessionRepo(t)
+	ticket := ticketFor(t, r, id, "u1")
+
+	got, err := r.RequestJoin(ctx, ticket)
+
+	if err != nil || got.UserID != "u1" {
+		t.Fatalf("request = %+v, %v; want a request for the ticket's user u1", got, err)
+	}
+	st, err := r.ForJoin(ctx, ticket)
+	if err != nil || st.Member || st.Blocked {
+		t.Fatalf("join state = %+v, %v", st, err)
+	}
+	if _, err := r.ResolveInvite(ctx, `{"$gt":""}`, "h", r.now()); !errors.Is(err, ErrInvalid) {
+		t.Errorf("operator-shaped actor = %v, want ErrInvalid", err)
 	}
 }

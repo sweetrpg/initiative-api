@@ -100,16 +100,21 @@ type Block struct {
 // Sessions is the repository for sessions and their membership records. The session document is
 // owner-scoped (its owner is the GM); membership records are looked up by session, and the domain
 // layer decides from them who may do what.
+//
+// The owner-scoped repository is not embedded: its Get, Update, List and the rest would be session
+// reads and writes with no Decision (PADR-0035). Only Open, Count, SoftDelete and Limits expose it.
 type Sessions struct {
-	*Owned[Session, *Session]
+	owned                              *Owned[Session, *Session]
+	c                                  store.Collection
 	members, invites, requests, blocks store.Collection
 	now                                func() time.Time
 }
 
 // NewSessions builds the repository on db.
 func NewSessions(db store.Database) *Sessions {
+	o := NewOwned[Session](db, SessionSpec)
 	return &Sessions{
-		Owned:   NewOwned[Session](db, SessionSpec),
+		owned: o, c: o.c,
 		members: db.Collection(CollectionSessionMembers), invites: db.Collection(CollectionSessionInvites),
 		requests: db.Collection(CollectionSessionRequests), blocks: db.Collection(CollectionSessionBlocks),
 		now: func() time.Time { return time.Now().UTC() },
@@ -162,11 +167,46 @@ func checkUserID(u string) error {
 // Open creates the session owned by actor and records actor as its GM. Creating is not a session
 // read: it is gated by the sessions_per_gm entitlement, which the caller checks first.
 func (r *Sessions) Open(ctx context.Context, actor string, s *Session) error {
-	if err := r.Create(ctx, actor, actor, s); err != nil {
+	if err := r.owned.Create(ctx, actor, actor, s); err != nil {
 		return err
 	}
 	m := Member{ID: newID(), SessionID: s.ID, UserID: actor, Role: RoleGM, CreatedAt: r.now(), CreatedBy: actor, Live: true}
 	return r.members.InsertOne(ctx, m)
+}
+
+// Count returns how many sessions owner has, including inactive ones.
+func (r *Sessions) Count(ctx context.Context, owner string) (int64, error) {
+	return r.owned.Count(ctx, owner, nil)
+}
+
+// SoftDelete deletes the session at expectedRevision. Only the GM may.
+func (r *Sessions) SoftDelete(ctx context.Context, d Decision, expectedRevision int64) error {
+	if err := d.require(relGM); err != nil {
+		return err
+	}
+	return r.owned.SoftDelete(ctx, d.actor, d.actor, d.session, expectedRevision)
+}
+
+// LimitItems is the part of the owner-scoped repository the limit reconciler needs: which sessions
+// an owner has and which are inactive. It reads no session content.
+type LimitItems struct{ o *Owned[Session, *Session] }
+
+// Limits returns the limit reconciler's view of the sessions.
+func (r *Sessions) Limits() LimitItems { return LimitItems{r.owned} }
+
+// ItemStates lists owner's sessions with their activity state.
+func (l LimitItems) ItemStates(ctx context.Context, owner string) ([]ItemState, error) {
+	return l.o.ItemStates(ctx, owner)
+}
+
+// SetInactive sets or clears a session's inactive mark.
+func (l LimitItems) SetInactive(ctx context.Context, owner, id string, inactive bool) error {
+	return l.o.SetInactive(ctx, owner, id, inactive)
+}
+
+// SetKeepRanks records the owner's keep order.
+func (l LimitItems) SetKeepRanks(ctx context.Context, owner string, ids []string) error {
+	return l.o.SetKeepRanks(ctx, owner, ids)
 }
 
 // Live returns the session if it exists and is not deleted.
