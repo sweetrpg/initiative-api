@@ -14,12 +14,12 @@ import (
 // from Owned, plus the state changes (revoke, use) and the one lookup that is not owner-scoped.
 type Credentials struct {
 	*Owned[IntegrationCredential, *IntegrationCredential]
-	gate store.Collection
+	gate, deletions store.Collection
 }
 
 // NewCredentials builds the credential repository for db.
 func NewCredentials(db store.Database) *Credentials {
-	return &Credentials{NewOwned[IntegrationCredential](db, CredentialSpec), db.Collection(CollectionCredentialGate)}
+	return &Credentials{NewOwned[IntegrationCredential](db, CredentialSpec), db.Collection(CollectionCredentialGate), db.Collection(CollectionCredentialDeletions)}
 }
 
 // activeScope is owner's credentials that are neither revoked nor deleted.
@@ -29,13 +29,16 @@ func activeScope(owner string) bson.D {
 
 // ItemStates lists owner's unrevoked credentials; a revoked one no longer counts toward the limit.
 func (r *Credentials) ItemStates(ctx context.Context, owner string) ([]ItemState, error) {
+	if err := checkUserID(owner); err != nil {
+		return nil, err
+	}
 	return r.itemStates(ctx, activeScope(owner))
 }
 
 // CountActive counts owner's credentials that can still authenticate.
 func (r *Credentials) CountActive(ctx context.Context, owner string) (int64, error) {
-	if strings.TrimSpace(owner) == "" {
-		return 0, fmt.Errorf("%w: owner is required", ErrInvalid)
+	if err := checkUserID(owner); err != nil {
+		return 0, err
 	}
 	return r.c.CountDocuments(ctx, activeScope(owner))
 }

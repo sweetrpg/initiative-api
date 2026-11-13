@@ -29,6 +29,9 @@ type Config struct {
 	UsersAPIURL string
 	// EntitlementsAPIURL is entitlements-api's base URL for gating checks.
 	EntitlementsAPIURL string
+	// RedisHost is the rate limiter's counter store; the limiter fails closed without it
+	// (PADR-0036), so it is required. Port and password are read by the Redis pool itself.
+	RedisHost string
 }
 
 var logLevels = map[string]bool{"DEBUG": true, "INFO": true, "WARN": true, "ERROR": true}
@@ -52,6 +55,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		AuthAPIURL:         strings.TrimRight(get(constants.AUTH_API_URL, ""), "/"),
 		UsersAPIURL:        strings.TrimRight(get(constants.USERS_API_URL, ""), "/"),
 		EntitlementsAPIURL: strings.TrimRight(get(constants.ENTITLEMENTS_API_URL, ""), "/"),
+		RedisHost:          get("REDIS_HOST", ""),
 	}
 	if origins := get(constants.ALLOWED_ORIGINS, ""); origins != "" {
 		c.AllowedOrigins = strings.Split(origins, ",")
@@ -68,6 +72,9 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	errs = append(errs, checkURL(constants.AUTH_API_URL, c.AuthAPIURL, true)...)
 	errs = append(errs, checkURL(constants.USERS_API_URL, c.UsersAPIURL, true)...)
 	errs = append(errs, checkURL(constants.ENTITLEMENTS_API_URL, c.EntitlementsAPIURL, true)...)
+	if c.RedisHost == "" {
+		errs = append(errs, errors.New("REDIS_HOST: required"))
+	}
 	for _, o := range c.AllowedOrigins {
 		if strings.TrimSpace(o) == "*" {
 			errs = append(errs, fmt.Errorf("%s: wildcard origin is not allowed", constants.ALLOWED_ORIGINS))

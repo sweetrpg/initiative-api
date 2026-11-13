@@ -61,6 +61,9 @@ type Result struct {
 	// Degraded is true when no value is known because the service was down under FailOpen.
 	// Flag and Limit are meaningless then; the caller skips gating.
 	Degraded bool
+	// Stale is true when the value is an expired cached one served because the service was down.
+	// It is usable for gating, but a caller that records the value must not treat it as a fresh read.
+	Stale bool
 }
 
 type entry struct {
@@ -103,6 +106,7 @@ func (c *Client) Check(ctx context.Context, user, token, key string, policy Poli
 		return res, nil
 	case errors.Is(err, ErrUnavailable) && policy == FailOpen:
 		if res, ok := c.stale(ck); ok {
+			res.Stale = true
 			return res, nil
 		}
 		return Result{Key: key, Degraded: true}, nil

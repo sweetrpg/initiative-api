@@ -2,8 +2,11 @@ package seed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/sweetrpg/initiative-api/data"
@@ -40,6 +43,10 @@ func TestFamilyFieldSets(t *testing.T) {
 		{"cypher", "[intellect intellectMaximum might mightMaximum speed speedMaximum]"},
 		{"theonering", "[endurance enduranceRating fatigue hope hopeRating miserable shadow weary wounded]"},
 		{"shadowrun5", "[value1 value1Maximum value2 value2Maximum]"},
+		{"pathfinder2", "[current doomed dying maximum temporary wounded]"},
+		{"shadowofthedemonlord", "[damage health]"},
+		{"shadowoftheweirdwizard", "[damage health]"},
+		{"twilight2000", "[damage hitCapacity stress stressCapacity]"},
 	}
 	defs := byID(t)
 	for _, tt := range tests {
@@ -133,5 +140,137 @@ func TestExpandAcceptsDistinctIdentifiers(t *testing.T) {
 	_, err := expand(fam, []systemFile{{ID: "alpha", Name: "A", Family: "f", Aliases: []string{"a1"}}, {ID: "beta", Name: "B", Family: "f"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSupportedSystemsResolveByFoundryID(t *testing.T) {
+	db := fake.NewDB()
+	repo := data.NewSystemRepo(db)
+	if _, err := Load(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"dnd5e": "dnd5", "pf2e": "pathfinder2", "cyphersystem": "cypher", "demonlord": "shadowofthedemonlord",
+		"weirdwizard": "shadowoftheweirdwizard", "t2k4e": "twilight2000", "genesys": "genesys", "tor2e": "theonering",
+	}
+	for foundry, id := range want {
+		got, err := repo.Get(context.Background(), foundry)
+		if err != nil || got.ID != id {
+			t.Errorf("Get(%q) = %q, %v; want %q", foundry, got.ID, err, id)
+		}
+	}
+}
+
+func TestPathfinder2UsesItsOwnBounds(t *testing.T) {
+	want := map[string][2]int{"dying": {0, 4}, "wounded": {0, 4}, "doomed": {0, 4}}
+	found := map[string]bool{}
+	for _, f := range byID(t)["pathfinder2"].Fields {
+		b, ok := want[f.Key]
+		if !ok {
+			continue
+		}
+		found[f.Key] = true
+		if f.Min == nil || f.Max == nil || *f.Min != b[0] || *f.Max != b[1] {
+			t.Errorf("%s bounds = %v..%v, want %d..%d", f.Key, f.Min, f.Max, b[0], b[1])
+		}
+	}
+	if len(found) != len(want) {
+		t.Fatalf("found %v, want all of %v", found, want)
+	}
+}
+
+func TestTwilight2000StressIsBoundedByItsCapacity(t *testing.T) {
+	for _, f := range byID(t)["twilight2000"].Fields {
+		if f.Key == "stress" && f.MaxRef == "stressCapacity" {
+			return
+		}
+	}
+	t.Fatal("stress has no max_ref to stressCapacity")
+}
+
+func TestTheOneRingBounds(t *testing.T) {
+	want := map[string]struct {
+		min  int
+		max  *int
+		ref  string
+		kind string
+	}{
+		"endurance": {0, nil, "enduranceRating", "pool"}, "hope": {0, nil, "hopeRating", "pool"},
+		"enduranceRating": {0, nil, "", "counter"}, "hopeRating": {0, nil, "", "counter"},
+		"fatigue": {0, nil, "", "counter"}, "shadow": {0, nil, "", "counter"},
+		"weary": {0, ptr(1), "", "flag"}, "wounded": {0, ptr(1), "", "flag"}, "miserable": {0, ptr(1), "", "flag"},
+	}
+	found := 0
+	for _, f := range byID(t)["theonering"].Fields {
+		w, ok := want[f.Key]
+		if !ok {
+			t.Errorf("unexpected field %q", f.Key)
+			continue
+		}
+		found++
+		if f.Min == nil || *f.Min != w.min || f.MaxRef != w.ref || f.Kind != w.kind || (w.max == nil) != (f.Max == nil) || (w.max != nil && *f.Max != *w.max) {
+			t.Errorf("%s = %+v, want %+v", f.Key, f, w)
+		}
+	}
+	if found != len(want) {
+		t.Fatalf("found %d of %d fields", found, len(want))
+	}
+}
+
+func ptr(n int) *int { return &n }
+
+// labelKeys returns every "label" value in the seeded tracker fields.
+func labelKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, val := range x {
+				if s, ok := val.(string); ok && k == "label" {
+					out[s] = true
+				}
+				walk(val)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	for _, f := range []string{"systems/families.json", "systems/systems.json"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc any
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		walk(doc)
+	}
+	return out
+}
+
+func TestEveryFieldLabelHasAnEnglishString(t *testing.T) {
+	b, err := os.ReadFile("i18n/en.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var en map[string]string
+	if err := json.Unmarshal(b, &en); err != nil {
+		t.Fatal(err)
+	}
+	labels := labelKeys(t)
+	for k := range labels {
+		if strings.TrimSpace(en[k]) == "" {
+			t.Errorf("label %q has no English string in seed/i18n/en.json", k)
+		}
+	}
+	for k := range en {
+		if !labels[k] {
+			t.Errorf("seed/i18n/en.json has %q, which no seeded field uses", k)
+		}
 	}
 }

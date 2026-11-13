@@ -19,6 +19,7 @@ type Services struct {
 	Locks        *domain.Locks
 	Rosters      *domain.Rosters
 	Encounters   *domain.Encounters
+	Sessions     *domain.Sessions
 }
 
 // ProtectedGroup returns a route group whose every route requires a bearer token that auth-api
@@ -30,7 +31,7 @@ func ProtectedGroup(r *gin.Engine, client *authz.Client, creds *domain.Credentia
 	if len(roles) == 0 {
 		roles = []string{authz.RoleUser}
 	}
-	return r.Group("", authenticate(creds, authz.RequireAnyRole(client, constants.ServiceName, roles...)))
+	return r.Group("", typedErrors(), authenticate(creds, authz.RequireAnyRole(client, constants.ServiceName, roles...)))
 }
 
 // SetupHandlers registers every route group on r.
@@ -47,6 +48,9 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupEntitlementHandlers(u, s)
 	setupCredentialHandlers(u, s)
 	setupActiveItemHandlers(u, s)
+	if s.Sessions != nil {
+		setupSessionHandlers(u, s.Sessions)
+	}
 	setupRefHandlers(g, s.Encounters)
 	if s.Credentials != nil {
 		setupAdminCredentialHandlers(ProtectedGroup(r, s.Authz, nil, authz.RoleAdmin), s.Credentials)

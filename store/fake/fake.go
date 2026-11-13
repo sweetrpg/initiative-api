@@ -188,6 +188,22 @@ func (c *Collection) FindOneAndUpdate(_ context.Context, filter, update bson.D, 
 	return store.ErrNotFound
 }
 
+func (c *Collection) DeleteOne(_ context.Context, filter bson.D) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, d := range c.docs {
+		ok, err := match(d, filter)
+		if err != nil {
+			return err
+		}
+		if ok {
+			c.docs = append(c.docs[:i], c.docs[i+1:]...)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
 func (c *Collection) CountDocuments(_ context.Context, filter bson.D) (int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

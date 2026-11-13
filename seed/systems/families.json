@@ -197,10 +197,107 @@
       "max": 1
     }
   ],
-  "twovalue": [
+  "damage": [
+    {
+      "key": "damage",
+      "label": "initiative.health.damage",
+      "kind": "counter",
+      "default": 0,
+      "min": 0,
+      "max_ref": "health"
+    },
+    {
+      "key": "health",
+      "label": "initiative.health.health",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    }
+  ],
+  "twilight2000": [
+    {
+      "key": "damage",
+      "label": "initiative.health.damage",
+      "kind": "counter",
+      "default": 0,
+      "min": 0,
+      "max_ref": "hitCapacity"
+    },
+    {
+      "key": "hitCapacity",
+      "label": "initiative.health.hitCapacity",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    },
+    {
+      "key": "stress",
+      "label": "initiative.health.stress",
+      "kind": "counter",
+      "default": 0,
+      "min": 0,
+      "max_ref": "stressCapacity"
+    },
+    {
+      "key": "stressCapacity",
+      "label": "initiative.health.stressCapacity",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    }
+  ],
+  "pathfinder2": [
+    {
+      "key": "current",
+      "label": "initiative.health.current",
+      "kind": "counter",
+      "default": 1,
+      "min": 0,
+      "max_ref": "maximum"
+    },
+    {
+      "key": "maximum",
+      "label": "initiative.health.maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 1
+    },
+    {
+      "key": "temporary",
+      "label": "initiative.health.temporary",
+      "kind": "counter",
+      "default": 0,
+      "min": 0
+    },
+    {
+      "key": "dying",
+      "label": "initiative.health.dying",
+      "kind": "track",
+      "default": 0,
+      "min": 0,
+      "max": 4
+    },
+    {
+      "key": "wounded",
+      "label": "initiative.health.wounded",
+      "kind": "track",
+      "default": 0,
+      "min": 0,
+      "max": 4
+    },
+    {
+      "key": "doomed",
+      "label": "initiative.health.doomed",
+      "kind": "track",
+      "default": 0,
+      "min": 0,
+      "max": 4
+    }
+  ],
+  "shadowrun5": [
     {
       "key": "value1",
-      "label": "initiative.health.value1",
+      "label": "initiative.health.shadowrun5.value1",
       "kind": "pool",
       "default": 1,
       "min": 0,
@@ -208,14 +305,14 @@
     },
     {
       "key": "value1Maximum",
-      "label": "initiative.health.value1Maximum",
+      "label": "initiative.health.shadowrun5.value1Maximum",
       "kind": "counter",
       "default": 1,
       "min": 0
     },
     {
       "key": "value2",
-      "label": "initiative.health.value2",
+      "label": "initiative.health.shadowrun5.value2",
       "kind": "pool",
       "default": 1,
       "min": 0,
@@ -223,7 +320,39 @@
     },
     {
       "key": "value2Maximum",
-      "label": "initiative.health.value2Maximum",
+      "label": "initiative.health.shadowrun5.value2Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    }
+  ],
+  "genesys": [
+    {
+      "key": "value1",
+      "label": "initiative.health.genesys.value1",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value1Maximum"
+    },
+    {
+      "key": "value1Maximum",
+      "label": "initiative.health.genesys.value1Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "value2",
+      "label": "initiative.health.genesys.value2",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value2Maximum"
+    },
+    {
+      "key": "value2Maximum",
+      "label": "initiative.health.genesys.value2Maximum",
       "kind": "counter",
       "default": 1,
       "min": 0

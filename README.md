@@ -29,6 +29,8 @@ make run
 | `USERS_API_URL` | required | users-api base URL; resolves the caller to `users._id` |
 | `ENTITLEMENTS_API_URL` | required | entitlements-api base URL; the caller's bearer is forwarded on checks |
 | `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASS` | `REDIS_HOST` required | rate-limit counters; the service stops at startup without `REDIS_HOST` |
+| `RATE_LIMIT_STANDARD`, `RATE_LIMIT_STANDARD_WINDOW_SECONDS`, `RATE_LIMIT_CHEAP`, `RATE_LIMIT_CHEAP_WINDOW_SECONDS` | api-core defaults | per-client budgets (PADR-0036) |
 
 Invalid values stop the process at startup with every problem listed.
 
@@ -56,7 +58,40 @@ Invalid values stop the process at startup with every problem listed.
   has caught up, and stay off if `NATS_URL` is unset or the consumer fell behind the stream's
   retention. `POST /admin/credentials/reopen` (admin bearer only) clears that close and logs an audit
   entry; the gate records the actor.
+  Administrator routes (admin bearer only, no credentials): `GET /admin/credentials[?owner=]` lists
+  any owner's credentials (never the secret or hash); `DELETE /admin/credentials/{id}` with
+  `{"reason": "..."}` removes one for good, at once; `GET /admin/credentials/deletions[?owner=]`
+  lists the audit entries (paged with `limit` and `cursor`). A 500 `deletion_incomplete` means retry the same request. The entry (administrator, owner, credential id, label, scopes, reason,
+  time) goes to `integration_credential_deletions` before the credential is removed, and has no
+  update or delete path. `Credentials.Live(id)` is what an open stream re-checks.
+  Delete class (PADR-0027): `integration_credentials` are soft delete for the owner's own removal
+  (revoke) and hard delete only through the administrator route above.
+- Sessions (user bearer only, no integration credentials): `POST /sessions`, `GET /sessions`,
+  `GET|DELETE /sessions/{id}` (delete is the GM's, with `?revision=`), `POST /sessions/{id}/leave`.
+  Members: `GET /sessions/{id}/members`, `PATCH|DELETE /sessions/{id}/members/{user}`. Invites:
+  `POST|GET /sessions/{id}/invites` (the code is returned once, only its hash is stored),
+  `DELETE /sessions/{id}/invites/{invite}` revokes. Joining: `POST /sessions/join {code}` makes a
+  pending request that grants nothing; `GET /sessions/{id}/requests`, `POST .../requests/{id}/approve
+  {role}` or `/reject {reason}`. Blocks: `GET|POST /sessions/{id}/blocks`, `DELETE .../blocks/{user}`.
+  Roles are `gm` (the creator, exactly one), `co_gm`, `player`, `observer`; `domain.Allowed` is the
+  one role table. Membership collections are the source of truth for who holds a role. Membership,
+  invite, request and block records and the session are all soft-deleted (`deleted_at`, `deleted_by`;
+  PADR-0027), and a `live` marker lets the unique indexes ignore deleted rows.
+  Limits follow the GM: creating a session checks `initiative.sessions_per_gm` (403
+  `entitlement_limit_reached`, 503 when entitlements are down); sessions beyond a reduced limit go
+  inactive (readable, deletable, leavable; no invites, approvals, or joins; 403 `item_inactive`). Each
+  GM request re-reads `initiative.members_per_session` with the GM's token and records it on the
+  session; member checks use that record only (503 `owner_entitlements_pending` until one exists).
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
+
+OpenFGA session tuples are rebuilt from the membership collection by `cmd/reconciler` (a CronJob every 5 minutes
+running as the `initiative-reconciler` user with the `openfga-writer` role; `RECONCILER_TOKEN_FILE` holds an
+operator-minted bearer, PADR-0038). Exit 3 means the token was rejected or expired. The manifests are in
+`kubernetes/overlays/dev/reconciler.yaml`, not yet enabled.
+
+Requests are rate limited per client (PADR-0036): the `X-API-Key` header, else the client IP, and an `ic_` integration
+credential counts as its own client. Over the budget is 429 with `Retry-After`; if Redis is down, `/status/*` still
+answers and every other route returns 503.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written
 to the access log as `correlation_id`.

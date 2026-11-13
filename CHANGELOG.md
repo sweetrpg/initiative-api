@@ -1,4 +1,41 @@
 
+## 0.2.0 - 2026-11-13
+
+### Added
+- Administrator list and permanent delete with audit
+- Add Pathfinder 2e, Shadow of the Demon Lord, Shadow of the Weird Wizard, Twilight 2000 4e
+- Add the tor2e Foundry alias to The One Ring
+- Sessions, membership, invites, join requests, blocks and roles
+- Session count limit, inactive sessions, and recorded owner limits
+- Per-client rate limiting with each integration credential as its own client
+- English strings for every tracker field label
+- Check-relation client with a short positive decision cache
+- Rebuild OpenFGA session tuples from memberships
+- Enable the OpenFGA tuple reconciler in dev
+
+
+### Changed
+- Admin list uses the owner-scoped query for one owner
+
+
+### Fixed
+- Validate the admin owner filter as a plain user id
+- Return stored audit entry on retry, page deletions, flag incomplete deletes
+- Default newest-first sort for an owner's admin list
+- Bound Twilight 2000 stress by a capacity, rename the pf2e family
+- Keep null timestamps null in the HTTP error fixture
+- Let a user re-request after an approval that never added them
+- Soft-delete membership, invite, request and block records
+- Data layer takes the caller and hides removed members from List
+- Do not record a stale entitlement as a fresh owner read
+- Key the rate limiter on a verified credential or the IP, never a caller header
+- Validate owner and actor ids in every Owned method
+- Answer shared-middleware errors in the typed error shape
+- Per-system labels for Shadowrun 5e and Genesys damage tracks
+- Point the reconciler ExternalSecret at /sweetrpg/initiative/api/reconciler
+
+
+
 ## 0.1.0 - 2026-11-12
 
 

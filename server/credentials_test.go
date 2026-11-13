@@ -12,6 +12,7 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 )
 
@@ -24,13 +25,17 @@ func credRouter(t *testing.T, limit string) *gin.Engine {
 
 // credRouterWith also returns the credential service, so a test can drive the auth-event paths.
 func credRouterWith(t *testing.T, limit string) (*gin.Engine, *domain.Credentials) {
+	return credRouterDB(t, limit, fake.NewDB())
+}
+
+// credRouterDB is credRouterWith over a caller-supplied database.
+func credRouterDB(t *testing.T, limit string, db store.Database) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	ent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"key":"initiative.integration_credentials","type":"limit","value":` + limit + `,"ttl_seconds":0}`))
 	}))
 	t.Cleanup(ent.Close)
-	db := fake.NewDB()
 	themes, _ := domain.NewThemes(db)
 	creds := domain.NewCredentials(db)
 	if ok, err := creds.Open(context.Background()); err != nil || !ok {
@@ -40,7 +45,7 @@ func credRouterWith(t *testing.T, limit string) (*gin.Engine, *domain.Credential
 		Authz:        authz.NewClient(fakeAuthAPI(t).URL, fakeUsersAPI(t).URL),
 		Entitlements: entitlements.New(ent.URL),
 		Themes:       themes, Credentials: creds,
-		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db),
+		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
 	}
 	r := gin.New()
 	r.Use(Correlation())

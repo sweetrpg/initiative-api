@@ -35,13 +35,15 @@
     "id": "theonering",
     "name": "The One Ring",
     "family": "theonering",
-    "aliases": [],
+    "aliases": [
+      "tor2e"
+    ],
     "gated": true
   },
   {
     "id": "shadowrun5",
     "name": "Shadowrun 5th Edition",
-    "family": "twovalue",
+    "family": "shadowrun5",
     "aliases": [
       "shadowrun5e"
     ],
@@ -50,8 +52,44 @@
   {
     "id": "genesys",
     "name": "Genesys",
-    "family": "twovalue",
+    "family": "genesys",
     "aliases": [],
+    "gated": true
+  },
+  {
+    "id": "pathfinder2",
+    "name": "Pathfinder 2nd Edition",
+    "family": "pathfinder2",
+    "aliases": [
+      "pf2e"
+    ],
+    "gated": true
+  },
+  {
+    "id": "shadowofthedemonlord",
+    "name": "Shadow of the Demon Lord",
+    "family": "damage",
+    "aliases": [
+      "demonlord"
+    ],
+    "gated": true
+  },
+  {
+    "id": "shadowoftheweirdwizard",
+    "name": "Shadow of the Weird Wizard",
+    "family": "damage",
+    "aliases": [
+      "weirdwizard"
+    ],
+    "gated": true
+  },
+  {
+    "id": "twilight2000",
+    "name": "Twilight 2000 4th Edition",
+    "family": "twilight2000",
+    "aliases": [
+      "t2k4e"
+    ],
     "gated": true
   }
 ]

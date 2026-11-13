@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -33,7 +34,11 @@ func authenticate(creds *domain.Credentials, userAuth gin.HandlerFunc) gin.Handl
 			userAuth(c)
 			return
 		}
-		cred, err := creds.Authenticate(c.Request.Context(), secret)
+		cred, ok := resolvedCredential(c)
+		var err error
+		if !ok {
+			cred, err = creds.Authenticate(c.Request.Context(), secret)
+		}
 		if errors.Is(err, data.ErrNotFound) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorBody{Code: "unauthorized", Message: "Missing or invalid credential.", CorrelationID: CorrelationID(c)})
 			return
@@ -129,4 +134,75 @@ func setupAdminCredentialHandlers(g *gin.RouterGroup, creds *domain.Credentials)
 		slog.WarnContext(c.Request.Context(), "audit: integration credentials reopened", "audit", true, "actor", actor, "correlation_id", CorrelationID(c))
 		c.JSON(http.StatusOK, gin.H{"open": true})
 	})
+	g.GET("/admin/credentials", func(c *gin.Context) { adminListCredentials(c, creds) })
+	g.GET("/admin/credentials/deletions", func(c *gin.Context) { adminDeletions(c, creds) })
+	g.DELETE("/admin/credentials/:id", func(c *gin.Context) { adminDeleteCredential(c, creds) })
+}
+
+// pageQuery reads ?cursor and ?limit; it answers 400 and returns false on a bad limit.
+func pageQuery(c *gin.Context) (data.Query, bool) {
+	q := data.Query{Cursor: c.Query("cursor")}
+	if v := c.Query("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			badRequest(c, "limit must be a positive integer")
+			return q, false
+		}
+		q.Limit = n
+	}
+	return q, true
+}
+
+// adminListCredentials lists any owner's credentials; ?owner= narrows it. Secrets and hashes are
+// never in the model's JSON.
+func adminListCredentials(c *gin.Context, creds *domain.Credentials) {
+	q, ok := pageQuery(c)
+	if !ok {
+		return
+	}
+	page, err := creds.ListAll(c.Request.Context(), c.Query("owner"), q)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": page.Items, "next_cursor": page.NextCursor})
+}
+
+func adminDeletions(c *gin.Context, creds *domain.Credentials) {
+	q, ok := pageQuery(c)
+	if !ok {
+		return
+	}
+	page, err := creds.Deletions(c.Request.Context(), c.Query("owner"), q)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": page.Items, "next_cursor": page.NextCursor})
+}
+
+// adminDeleteCredential deletes a credential permanently. The reason is required; the audit entry
+// is stored before the credential goes and is logged as well.
+func adminDeleteCredential(c *gin.Context, creds *domain.Credentials) {
+	var b struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&b); err != nil || strings.TrimSpace(b.Reason) == "" {
+		c.AbortWithStatusJSON(http.StatusUnprocessableEntity, ErrorBody{Code: "reason_required", Message: "A reason is required to delete a credential.", CorrelationID: CorrelationID(c)})
+		return
+	}
+	actor := authz.Viewer(c)
+	entry, err := creds.DeletePermanently(c.Request.Context(), actor, c.Param("id"), b.Reason)
+	if errors.Is(err, data.ErrNotFound) || errors.Is(err, data.ErrInvalid) {
+		writeError(c, err, nil)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(c.Request.Context(), "credential deletion did not complete", "actor", actor, "credential_id", c.Param("id"), "error", err, "correlation_id", CorrelationID(c))
+		c.AbortWithStatusJSON(http.StatusInternalServerError, ErrorBody{Code: "deletion_incomplete", Message: "The deletion did not complete and may be partly done. Retry the same request.", CorrelationID: CorrelationID(c)})
+		return
+	}
+	slog.WarnContext(c.Request.Context(), "audit: integration credential deleted", "audit", true, "actor", actor,
+		"credential_id", entry.CredentialID, "owner", entry.OwnerUserID, "label", entry.Label, "reason", entry.Reason, "correlation_id", CorrelationID(c))
+	c.JSON(http.StatusOK, entry)
 }

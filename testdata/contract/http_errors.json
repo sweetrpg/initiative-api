@@ -1,0 +1,261 @@
+{
+  "cases": [
+    {
+      "scenario": "missing token",
+      "status": 401,
+      "body": {
+        "code": "unauthorized",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Missing or invalid bearer token"
+      }
+    },
+    {
+      "scenario": "token without a role",
+      "status": 403,
+      "body": {
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Caller does not have a qualifying role"
+      }
+    },
+    {
+      "scenario": "denied account",
+      "status": 403,
+      "body": {
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Caller does not have a qualifying role"
+      }
+    },
+    {
+      "scenario": "bad limit parameter",
+      "status": 400,
+      "body": {
+        "code": "bad_request",
+        "correlation_id": "CORRELATION_ID",
+        "message": "limit must be a positive integer"
+      }
+    },
+    {
+      "scenario": "invalid theme",
+      "status": 422,
+      "body": {
+        "code": "invalid",
+        "correlation_id": "CORRELATION_ID",
+        "message": "theme style is required and at most 100 characters"
+      }
+    },
+    {
+      "scenario": "theme not found",
+      "status": 404,
+      "body": {
+        "code": "not_found",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Not found."
+      }
+    },
+    {
+      "scenario": "missing revision",
+      "status": 400,
+      "body": {
+        "code": "bad_request",
+        "correlation_id": "CORRELATION_ID",
+        "message": "request body must be JSON with the theme's current revision"
+      }
+    },
+    {
+      "scenario": "theme created",
+      "status": 201,
+      "body": {
+        "accent1_color": "#AA0000",
+        "accent2_color": "#00AA00",
+        "background1_color": "#000000",
+        "background2_color": "#111111",
+        "created_at": "TIMESTAMP",
+        "created_by": "u-1",
+        "deleted_at": null,
+        "deleted_by": null,
+        "id": "GENERATED_ID",
+        "main_color": "#FFFFFF",
+        "name": "A",
+        "owner_user_id": "u-1",
+        "primary_font_name": "Cinzel",
+        "revision": 1,
+        "secondary_font_name": "Lato",
+        "slot": 0,
+        "style": "dark",
+        "updated_at": "TIMESTAMP",
+        "updated_by": "u-1"
+      }
+    },
+    {
+      "scenario": "limit reached",
+      "status": 403,
+      "body": {
+        "code": "entitlement_limit_reached",
+        "correlation_id": "CORRELATION_ID",
+        "key": "initiative.theme_slots",
+        "limit": 1,
+        "message": "Your plan's limit for this item has been reached."
+      }
+    },
+    {
+      "scenario": "stale revision",
+      "status": 409,
+      "body": {
+        "code": "revision_conflict",
+        "correlation_id": "CORRELATION_ID",
+        "current": {
+          "accent1_color": "#AA0000",
+          "accent2_color": "#00AA00",
+          "background1_color": "#000000",
+          "background2_color": "#111111",
+          "created_at": "TIMESTAMP",
+          "created_by": "u-1",
+          "deleted_at": null,
+          "deleted_by": null,
+          "id": "GENERATED_ID",
+          "main_color": "#FFFFFF",
+          "name": "A",
+          "owner_user_id": "u-1",
+          "primary_font_name": "Cinzel",
+          "revision": 1,
+          "secondary_font_name": "Lato",
+          "slot": 0,
+          "style": "dark",
+          "updated_at": "TIMESTAMP",
+          "updated_by": "u-1"
+        },
+        "message": "The record changed since you loaded it."
+      }
+    },
+    {
+      "scenario": "another user's theme",
+      "status": 403,
+      "body": {
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
+        "message": "You do not own this record."
+      }
+    },
+    {
+      "scenario": "packaged theme edit",
+      "status": 403,
+      "body": {
+        "code": "packaged_theme_read_only",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Packaged themes cannot be changed. Create a custom theme from it instead."
+      }
+    },
+    {
+      "scenario": "entitlements down on create",
+      "status": 503,
+      "body": {
+        "code": "entitlements_unavailable",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Entitlements are temporarily unavailable. Try again shortly."
+      }
+    },
+    {
+      "scenario": "integration credential on an account route",
+      "status": 403,
+      "body": {
+        "code": "scope_missing",
+        "correlation_id": "CORRELATION_ID",
+        "message": "This credential lacks the write scope."
+      }
+    },
+    {
+      "scenario": "credential lacks write scope",
+      "status": 403,
+      "body": {
+        "code": "scope_missing",
+        "correlation_id": "CORRELATION_ID",
+        "message": "This credential lacks the write scope."
+      }
+    },
+    {
+      "scenario": "unknown credential secret",
+      "status": 401,
+      "body": {
+        "code": "unauthorized",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Missing or invalid credential."
+      }
+    },
+    {
+      "scenario": "revoke another user's credential",
+      "status": 403,
+      "body": {
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
+        "message": "You do not own this record."
+      }
+    },
+    {
+      "scenario": "invalid credential",
+      "status": 422,
+      "body": {
+        "code": "invalid",
+        "correlation_id": "CORRELATION_ID",
+        "message": "label is required and at most 100 characters"
+      }
+    },
+    {
+      "scenario": "admin route as a user",
+      "status": 403,
+      "body": {
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Caller does not have a qualifying role"
+      }
+    },
+    {
+      "scenario": "admin delete without a reason",
+      "status": 422,
+      "body": {
+        "code": "reason_required",
+        "correlation_id": "CORRELATION_ID",
+        "message": "A reason is required to delete a credential."
+      }
+    },
+    {
+      "scenario": "admin delete unknown credential",
+      "status": 404,
+      "body": {
+        "code": "not_found",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Not found."
+      }
+    },
+    {
+      "scenario": "credential limit reached",
+      "status": 403,
+      "body": {
+        "code": "entitlement_limit_reached",
+        "correlation_id": "CORRELATION_ID",
+        "key": "initiative.integration_credentials",
+        "limit": 1,
+        "message": "Your plan's limit for this item has been reached."
+      }
+    },
+    {
+      "scenario": "credentials closed",
+      "status": 503,
+      "body": {
+        "code": "credentials_unavailable",
+        "correlation_id": "CORRELATION_ID",
+        "message": "Integration credentials are temporarily unavailable."
+      }
+    },
+    {
+      "scenario": "admin delete did not complete",
+      "status": 500,
+      "body": {
+        "code": "deletion_incomplete",
+        "correlation_id": "CORRELATION_ID",
+        "message": "The deletion did not complete and may be partly done. Retry the same request."
+      }
+    }
+  ]
+}

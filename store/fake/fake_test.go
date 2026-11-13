@@ -92,3 +92,22 @@ func TestFindOneNotFound(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestDeleteOneRemovesFirstMatchOnly(t *testing.T) {
+	c := NewDB().Fake("c")
+	for _, id := range []string{"a", "b"} {
+		if err := c.InsertOne(context.Background(), bson.M{"_id": id, "k": 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := c.DeleteOne(context.Background(), bson.D{{Key: "k", Value: 1}})
+	missing := c.DeleteOne(context.Background(), bson.D{{Key: "k", Value: 9}})
+
+	if err != nil || len(c.Docs()) != 1 || c.Docs()[0]["_id"] != "b" {
+		t.Fatalf("err = %v, docs = %v", err, c.Docs())
+	}
+	if !errors.Is(missing, store.ErrNotFound) {
+		t.Fatalf("missing = %v, want ErrNotFound", missing)
+	}
+}

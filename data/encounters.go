@@ -307,8 +307,8 @@ type RefMatch struct {
 // database matches on the derived RefKey; the stored values are then compared exactly, so a hash
 // collision cannot return a wrong combatant.
 func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value string) ([]RefMatch, error) {
-	if strings.TrimSpace(owner) == "" {
-		return nil, fmt.Errorf("%w: owner is required", ErrInvalid)
+	if err := checkUserID(owner); err != nil {
+		return nil, err
 	}
 	if key == "" || value == "" || len(key) > maxRefLen || len(value) > maxRefLen {
 		return nil, invalid("ref_key and ref_value are required, at most %d bytes", maxRefLen)
