@@ -20,6 +20,9 @@ type ItemState struct {
 
 // ItemStates lists owner's live items oldest first, for deciding which stay active.
 func (r *Owned[T, P]) ItemStates(ctx context.Context, owner string) ([]ItemState, error) {
+	if err := checkUserID(owner); err != nil {
+		return nil, err
+	}
 	return r.itemStates(ctx, scope(owner))
 }
 
@@ -43,6 +46,9 @@ func (r *Owned[T, P]) itemStates(ctx context.Context, filter bson.D) ([]ItemStat
 // SetInactive marks owner's item inactive or active. It changes neither the revision nor the
 // audit stamp: the owner did not edit the item.
 func (r *Owned[T, P]) SetInactive(ctx context.Context, owner, id string, inactive bool) error {
+	if err := checkUserID(owner); err != nil {
+		return err
+	}
 	id, ok := cleanID(id)
 	if !ok {
 		return ErrNotFound

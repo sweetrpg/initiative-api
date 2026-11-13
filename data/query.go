@@ -331,16 +331,16 @@ func runQuery[T any](ctx context.Context, c store.Collection, spec Spec, base bs
 
 // List returns one page of owner's live records.
 func (r *Owned[T, P]) List(ctx context.Context, ownerUserID string, q Query) (Page[T], error) {
-	if ownerUserID == "" {
-		return Page[T]{}, invalid("owner is required")
+	if err := checkUserID(ownerUserID); err != nil {
+		return Page[T]{}, err
 	}
 	return runQuery[T](ctx, r.c, r.spec, scope(ownerUserID), q)
 }
 
 // Count returns how many of owner's live records match filters, counted by the database.
 func (r *Owned[T, P]) Count(ctx context.Context, ownerUserID string, filters []Filter) (int64, error) {
-	if ownerUserID == "" {
-		return 0, invalid("owner is required")
+	if err := checkUserID(ownerUserID); err != nil {
+		return 0, err
 	}
 	clauses, err := clausesFor(r.spec, scope(ownerUserID), Query{Filters: filters})
 	if err != nil {
