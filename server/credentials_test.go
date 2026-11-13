@@ -12,6 +12,7 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 )
@@ -30,7 +31,19 @@ func credRouterWith(t *testing.T, limit string) (*gin.Engine, *domain.Credential
 
 // credRouterDB is credRouterWith over a caller-supplied database.
 func credRouterDB(t *testing.T, limit string, db store.Database) (*gin.Engine, *domain.Credentials) {
+	return credRouterRel(t, limit, db, allowRelations)
+}
+
+// allowRelations is an auth-api check-relation endpoint that grants every check.
+func allowRelations(w http.ResponseWriter, _ *http.Request) {
+	_, _ = w.Write([]byte(`{"allowed":true}`))
+}
+
+// credRouterRel is credRouterDB with a caller-supplied check-relation handler.
+func credRouterRel(t *testing.T, limit string, db store.Database, rel http.HandlerFunc) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
+	relAPI := httptest.NewServer(rel)
+	t.Cleanup(relAPI.Close)
 	gin.SetMode(gin.TestMode)
 	ent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"key":"initiative.integration_credentials","type":"limit","value":` + limit + `,"ttl_seconds":0}`))
@@ -46,6 +59,7 @@ func credRouterDB(t *testing.T, limit string, db store.Database) (*gin.Engine, *
 		Entitlements: entitlements.New(ent.URL),
 		Themes:       themes, Credentials: creds,
 		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
+		Relations: relations.New(relAPI.URL),
 	}
 	r := gin.New()
 	r.Use(Correlation())

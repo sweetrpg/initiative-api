@@ -10,6 +10,7 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/relations"
 )
 
 // ErrorBody is the typed error response: a stable code, a safe message, the correlation ID, and
@@ -49,6 +50,10 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "credentials_unavailable", Message: "Integration credentials are temporarily unavailable."}, http.StatusServiceUnavailable
 	case errors.Is(err, domain.ErrOwnerLimitsUnknown):
 		return ErrorBody{Code: "owner_entitlements_pending", Message: "The session owner has not connected yet. Try again after they do."}, http.StatusServiceUnavailable
+	case errors.Is(err, relations.ErrUnavailable):
+		return ErrorBody{Code: "authorization_unavailable", Message: "Session access cannot be checked right now. Try again shortly."}, http.StatusServiceUnavailable
+	case errors.Is(err, relations.ErrUnauthorized):
+		return ErrorBody{Code: "unauthorized", Message: "Your session is not valid."}, http.StatusUnauthorized
 	case errors.Is(err, entitlements.ErrUnavailable):
 		return ErrorBody{Code: "entitlements_unavailable", Message: "Entitlements are temporarily unavailable. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnauthorized):
