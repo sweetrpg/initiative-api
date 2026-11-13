@@ -409,6 +409,9 @@ func matchElem(d bson.M, e bson.E) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("fake: %s needs bson.A", e.Key)
 		}
+		if len(clauses) == 0 {
+			return false, fmt.Errorf("fake: %s argument must be a non-empty array", e.Key)
+		}
 		for _, cl := range clauses {
 			sub, ok := cl.(bson.D)
 			if !ok {
