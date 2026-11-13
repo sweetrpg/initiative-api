@@ -44,6 +44,8 @@ func (w *typedWriter) Write(b []byte) (int, error) {
 			if err != nil {
 				return 0, err
 			}
+			// The rewritten body has a different length than the one the caller sized.
+			w.Header().Del("Content-Length")
 			if _, err := w.ResponseWriter.Write(out); err != nil {
 				return 0, err
 			}

@@ -43,7 +43,7 @@
   {
     "id": "shadowrun5",
     "name": "Shadowrun 5th Edition",
-    "family": "twovalue",
+    "family": "shadowrun5",
     "aliases": [
       "shadowrun5e"
     ],
@@ -52,7 +52,7 @@
   {
     "id": "genesys",
     "name": "Genesys",
-    "family": "twovalue",
+    "family": "genesys",
     "aliases": [],
     "gated": true
   },

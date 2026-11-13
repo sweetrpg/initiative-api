@@ -2,8 +2,11 @@ package seed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/sweetrpg/initiative-api/data"
@@ -215,3 +218,59 @@ func TestTheOneRingBounds(t *testing.T) {
 }
 
 func ptr(n int) *int { return &n }
+
+// labelKeys returns every "label" value in the seeded tracker fields.
+func labelKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, val := range x {
+				if s, ok := val.(string); ok && k == "label" {
+					out[s] = true
+				}
+				walk(val)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	for _, f := range []string{"systems/families.json", "systems/systems.json"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc any
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		walk(doc)
+	}
+	return out
+}
+
+func TestEveryFieldLabelHasAnEnglishString(t *testing.T) {
+	b, err := os.ReadFile("i18n/en.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var en map[string]string
+	if err := json.Unmarshal(b, &en); err != nil {
+		t.Fatal(err)
+	}
+	labels := labelKeys(t)
+	for k := range labels {
+		if strings.TrimSpace(en[k]) == "" {
+			t.Errorf("label %q has no English string in seed/i18n/en.json", k)
+		}
+	}
+	for k := range en {
+		if !labels[k] {
+			t.Errorf("seed/i18n/en.json has %q, which no seeded field uses", k)
+		}
+	}
+}
