@@ -1,8 +1,8 @@
 # OpenFGA tuple reconciler (PADR-0035, PADR-0038). NOT LISTED in kustomization.yaml on purpose:
 # it needs the Akeyless item below, which does not exist yet. To turn it on:
 #   1. Create user "initiative-reconciler" in users-api with only the openfga-writer role.
-#   2. Create the Akeyless item /sweetrpg/initiative/api/reconciler/token (NEEDS CREATION) and put
-#      an operator-minted short-lived bearer for that user in its "token" property.
+#   2. Akeyless item /sweetrpg/initiative/api/reconciler (confirmed by Paul; check it exists before
+#      enabling) holds an operator-minted short-lived bearer for that user in its "token" key.
 #   3. Add this file to kustomization.yaml and set suspend to false.
 # The job exits non-zero (3) when auth-api rejects the token; mint a new one then (PADR-0038).
 apiVersion: external-secrets.io/v1
@@ -22,7 +22,7 @@ spec:
   data:
     - secretKey: token
       remoteRef:
-        key: /sweetrpg/initiative/api/reconciler/token
+        key: /sweetrpg/initiative/api/reconciler
         property: token
 
 ---
