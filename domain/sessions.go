@@ -151,10 +151,10 @@ func (s *Sessions) as(ctx context.Context, actor, id string, a Action) (data.Ses
 	}
 	m, err := s.repo.Member(ctx, d, actor)
 	if errors.Is(err, data.ErrNotFound) || (err == nil && !Allowed(m.Role, a)) {
-		return sess, m, d, data.ErrForbidden
+		return data.Session{}, data.Member{}, d, data.ErrForbidden
 	}
 	if err != nil {
-		return sess, m, d, err
+		return data.Session{}, data.Member{}, d, err
 	}
 	if m.Role == data.RoleGM {
 		sess = s.refreshOwnerLimits(ctx, d, sess)
@@ -300,17 +300,14 @@ func (s *Sessions) RevokeInvite(ctx context.Context, actor, id, inviteID string)
 // Join turns a presented code into a pending request. A pending request grants nothing. A code
 // that is unknown, expired, revoked, or from a blocked user fails the same way and creates nothing.
 func (s *Sessions) Join(ctx context.Context, actor, code string) (data.JoinRequest, error) {
-	in, err := s.repo.InviteByHash(ctx, actor, hashCode(code))
+	t, err := s.repo.ResolveInvite(ctx, actor, hashCode(code), s.now())
 	if errors.Is(err, data.ErrNotFound) {
 		return data.JoinRequest{}, ErrInviteInvalid
 	}
 	if err != nil {
 		return data.JoinRequest{}, err
 	}
-	if in.RevokedAt != nil || !s.now().Before(in.ExpiresAt) {
-		return data.JoinRequest{}, ErrInviteInvalid
-	}
-	st, err := s.repo.ForJoin(ctx, actor, in)
+	st, err := s.repo.ForJoin(ctx, t)
 	if err != nil {
 		return data.JoinRequest{}, err
 	}
@@ -320,7 +317,7 @@ func (s *Sessions) Join(ctx context.Context, actor, code string) (data.JoinReque
 	if st.Member {
 		return data.JoinRequest{}, data.ErrConflict
 	}
-	return s.repo.RequestJoin(ctx, actor, in)
+	return s.repo.RequestJoin(ctx, t)
 }
 
 // Requests lists the session's join requests (pending ones when pendingOnly).

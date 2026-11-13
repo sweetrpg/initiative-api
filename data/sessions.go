@@ -143,8 +143,8 @@ func (r *Sessions) softDelete(ctx context.Context, c store.Collection, filter bs
 }
 
 // pairOK validates the user id a call acts on.
-func pairOK(d Decision, userID string) error {
-	if err := d.check(); err != nil {
+func pairOK(d Decision, min, userID string) error {
+	if err := d.require(min); err != nil {
 		return err
 	}
 	return checkUserID(userID)
@@ -172,7 +172,7 @@ func (r *Sessions) Open(ctx context.Context, actor string, s *Session) error {
 // Live returns the session if it exists and is not deleted.
 func (r *Sessions) Live(ctx context.Context, d Decision) (Session, error) {
 	var s Session
-	if err := d.check(); err != nil {
+	if err := d.require(relView); err != nil {
 		return s, err
 	}
 	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: d.session}, {Key: "deleted_at", Value: nil}}, &s)
@@ -184,7 +184,7 @@ func (r *Sessions) Live(ctx context.Context, d Decision) (Session, error) {
 
 // AddMember records userID in the session with role. An existing member is ErrConflict.
 func (r *Sessions) AddMember(ctx context.Context, d Decision, userID, role string) (Member, error) {
-	if err := pairOK(d, userID); err != nil {
+	if err := pairOK(d, relApprove, userID); err != nil {
 		return Member{}, err
 	}
 	m := Member{ID: newID(), SessionID: d.session, UserID: userID, Role: role, CreatedAt: r.now(), CreatedBy: d.actor, Live: true}
@@ -199,7 +199,7 @@ func (r *Sessions) AddMember(ctx context.Context, d Decision, userID, role strin
 // Member returns userID's membership, or ErrNotFound.
 func (r *Sessions) Member(ctx context.Context, d Decision, userID string) (Member, error) {
 	var m Member
-	if err := pairOK(d, userID); err != nil {
+	if err := pairOK(d, relView, userID); err != nil {
 		return m, err
 	}
 	err := r.members.FindOne(ctx, sessionUser(d.session, userID), &m)
@@ -218,7 +218,7 @@ func byCreated(q Query) Query {
 
 // Members lists the session's members, oldest first.
 func (r *Sessions) Members(ctx context.Context, d Decision, q Query) (Page[Member], error) {
-	if err := d.check(); err != nil {
+	if err := d.require(relView); err != nil {
 		return Page[Member]{}, err
 	}
 	return runQuery[Member](ctx, r.members, SessionMemberSpec, sessionScope(d.session), byCreated(q))
@@ -234,10 +234,10 @@ func (r *Sessions) SessionIDsOf(ctx context.Context, userID string, q Query) (Pa
 }
 
 // RecordOwnerLimits stores the owner's current entitled values on the session. It changes neither
-// the revision nor the audit stamp: nobody edited the session. Only the owner (the decision's
-// actor) may.
+// the revision nor the audit stamp: nobody edited the session. Only the owner may: the write is
+// owner-scoped to the decision's actor.
 func (r *Sessions) RecordOwnerLimits(ctx context.Context, d Decision, limits map[string]int) error {
-	if err := d.check(); err != nil {
+	if err := d.require(relView); err != nil {
 		return err
 	}
 	var discard Session
@@ -253,7 +253,7 @@ func (r *Sessions) RecordOwnerLimits(ctx context.Context, d Decision, limits map
 // SetRole changes a member's role.
 func (r *Sessions) SetRole(ctx context.Context, d Decision, userID, role string) (Member, error) {
 	var m Member
-	if err := pairOK(d, userID); err != nil {
+	if err := pairOK(d, relEdit, userID); err != nil {
 		return m, err
 	}
 	err := r.members.FindOneAndUpdate(ctx, sessionUser(d.session, userID), bson.D{{Key: "$set", Value: bson.D{{Key: "role", Value: role}}}}, &m)
@@ -265,7 +265,11 @@ func (r *Sessions) SetRole(ctx context.Context, d Decision, userID, role string)
 
 // RemoveMember ends a membership (soft delete).
 func (r *Sessions) RemoveMember(ctx context.Context, d Decision, userID string) error {
-	if err := pairOK(d, userID); err != nil {
+	need := relEdit
+	if userID == d.actor {
+		need = relView // leaving needs only membership
+	}
+	if err := pairOK(d, need, userID); err != nil {
 		return err
 	}
 	return r.softDelete(ctx, r.members, sessionUser(d.session, userID), d.actor)
@@ -273,33 +277,52 @@ func (r *Sessions) RemoveMember(ctx context.Context, d Decision, userID string) 
 
 // AddInvite stores an invite for the session.
 func (r *Sessions) AddInvite(ctx context.Context, d Decision, codeHash string, expires time.Time) (Invite, error) {
-	if err := d.check(); err != nil {
+	if err := d.require(relEdit); err != nil {
 		return Invite{}, err
 	}
 	in := Invite{ID: newID(), SessionID: d.session, CodeHash: codeHash, ExpiresAt: expires, CreatedAt: r.now(), CreatedBy: d.actor, Live: true}
 	return in, r.invites.InsertOne(ctx, in)
 }
 
-// InviteByHash resolves a presented code's hash to its invite, whatever its state. The invite is
-// the gate for joining (initiative-sessions); it returns no session data beyond its own record.
-func (r *Sessions) InviteByHash(ctx context.Context, actor, codeHash string) (Invite, error) {
-	var in Invite
+// JoinTicket is an invite the data layer has resolved and validated (known, live, not revoked, not
+// expired) for one user. It is the gate for joining (initiative-sessions, "Join by code") and can
+// only come from ResolveInvite, so the join calls cannot be aimed at an arbitrary session. The zero
+// value is refused.
+type JoinTicket struct{ actor, session string }
+
+// ResolveInvite turns a presented code's hash into a ticket for actor, judging expiry at now. An unknown, deleted,
+// revoked, or expired invite is ErrNotFound, whatever the reason.
+func (r *Sessions) ResolveInvite(ctx context.Context, actor, codeHash string, now time.Time) (JoinTicket, error) {
 	if err := checkUserID(actor); err != nil {
-		return in, err
+		return JoinTicket{}, err
 	}
 	if codeHash == "" {
-		return in, ErrNotFound
+		return JoinTicket{}, ErrNotFound
 	}
+	var in Invite
 	err := r.invites.FindOne(ctx, bson.D{{Key: "code_hash", Value: codeHash}, {Key: "deleted_at", Value: nil}}, &in)
 	if errors.Is(err, store.ErrNotFound) {
-		return in, ErrNotFound
+		return JoinTicket{}, ErrNotFound
 	}
-	return in, err
+	if err != nil {
+		return JoinTicket{}, err
+	}
+	if in.RevokedAt != nil || !now.Before(in.ExpiresAt) {
+		return JoinTicket{}, ErrNotFound
+	}
+	return JoinTicket{actor: actor, session: in.SessionID}, nil
+}
+
+func (t JoinTicket) check() error {
+	if t.actor == "" || t.session == "" {
+		return ErrForbidden
+	}
+	return nil
 }
 
 // Invites lists the session's invites, oldest first.
 func (r *Sessions) Invites(ctx context.Context, d Decision, q Query) (Page[Invite], error) {
-	if err := d.check(); err != nil {
+	if err := d.require(relEdit); err != nil {
 		return Page[Invite]{}, err
 	}
 	return runQuery[Invite](ctx, r.invites, SessionInviteSpec, sessionScope(d.session), byCreated(q))
@@ -308,7 +331,7 @@ func (r *Sessions) Invites(ctx context.Context, d Decision, q Query) (Page[Invit
 // RevokeInvite ends an invite; revoking twice is harmless.
 func (r *Sessions) RevokeInvite(ctx context.Context, d Decision, inviteID string) (Invite, error) {
 	var in Invite
-	if err := d.check(); err != nil {
+	if err := d.require(relEdit); err != nil {
 		return in, err
 	}
 	id, ok := cleanID(inviteID)
@@ -337,16 +360,16 @@ type JoinState struct {
 	Exists, Active, Blocked, Member bool
 }
 
-// ForJoin reads the join state for actor. The invite in hand is the gate (initiative-sessions,
-// "Join by code"): the caller has validated it, and the pending request created from it grants
-// nothing.
-func (r *Sessions) ForJoin(ctx context.Context, actor string, in Invite) (JoinState, error) {
+// ForJoin reads the join state for the ticket holder. The ticket is the gate (initiative-sessions,
+// "Join by code"), and the pending request created from it grants nothing.
+func (r *Sessions) ForJoin(ctx context.Context, t JoinTicket) (JoinState, error) {
 	var st JoinState
-	if err := checkUserID(actor); err != nil {
+	if err := t.check(); err != nil {
 		return st, err
 	}
+	actor := t.actor
 	var sess Session
-	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: in.SessionID}, {Key: "deleted_at", Value: nil}}, &sess)
+	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: t.session}, {Key: "deleted_at", Value: nil}}, &sess)
 	if errors.Is(err, store.ErrNotFound) {
 		return st, nil
 	}
@@ -355,14 +378,14 @@ func (r *Sessions) ForJoin(ctx context.Context, actor string, in Invite) (JoinSt
 	}
 	st.Exists, st.Active = true, sess.InactiveAt == nil
 	var b Block
-	switch err := r.blocks.FindOne(ctx, sessionUser(in.SessionID, actor), &b); {
+	switch err := r.blocks.FindOne(ctx, sessionUser(t.session, actor), &b); {
 	case err == nil:
 		st.Blocked = true
 	case !errors.Is(err, store.ErrNotFound):
 		return st, err
 	}
 	var m Member
-	switch err := r.members.FindOne(ctx, sessionUser(in.SessionID, actor), &m); {
+	switch err := r.members.FindOne(ctx, sessionUser(t.session, actor), &m); {
 	case err == nil:
 		st.Member = true
 	case !errors.Is(err, store.ErrNotFound):
@@ -371,15 +394,15 @@ func (r *Sessions) ForJoin(ctx context.Context, actor string, in Invite) (JoinSt
 	return st, nil
 }
 
-// RequestJoin records a pending request from actor for the invite's session. An earlier settled
+// RequestJoin records a pending request from the ticket holder for the ticket's session. An earlier settled
 // request becomes pending again (the caller has checked the user is not a member, so an approved
 // one means the approval never finished); an existing pending one is returned unchanged.
-func (r *Sessions) RequestJoin(ctx context.Context, actor string, in Invite) (JoinRequest, error) {
+func (r *Sessions) RequestJoin(ctx context.Context, t JoinTicket) (JoinRequest, error) {
 	var jr JoinRequest
-	if err := checkUserID(actor); err != nil {
+	if err := t.check(); err != nil {
 		return jr, err
 	}
-	sessionID := in.SessionID
+	actor, sessionID := t.actor, t.session
 	err := r.requests.FindOne(ctx, sessionUser(sessionID, actor), &jr)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -401,7 +424,7 @@ func (r *Sessions) RequestJoin(ctx context.Context, actor string, in Invite) (Jo
 
 // Requests lists the session's requests, optionally only those with status.
 func (r *Sessions) Requests(ctx context.Context, d Decision, status string, q Query) (Page[JoinRequest], error) {
-	if err := d.check(); err != nil {
+	if err := d.require(relApprove); err != nil {
 		return Page[JoinRequest]{}, err
 	}
 	q = byCreated(q)
@@ -415,7 +438,7 @@ func (r *Sessions) Requests(ctx context.Context, d Decision, status string, q Qu
 // already settled is ErrConflict.
 func (r *Sessions) Decide(ctx context.Context, d Decision, requestID, status, role, reason string) (JoinRequest, error) {
 	var jr JoinRequest
-	if err := d.check(); err != nil {
+	if err := d.require(relApprove); err != nil {
 		return jr, err
 	}
 	id, ok := cleanID(requestID)
@@ -442,7 +465,7 @@ func (r *Sessions) Decide(ctx context.Context, d Decision, requestID, status, ro
 
 // DropRequest removes userID's request, if any.
 func (r *Sessions) DropRequest(ctx context.Context, d Decision, userID string) error {
-	if err := pairOK(d, userID); err != nil {
+	if err := pairOK(d, relEdit, userID); err != nil {
 		return err
 	}
 	if err := r.softDelete(ctx, r.requests, sessionUser(d.session, userID), d.actor); !errors.Is(err, ErrNotFound) {
@@ -453,7 +476,7 @@ func (r *Sessions) DropRequest(ctx context.Context, d Decision, userID string) e
 
 // AddBlock keeps userID out of the session; blocking twice is harmless.
 func (r *Sessions) AddBlock(ctx context.Context, d Decision, userID string) error {
-	if err := pairOK(d, userID); err != nil {
+	if err := pairOK(d, relEdit, userID); err != nil {
 		return err
 	}
 	err := r.blocks.InsertOne(ctx, Block{ID: newID(), SessionID: d.session, UserID: userID, CreatedAt: r.now(), CreatedBy: d.actor, Live: true})
@@ -465,7 +488,7 @@ func (r *Sessions) AddBlock(ctx context.Context, d Decision, userID string) erro
 
 // RemoveBlock lifts a block.
 func (r *Sessions) RemoveBlock(ctx context.Context, d Decision, userID string) error {
-	if err := pairOK(d, userID); err != nil {
+	if err := pairOK(d, relEdit, userID); err != nil {
 		return err
 	}
 	return r.softDelete(ctx, r.blocks, sessionUser(d.session, userID), d.actor)
@@ -473,7 +496,7 @@ func (r *Sessions) RemoveBlock(ctx context.Context, d Decision, userID string) e
 
 // Blocked reports whether userID is blocked from the session.
 func (r *Sessions) Blocked(ctx context.Context, d Decision, userID string) (bool, error) {
-	if err := pairOK(d, userID); err != nil {
+	if err := pairOK(d, relEdit, userID); err != nil {
 		return false, err
 	}
 	var b Block
@@ -486,7 +509,7 @@ func (r *Sessions) Blocked(ctx context.Context, d Decision, userID string) (bool
 
 // Blocks lists the session's blocked users.
 func (r *Sessions) Blocks(ctx context.Context, d Decision, q Query) (Page[Block], error) {
-	if err := d.check(); err != nil {
+	if err := d.require(relEdit); err != nil {
 		return Page[Block]{}, err
 	}
 	return runQuery[Block](ctx, r.blocks, SessionBlockSpec, sessionScope(d.session), byCreated(q))
@@ -495,7 +518,7 @@ func (r *Sessions) Blocks(ctx context.Context, d Decision, q Query) (Page[Block]
 // DropSession soft-deletes every membership record of the session: members, invites, requests,
 // and blocks. The session document itself is soft-deleted by SoftDelete.
 func (r *Sessions) DropSession(ctx context.Context, d Decision) error {
-	if err := d.check(); err != nil {
+	if err := d.require(relGM); err != nil {
 		return err
 	}
 	for _, c := range []store.Collection{r.members, r.invites, r.requests, r.blocks} {

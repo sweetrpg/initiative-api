@@ -752,7 +752,7 @@ func TestStaleReadDoesNotAdvanceTheRecord(t *testing.T) {
 
 func mustDecision(t *testing.T, actor, id string) data.Decision {
 	t.Helper()
-	d, err := data.Authorize(sctx, actor, id, "can_view")
+	d, err := data.Authorize(sctx, actor, id, "gm")
 	if err != nil {
 		t.Fatal(err)
 	}

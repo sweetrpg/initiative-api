@@ -1,11 +1,14 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/store/fake"
 )
 
@@ -263,14 +266,113 @@ func TestPrivateRecordsWorkWhenAuthorizationIsDown(t *testing.T) {
 	}
 }
 
-func TestDeniedRelationIs403WithNoSessionData(t *testing.T) {
-	router := sessionRouterWith(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"allowed":false}`)) })
-	id := strings.Repeat("a", 24)
+// relProbe is a check-relation endpoint that records what was asked and can be switched to deny.
+type relProbe struct {
+	mu    sync.Mutex
+	deny  bool
+	calls []struct{ Object, Relation string }
+}
 
-	w := callAs(router, "user-three", "GET", "/sessions/"+id, "")
+func (p *relProbe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var q struct{ Object, Relation string }
+	_ = json.NewDecoder(r.Body).Decode(&q)
+	p.mu.Lock()
+	p.calls = append(p.calls, q)
+	deny := p.deny
+	p.mu.Unlock()
+	if deny {
+		_, _ = w.Write([]byte(`{"allowed":false}`))
+		return
+	}
+	_, _ = w.Write([]byte(`{"allowed":true}`))
+}
 
-	if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "Friday") {
-		t.Fatalf("denied get = %d %s, want 403", w.Code, w.Body)
+func (p *relProbe) setDeny(v bool) {
+	p.mu.Lock()
+	p.deny = v
+	p.mu.Unlock()
+}
+
+func (p *relProbe) last() struct{ Object, Relation string } {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls[len(p.calls)-1]
+}
+
+func (p *relProbe) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.calls)
+}
+
+func TestDeniedRelationIs403WithTheRightRelationAndNoSessionData(t *testing.T) {
+	db := fake.NewDB()
+	probe := &relProbe{}
+	r, _ := credRouterRel(t, "3", db, probe.ServeHTTP)
+	w := callAs(r, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
+	id := decodeBody(t, w)["id"].(string)
+	probe.setDeny(true)
+	routes := []struct{ method, path, body, relation string }{
+		{"GET", "/sessions/" + id, "", "can_view"},
+		{"GET", "/sessions/" + id + "/members", "", "can_view"},
+		{"GET", "/sessions/" + id + "/invites", "", "can_edit"},
+		{"GET", "/sessions/" + id + "/requests", "", "can_approve"},
+		{"GET", "/sessions/" + id + "/blocks", "", "can_edit"},
+		{"POST", "/sessions/" + id + "/invites", "", "can_edit"},
+		{"PATCH", "/sessions/" + id + "/members/user-two", `{"role":"player"}`, "can_edit"},
+		{"DELETE", "/sessions/" + id + "?revision=1", "", "gm"},
+	}
+	for _, rt := range routes {
+		w := callAs(r, "user-ok", rt.method, rt.path, rt.body)
+		got := probe.last()
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"forbidden"`) || strings.Contains(w.Body.String(), "Friday") {
+			t.Errorf("%s %s = %d %s, want a bare 403", rt.method, rt.path, w.Code, w.Body)
+		}
+		if got.Object != "session:"+id || got.Relation != rt.relation {
+			t.Errorf("%s %s asked %+v, want session:%s %s", rt.method, rt.path, got, id, rt.relation)
+		}
+	}
+	if n := len(db.Fake(data.CollectionSessionInvites).Docs()); n != 0 {
+		t.Errorf("a denied write created %d invites", n)
+	}
+	for _, d := range db.Fake(data.CollectionSessionMembers).Docs() {
+		if d["deleted_at"] != nil {
+			t.Errorf("a denied delete changed a member: %v", d)
+		}
+	}
+}
+
+func TestJoinNeedsNoRelationCheckAndWorksInAnOutage(t *testing.T) {
+	probe := &relProbe{}
+	r, _ := credRouterRel(t, "3", fake.NewDB(), probe.ServeHTTP)
+	id := decodeBody(t, callAs(r, "user-ok", "POST", "/sessions", `{"name":"Friday"}`))["id"].(string)
+	code := inviteCode(t, r, "user-ok", id)
+	probe.setDeny(true)
+	before := probe.count()
+
+	w := callAs(r, "user-two", "POST", "/sessions/join", `{"code":"`+code+`"}`)
+
+	if w.Code != http.StatusAccepted || probe.count() != before {
+		t.Fatalf("join = %d %s with %d extra checks; want 202 and none", w.Code, w.Body, probe.count()-before)
+	}
+}
+
+func TestWriteRoutesAnswer503WhenAuthorizationIsDown(t *testing.T) {
+	var down atomic.Bool
+	r := sessionRouterWith(t, func(w http.ResponseWriter, req *http.Request) {
+		if down.Load() {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		allowRelations(w, req)
+	})
+	id := decodeBody(t, callAs(r, "user-ok", "POST", "/sessions", `{"name":"Friday"}`))["id"].(string)
+	down.Store(true)
+
+	w := callAs(r, "user-ok", "POST", "/sessions/"+id+"/invites", "")
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("invite in an outage = %d %s, want 503", w.Code, w.Body)
 	}
 }
 

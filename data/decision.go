@@ -20,9 +20,21 @@ func (d Decision) Actor() string { return d.actor }
 // SessionID returns the session the decision covers.
 func (d Decision) SessionID() string { return d.session }
 
-// check refuses the zero Decision, so a forgotten check cannot read or write session data.
-func (d Decision) check() error {
-	if d.actor == "" || d.session == "" || d.relation == "" {
+// Relations on a session, weakest first. The model (auth-api fga/model.fga) makes can_edit and
+// can_approve the same set (gm or co_gm), gm a subset of that, and can_view everyone.
+const (
+	relView    = "can_view"
+	relEdit    = "can_edit"
+	relApprove = "can_approve"
+	relGM      = "gm"
+)
+
+var relationRank = map[string]int{relView: 1, relEdit: 2, relApprove: 2, relGM: 3}
+
+// require refuses the zero Decision and any decision made for a weaker relation than min, so a
+// can_view grant (any observer) cannot be spent on a write that needs can_edit.
+func (d Decision) require(min string) error {
+	if d.actor == "" || d.session == "" || relationRank[d.relation] == 0 || relationRank[d.relation] < relationRank[min] {
 		return ErrForbidden
 	}
 	return nil
