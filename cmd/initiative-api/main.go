@@ -14,9 +14,12 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/gomodule/redigo/redis"
 	"github.com/joho/godotenv"
 	sloggin "github.com/samber/slog-gin"
+	"github.com/sweetrpg/api-core.go/ratelimit"
 	"github.com/sweetrpg/api-core.go/tracing"
+	"github.com/sweetrpg/api-core.go/util"
 	"github.com/sweetrpg/authz-client.go/authz"
 	"github.com/sweetrpg/common.go/logging"
 	"github.com/sweetrpg/initiative-api/config"
@@ -72,6 +75,11 @@ func main() {
 		}
 		defer consumer.Stop()
 	}
+	// The limiter fails closed without its counter store (PADR-0036), so Redis is required.
+	pool := util.RedisPool()
+	if pool == nil {
+		log.Fatal("REDIS_HOST is required for rate limiting")
+	}
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
 	svc := server.Services{
 		Locks: encounters.Locks(),
@@ -90,7 +98,7 @@ func main() {
 		Encounters:   encounters,
 		Sessions:     sessions,
 	}
-	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc, pool), ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -110,7 +118,7 @@ func main() {
 	}
 }
 
-func newRouter(cfg config.Config, svc server.Services) *gin.Engine {
+func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.Engine {
 	httpLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	r := gin.New()
@@ -130,6 +138,8 @@ func newRouter(cfg config.Config, svc server.Services) *gin.Engine {
 			MaxAge:           12 * time.Hour,
 		}))
 	}
+
+	r.Use(server.RateLimit(pool, ratelimit.DefaultOptions())...)
 
 	server.SetupHandlers(r, svc)
 	return r
