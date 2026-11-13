@@ -62,11 +62,12 @@ func cleanID(id string) (string, bool) {
 	return oid.Hex(), true
 }
 
+// requireOwnerActor refuses a write with no valid owner or acting user id.
 func requireOwnerActor(owner, actor string) error {
-	if strings.TrimSpace(owner) == "" || strings.TrimSpace(actor) == "" {
-		return fmt.Errorf("%w: owner and acting user are required", ErrInvalid)
+	if err := checkUserID(owner); err != nil {
+		return err
 	}
-	return nil
+	return checkUserID(actor)
 }
 
 // Create stores doc as owner's new record: it assigns the ID, owner, revision 1, and the audit
@@ -96,8 +97,8 @@ func (r *Owned[T, P]) mapDuplicate(err error) error {
 // one on reads.
 func (r *Owned[T, P]) Get(ctx context.Context, ownerUserID, id string) (T, error) {
 	var out T
-	if strings.TrimSpace(ownerUserID) == "" {
-		return out, fmt.Errorf("%w: owner is required", ErrInvalid)
+	if err := checkUserID(ownerUserID); err != nil {
+		return out, err
 	}
 	id, ok := cleanID(id)
 	if !ok {
@@ -274,6 +275,9 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 // exists, ErrForbidden when it belongs to another owner. Call it only after a scoped read or write
 // has already failed; it never grants access. It returns nil if the record is visible to owner.
 func (r *Owned[T, P]) Missing(ctx context.Context, owner, id string) error {
+	if err := checkUserID(owner); err != nil {
+		return err
+	}
 	if _, err := r.classify(ctx, owner, id); !errors.Is(err, ErrRevisionConflict) {
 		return err
 	}

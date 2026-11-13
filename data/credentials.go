@@ -29,13 +29,16 @@ func activeScope(owner string) bson.D {
 
 // ItemStates lists owner's unrevoked credentials; a revoked one no longer counts toward the limit.
 func (r *Credentials) ItemStates(ctx context.Context, owner string) ([]ItemState, error) {
+	if err := checkUserID(owner); err != nil {
+		return nil, err
+	}
 	return r.itemStates(ctx, activeScope(owner))
 }
 
 // CountActive counts owner's credentials that can still authenticate.
 func (r *Credentials) CountActive(ctx context.Context, owner string) (int64, error) {
-	if strings.TrimSpace(owner) == "" {
-		return 0, fmt.Errorf("%w: owner is required", ErrInvalid)
+	if err := checkUserID(owner); err != nil {
+		return 0, err
 	}
 	return r.c.CountDocuments(ctx, activeScope(owner))
 }

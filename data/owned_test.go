@@ -389,3 +389,31 @@ func TestMalformedIDsNeverReachTheStore(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnedMethodsRefuseAnEmptyOrMalformedUser(t *testing.T) {
+	r, _ := newRosters(t)
+	rec := mustCreate(t, r, "u1", "A")
+	creds := NewCredentials(fake.NewDB())
+	for _, bad := range []string{"", "  ", `{"$ne":""}`, "a b", "u1\n"} {
+		calls := map[string]func() error{
+			"Create":       func() error { return r.Create(ctx, bad, "u1", &Roster{Name: "x"}) },
+			"Create actor": func() error { return r.Create(ctx, "u1", bad, &Roster{Name: "x"}) },
+			"Get":          func() error { _, err := r.Get(ctx, bad, rec.ID); return err },
+			"List":         func() error { _, err := r.List(ctx, bad, Query{}); return err },
+			"Count":        func() error { _, err := r.Count(ctx, bad, nil); return err },
+			"Update":       func() error { _, err := r.Update(ctx, bad, "u1", rec.ID, 1, map[string]any{"name": "x"}); return err },
+			"SoftDelete":   func() error { return r.SoftDelete(ctx, bad, "u1", rec.ID, 1) },
+			"Missing":      func() error { return r.Missing(ctx, bad, rec.ID) },
+			"ItemStates":   func() error { _, err := r.ItemStates(ctx, bad); return err },
+			"SetInactive":  func() error { return r.SetInactive(ctx, bad, rec.ID, true) },
+			"SetKeepRanks": func() error { return r.SetKeepRanks(ctx, bad, []string{rec.ID}) },
+			"CountActive":  func() error { _, err := creds.CountActive(ctx, bad); return err },
+			"Cred states":  func() error { _, err := creds.ItemStates(ctx, bad); return err },
+		}
+		for name, call := range calls {
+			if err := call(); !errors.Is(err, ErrInvalid) {
+				t.Errorf("%s with user %q = %v, want ErrInvalid", name, bad, err)
+			}
+		}
+	}
+}
