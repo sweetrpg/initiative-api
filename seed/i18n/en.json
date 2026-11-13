@@ -25,10 +25,14 @@
   "initiative.health.stressCapacity": "Stress Capacity",
   "initiative.health.successCount": "Successes",
   "initiative.health.temporary": "Temporary",
-  "initiative.health.value1": "Value 1",
-  "initiative.health.value1Maximum": "Value 1 Maximum",
-  "initiative.health.value2": "Value 2",
-  "initiative.health.value2Maximum": "Value 2 Maximum",
   "initiative.health.weary": "Weary",
-  "initiative.health.wounded": "Wounded"
+  "initiative.health.wounded": "Wounded",
+  "initiative.health.shadowrun5.value1": "Physical",
+  "initiative.health.shadowrun5.value1Maximum": "Physical Maximum",
+  "initiative.health.shadowrun5.value2": "Stun",
+  "initiative.health.shadowrun5.value2Maximum": "Stun Maximum",
+  "initiative.health.genesys.value1": "Wounds",
+  "initiative.health.genesys.value1Maximum": "Wounds Maximum",
+  "initiative.health.genesys.value2": "Strain",
+  "initiative.health.genesys.value2Maximum": "Strain Maximum"
 }

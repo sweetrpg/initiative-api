@@ -197,38 +197,6 @@
       "max": 1
     }
   ],
-  "twovalue": [
-    {
-      "key": "value1",
-      "label": "initiative.health.value1",
-      "kind": "pool",
-      "default": 1,
-      "min": 0,
-      "max_ref": "value1Maximum"
-    },
-    {
-      "key": "value1Maximum",
-      "label": "initiative.health.value1Maximum",
-      "kind": "counter",
-      "default": 1,
-      "min": 0
-    },
-    {
-      "key": "value2",
-      "label": "initiative.health.value2",
-      "kind": "pool",
-      "default": 1,
-      "min": 0,
-      "max_ref": "value2Maximum"
-    },
-    {
-      "key": "value2Maximum",
-      "label": "initiative.health.value2Maximum",
-      "kind": "counter",
-      "default": 1,
-      "min": 0
-    }
-  ],
   "damage": [
     {
       "key": "damage",
@@ -324,6 +292,70 @@
       "default": 0,
       "min": 0,
       "max": 4
+    }
+  ],
+  "shadowrun5": [
+    {
+      "key": "value1",
+      "label": "initiative.health.shadowrun5.value1",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value1Maximum"
+    },
+    {
+      "key": "value1Maximum",
+      "label": "initiative.health.shadowrun5.value1Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "value2",
+      "label": "initiative.health.shadowrun5.value2",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value2Maximum"
+    },
+    {
+      "key": "value2Maximum",
+      "label": "initiative.health.shadowrun5.value2Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    }
+  ],
+  "genesys": [
+    {
+      "key": "value1",
+      "label": "initiative.health.genesys.value1",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value1Maximum"
+    },
+    {
+      "key": "value1Maximum",
+      "label": "initiative.health.genesys.value1Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
+    },
+    {
+      "key": "value2",
+      "label": "initiative.health.genesys.value2",
+      "kind": "pool",
+      "default": 1,
+      "min": 0,
+      "max_ref": "value2Maximum"
+    },
+    {
+      "key": "value2Maximum",
+      "label": "initiative.health.genesys.value2Maximum",
+      "kind": "counter",
+      "default": 1,
+      "min": 0
     }
   ]
 }
