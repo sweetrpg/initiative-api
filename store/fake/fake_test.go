@@ -111,3 +111,14 @@ func TestDeleteOneRemovesFirstMatchOnly(t *testing.T) {
 		t.Fatalf("missing = %v, want ErrNotFound", missing)
 	}
 }
+
+func TestEmptyAndIsRejected(t *testing.T) {
+	c := seeded(t)
+	for _, key := range []string{"$and", "$or"} {
+		var out []doc
+		err := c.Find(context.Background(), bson.D{{Key: key, Value: bson.A{}}}, store.FindOptions{}, &out)
+		if err == nil {
+			t.Errorf("empty %s accepted; MongoDB rejects it", key)
+		}
+	}
+}

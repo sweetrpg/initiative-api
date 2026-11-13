@@ -218,11 +218,19 @@ func buildPlan(spec Spec, base bson.D, q Query) (plan, error) {
 	}
 	// Fetch one extra row to learn whether another page exists.
 	return plan{
-		filter: bson.D{{Key: "$and", Value: clauses}},
+		filter: filterOf(clauses),
 		opts:   store.FindOptions{Sort: sortD, Projection: proj, Limit: int64(limit + 1)},
 		keys:   keys,
 		limit:  limit,
 	}, nil
+}
+
+// filterOf ANDs clauses. MongoDB rejects an empty $and, so no clauses means an empty filter.
+func filterOf(clauses bson.A) bson.D {
+	if len(clauses) == 0 {
+		return bson.D{}
+	}
+	return bson.D{{Key: "$and", Value: clauses}}
 }
 
 func clausesFor(spec Spec, base bson.D, q Query) (bson.A, error) {
@@ -346,5 +354,5 @@ func (r *Owned[T, P]) Count(ctx context.Context, ownerUserID string, filters []F
 	if err != nil {
 		return 0, err
 	}
-	return r.c.CountDocuments(ctx, bson.D{{Key: "$and", Value: clauses}})
+	return r.c.CountDocuments(ctx, filterOf(clauses))
 }
