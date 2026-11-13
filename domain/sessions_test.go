@@ -562,7 +562,7 @@ func TestCreateFailsClosedWhenEntitlementsAreDown(t *testing.T) {
 
 func TestInactiveSessionIsReadableAndDeletableOnly(t *testing.T) {
 	s, id := table(t)
-	if err := s.repo.SetInactive(sctx, "gm", id, true); err != nil {
+	if err := s.repo.Limits().SetInactive(sctx, "gm", id, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -590,7 +590,7 @@ func TestInactiveSessionCannotBeJoined(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.repo.SetInactive(sctx, "gm", id, true); err != nil {
+	if err := s.repo.Limits().SetInactive(sctx, "gm", id, true); err != nil {
 		t.Fatal(err)
 	}
 
