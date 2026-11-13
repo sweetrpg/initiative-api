@@ -29,6 +29,8 @@ make run
 | `USERS_API_URL` | required | users-api base URL; resolves the caller to `users._id` |
 | `ENTITLEMENTS_API_URL` | required | entitlements-api base URL; the caller's bearer is forwarded on checks |
 | `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASS` | `REDIS_HOST` required | rate-limit counters; the service stops at startup without `REDIS_HOST` |
+| `RATE_LIMIT_STANDARD`, `RATE_LIMIT_STANDARD_WINDOW_SECONDS`, `RATE_LIMIT_CHEAP`, `RATE_LIMIT_CHEAP_WINDOW_SECONDS` | api-core defaults | per-client budgets (PADR-0036) |
 
 Invalid values stop the process at startup with every problem listed.
 
@@ -81,6 +83,10 @@ Invalid values stop the process at startup with every problem listed.
   GM request re-reads `initiative.members_per_session` with the GM's token and records it on the
   session; member checks use that record only (503 `owner_entitlements_pending` until one exists).
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
+
+Requests are rate limited per client (PADR-0036): the `X-API-Key` header, else the client IP, and an `ic_` integration
+credential counts as its own client. Over the budget is 429 with `Retry-After`; if Redis is down, `/status/*` still
+answers and every other route returns 503.
 
 Every response carries `X-Correlation-ID` (the caller's value, or a generated one), also written
 to the access log as `correlation_id`.

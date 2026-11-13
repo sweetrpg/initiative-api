@@ -10,7 +10,7 @@ func lookupFrom(m map[string]string) func(string) (string, bool) {
 }
 
 func withAuth(m map[string]string) map[string]string {
-	out := map[string]string{"AUTH_API_URL": "http://auth-api:8000", "USERS_API_URL": "http://users-api:8000", "ENTITLEMENTS_API_URL": "http://entitlements-api:8000"}
+	out := map[string]string{"AUTH_API_URL": "http://auth-api:8000", "USERS_API_URL": "http://users-api:8000", "ENTITLEMENTS_API_URL": "http://entitlements-api:8000", "REDIS_HOST": "cache"}
 	for k, v := range m {
 		out[k] = v
 	}
@@ -70,5 +70,16 @@ func TestLoadValid(t *testing.T) {
 	}
 	if c.LogLevel != "DEBUG" || len(c.AllowedOrigins) != 2 {
 		t.Fatalf("unexpected config: %+v", c)
+	}
+}
+
+func TestLoadRequiresRedisHost(t *testing.T) {
+	env := withAuth(nil)
+	delete(env, "REDIS_HOST")
+
+	_, err := Load(lookupFrom(env))
+
+	if err == nil || !strings.Contains(err.Error(), "REDIS_HOST") {
+		t.Fatalf("err = %v, want REDIS_HOST required", err)
 	}
 }
