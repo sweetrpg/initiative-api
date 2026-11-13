@@ -75,11 +75,7 @@ func main() {
 		}
 		defer consumer.Stop()
 	}
-	// The limiter fails closed without its counter store (PADR-0036), so Redis is required.
-	pool := util.RedisPool()
-	if pool == nil {
-		log.Fatal("REDIS_HOST is required for rate limiting")
-	}
+	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
 	svc := server.Services{
 		Locks: encounters.Locks(),
@@ -139,7 +135,7 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 		}))
 	}
 
-	r.Use(server.RateLimit(pool, ratelimit.DefaultOptions())...)
+	r.Use(server.RateLimit(pool, ratelimit.DefaultOptions(), svc.Credentials)...)
 
 	server.SetupHandlers(r, svc)
 	return r

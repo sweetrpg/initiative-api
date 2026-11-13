@@ -34,7 +34,11 @@ func authenticate(creds *domain.Credentials, userAuth gin.HandlerFunc) gin.Handl
 			userAuth(c)
 			return
 		}
-		cred, err := creds.Authenticate(c.Request.Context(), secret)
+		cred, ok := resolvedCredential(c)
+		var err error
+		if !ok {
+			cred, err = creds.Authenticate(c.Request.Context(), secret)
+		}
 		if errors.Is(err, data.ErrNotFound) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorBody{Code: "unauthorized", Message: "Missing or invalid credential.", CorrelationID: CorrelationID(c)})
 			return
