@@ -1,6 +1,9 @@
 
 ## 0.2.1 - 2026-11-13
 
+
+## 0.2.1 - 2026-11-13
+
 ### Fixed
 - Omit empty $and from unfiltered queries
 
