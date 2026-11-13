@@ -21,7 +21,7 @@ const resolvedCredentialKey = "ratelimit.credential"
 //     so credentials are distinct clients;
 //   - everything else, including a made-up "ic_" secret, is keyed by IP.
 func RateLimit(pool *redis.Pool, opts ratelimit.Options, creds *domain.Credentials) []gin.HandlerFunc {
-	return []gin.HandlerFunc{clientKey(creds), ratelimit.Middleware(pool, opts)}
+	return []gin.HandlerFunc{typedErrors(), clientKey(creds), ratelimit.Middleware(pool, opts)}
 }
 
 func clientKey(creds *domain.Credentials) gin.HandlerFunc {

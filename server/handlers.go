@@ -31,7 +31,7 @@ func ProtectedGroup(r *gin.Engine, client *authz.Client, creds *domain.Credentia
 	if len(roles) == 0 {
 		roles = []string{authz.RoleUser}
 	}
-	return r.Group("", authenticate(creds, authz.RequireAnyRole(client, constants.ServiceName, roles...)))
+	return r.Group("", typedErrors(), authenticate(creds, authz.RequireAnyRole(client, constants.ServiceName, roles...)))
 }
 
 // SetupHandlers registers every route group on r.

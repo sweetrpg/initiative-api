@@ -73,6 +73,9 @@ func TestCredentialOverItsLimitGets429WithoutAffectingOthers(t *testing.T) {
 	if over.Code != http.StatusTooManyRequests || over.Header().Get("Retry-After") == "" {
 		t.Fatalf("third call = %d retry-after %q, want 429 with Retry-After", over.Code, over.Header().Get("Retry-After"))
 	}
+	if b := decodeBody(t, over); b["code"] != "rate_limited" || b["error"] != nil {
+		t.Fatalf("429 body = %v, want the typed shape with code rate_limited", b)
+	}
 	if w := hit(r, s[1], ""); w.Code != http.StatusOK {
 		t.Errorf("another credential from the same IP = %d, want 200", w.Code)
 	}
@@ -113,8 +116,12 @@ func TestCounterStoreDownFailsClosedExceptStatus(t *testing.T) {
 	r, mr, _ := limitedRouter(t, 5)
 	mr.Close()
 
-	if w := hit(r, "user-token", ""); w.Code != http.StatusServiceUnavailable {
-		t.Errorf("api route with store down = %d, want 503", w.Code)
+	w503 := hit(r, "user-token", "")
+	if w503.Code != http.StatusServiceUnavailable {
+		t.Errorf("api route with store down = %d, want 503", w503.Code)
+	}
+	if b := decodeBody(t, w503); b["code"] != "rate_limit_unavailable" || b["error"] != nil {
+		t.Errorf("503 body = %v, want the typed shape with code rate_limit_unavailable", b)
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/status/ping", nil))

@@ -10,8 +10,10 @@ service output stops matching them.
   The class-to-HTTP-status mapping is pinned in `http_errors.json`.
 - `http_errors.json` lists each HTTP error scenario with its status and body
   (`server/contract_test.go`; regenerate with `UPDATE_FIXTURES=1 go test ./server -run Contract`).
-  Errors from the token middleware (401 and the role 403) are `{"error", "message"}`; every other
-  error is `{"code", "message", "correlation_id"}` plus `key`/`limit`/`current` where they apply.
-  Clients must read both shapes.
+  Every error is `{"code", "message", "correlation_id"}` plus `key`/`limit`/`current` where they
+  apply, including the token middleware's 401 (`unauthorized`), 403 (`forbidden`) and 503
+  (`authz_unavailable`, `user_resolution_unavailable`) and the rate limiter's 429 (`rate_limited`)
+  and 503 (`rate_limit_unavailable`). `server/typederrors.go` rewrites the shared libraries'
+  `{"error", "message"}` bodies.
 - After an intentional contract change, run `UPDATE_FIXTURES=1 go test ./domain -run Contract` and
   review the diff.

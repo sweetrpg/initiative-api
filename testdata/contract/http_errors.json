@@ -4,7 +4,8 @@
       "scenario": "missing token",
       "status": 401,
       "body": {
-        "error": "invalid_token",
+        "code": "unauthorized",
+        "correlation_id": "CORRELATION_ID",
         "message": "Missing or invalid bearer token"
       }
     },
@@ -12,7 +13,8 @@
       "scenario": "token without a role",
       "status": 403,
       "body": {
-        "error": "forbidden",
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
         "message": "Caller does not have a qualifying role"
       }
     },
@@ -20,7 +22,8 @@
       "scenario": "denied account",
       "status": 403,
       "body": {
-        "error": "forbidden",
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
         "message": "Caller does not have a qualifying role"
       }
     },
@@ -202,7 +205,8 @@
       "scenario": "admin route as a user",
       "status": 403,
       "body": {
-        "error": "forbidden",
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
         "message": "Caller does not have a qualifying role"
       }
     },
