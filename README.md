@@ -84,6 +84,11 @@ Invalid values stop the process at startup with every problem listed.
   session; member checks use that record only (503 `owner_entitlements_pending` until one exists).
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
+OpenFGA session tuples are rebuilt from the membership collection by `cmd/reconciler` (a CronJob every 5 minutes
+running as the `initiative-reconciler` user with the `openfga-writer` role; `RECONCILER_TOKEN_FILE` holds an
+operator-minted bearer, PADR-0038). Exit 3 means the token was rejected or expired. The manifests are in
+`kubernetes/overlays/dev/reconciler.yaml`, not yet enabled.
+
 Requests are rate limited per client (PADR-0036): the `X-API-Key` header, else the client IP, and an `ic_` integration
 credential counts as its own client. Over the budget is 429 with `Retry-After`; if Redis is down, `/status/*` still
 answers and every other route returns 503.
