@@ -195,3 +195,71 @@ func TestBackoffLogsAndErrorsNeverContainTheSecretOrTheResponseBody(t *testing.T
 		t.Errorf("logs = %q, want a backoff line", logs.String())
 	}
 }
+
+func TestA401OnACachedTokenDuringBackoffKeepsTheCacheAndSetsNoRejection(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+	if err := mr.Set(tokenCacheKey, "cached"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mr.Set(auth0BackoffKey, "1"); err != nil {
+		t.Fatal(err)
+	}
+	mr.SetTTL(auth0BackoffKey, time.Hour)
+	srv, _ := authAPIAccepting(t) // answers 401 to the cached token
+
+	_, err := NewAuthAPIWithSource(srv.URL, newSource(t, f, mr)).Read(context.Background(), "session:s1")
+
+	if !errors.Is(err, ErrAuth0Backoff) || errors.Is(err, ErrTokenRejected) || f.calls != 0 {
+		t.Fatalf("err=%v calls=%d; want ErrAuth0Backoff, not a rejection, and no Auth0 call", err, f.calls)
+	}
+	if got, _ := mr.Get(tokenCacheKey); got != "cached" || mr.Exists(rejectedKey) {
+		t.Errorf("cache=%q rejected marker=%v; want the cached token kept and no marker", got, mr.Exists(rejectedKey))
+	}
+}
+
+func TestABackoffKeyWithoutAnExpiryFailsClosed(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+	if err := mr.Set(auth0BackoffKey, "1"); err != nil { // set by hand, no TTL
+		t.Fatal(err)
+	}
+
+	_, err := newSource(t, f, mr).Token(context.Background())
+
+	if !errors.Is(err, ErrAuth0Backoff) || f.calls != 0 {
+		t.Fatalf("err=%v calls=%d; want ErrAuth0Backoff and no Auth0 call", err, f.calls)
+	}
+}
+
+func TestARetryAfterTooLargeForInt64IsTheCapAndGarbageIsIgnored(t *testing.T) {
+	for in, want := range map[string]time.Duration{
+		"99999999999999999999999": backoffMax, "999999": backoffMax, "90": 90 * time.Second,
+		"-5": 0, "0": 0, "soon": 0, "": 0, "-99999999999999999999999": 0,
+	} {
+		if got := parseRetryAfter(in); got != want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestAFetchCutShortByTheRunContextIsNotCountedAgainstAuth0(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := newSource(t, f, mr).Token(ctx)
+
+	if err == nil || mr.Exists(auth0BackoffKey) || mr.Exists(auth0FailuresKey) {
+		t.Fatalf("err=%v backoff=%v failures=%v; want an error and no failure recorded", err, mr.Exists(auth0BackoffKey), mr.Exists(auth0FailuresKey))
+	}
+}
+
+func TestACountWithoutATTLCannotBeLeftBehindByAFailedWrite(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+	f.status = 500
+
+	_, _ = sourceWithBrokenSet(t, f, mr, auth0BackoffKey).Token(context.Background())
+
+	if mr.Exists(auth0FailuresKey) {
+		t.Fatalf("a failed script left a failure count behind")
+	}
+}

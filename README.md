@@ -85,18 +85,7 @@ Invalid values stop the process at startup with every problem listed.
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 OpenFGA session tuples are rebuilt from the membership collection by `cmd/reconciler` (a CronJob every 5 minutes
-running as the `initiative-reconciler` user with the `openfga-writer` role, signed in as an Auth0
-machine-to-machine client: `RECONCILER_CLIENT_ID`/`RECONCILER_CLIENT_SECRET`/`RECONCILER_TOKEN_URL`/`RECONCILER_AUDIENCE`
-fetch a client-credentials token, cached in Redis as `reconciler:token` until 120 seconds before it expires; PADR-0041).
-A 401 from auth-api clears the cache, fetches once more and retries once. Exit 1 is a failed pass or an Auth0 or Redis
-failure, 2 missing or invalid configuration (the token URL must be https), 3 auth-api rejected a token. A 401 on a token fetched
-in the same run sets `reconciler:rejected` for an hour so a persistent 401 cannot spend the Auth0 token allowance; fix the cause,
-then `DEL reconciler:rejected` in the initiative cache to retry at once.
-A failed Auth0 token request (429, 5xx, 401/403 from Auth0, network error, malformed answer) backs off further fetches: 5, 10,
-20, 40, then 60 minutes (or Auth0's `Retry-After` on a 429 when longer, at most 60), tracked in `reconciler:auth0-failures`
-(2 hour TTL, cleared by a successful fetch) and `reconciler:auth0-backoff`. While it exists a run fails with exit 1 without
-calling Auth0, but a cached token is still used. After the cause is fixed, `DEL reconciler:auth0-backoff reconciler:auth0-failures`
-to retry at once. For each session it reads the
+running as the `initiative-reconciler` user with the `openfga-writer` role; PADR-0041 covers how it signs in). For each session it reads the
 tuples first and then that session's current members, so a grant or revoke between the two reads is at worst
 corrected by the next pass (PADR-0040). After the tuple pass it closes session mints older than 15 minutes
 whose session is missing or soft-deleted in Mongo (auth-api `GET /internal/openfga/session-mints`, paged by
@@ -111,6 +100,19 @@ A session younger than 15 minutes, or one that gained a GM, is left alone; a fai
 and fails the job. The manifests are in
 `kubernetes/overlays/dev/reconciler.yaml`; `reconciler-alert.yaml` alerts when no run has succeeded in 15 minutes
 (token expired, job failing, or CronJob suspended).
+
+The reconciler signs in to auth-api as an Auth0 machine-to-machine client: `RECONCILER_CLIENT_ID`, `RECONCILER_CLIENT_SECRET`,
+`RECONCILER_TOKEN_URL` (https) and `RECONCILER_AUDIENCE` fetch a client-credentials token, cached in Redis as `reconciler:token`
+until 120 seconds before it expires. A 401 from auth-api clears the cache, fetches once more and retries once. Exit 1 is a failed
+pass or an Auth0 or Redis failure, 2 missing or invalid configuration, 3 auth-api rejected a token. A 401 on a token fetched in the
+same run sets `reconciler:rejected` for an hour so a persistent 401 cannot spend the Auth0 token allowance; fix the cause, then
+`DEL reconciler:rejected` in the initiative cache to retry at once.
+
+A failed Auth0 token request (429, 5xx, 401/403 from Auth0, network error, malformed answer) backs off further fetches: 5, 10,
+20, 40, then 60 minutes (or Auth0's `Retry-After` on a 429 when longer, at most 60), tracked in `reconciler:auth0-failures`
+(2 hour TTL, cleared by a successful fetch) and `reconciler:auth0-backoff`. While it exists a run fails with exit 1 without
+calling Auth0, but a cached token is still used. After the cause is fixed, `DEL reconciler:auth0-backoff reconciler:auth0-failures`
+to retry at once.
 
 Requests are rate limited per client (PADR-0036): the `X-API-Key` header, else the client IP, and an `ic_` integration
 credential counts as its own client. Over the budget is 429 with `Retry-After`; if Redis is down, `/status/*` still

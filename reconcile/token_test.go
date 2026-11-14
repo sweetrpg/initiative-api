@@ -336,6 +336,15 @@ type readOnlyFor struct {
 }
 
 func (r readOnlyFor) Do(cmd string, args ...any) (any, error) {
+	if (strings.EqualFold(cmd, "EVALSHA") || strings.EqualFold(cmd, "EVAL")) && len(r.keys) > 0 {
+		for _, a := range args { // the script's KEYS name the keys it writes
+			for _, k := range r.keys {
+				if a == k {
+					return nil, errors.New("OOM command not allowed when used memory > 'maxmemory'")
+				}
+			}
+		}
+	}
 	if strings.EqualFold(cmd, "SET") && len(args) > 0 {
 		if len(r.keys) == 0 {
 			return nil, errors.New("READONLY You can't write against a read only replica")
