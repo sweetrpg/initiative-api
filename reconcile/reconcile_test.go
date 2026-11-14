@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -224,6 +225,33 @@ type fakeSessionLookup struct {
 	found map[string]bool // id -> deleted
 	err   error
 	calls int
+	// withGM lists the sessions that have a live GM; nil means every live session does.
+	withGM    map[string]bool
+	gmErr     error
+	removeErr error
+	removed   []string
+}
+
+func (f *fakeSessionLookup) SessionsWithGM(_ context.Context, ids []string) (map[string]bool, error) {
+	if f.gmErr != nil {
+		return nil, f.gmErr
+	}
+	if f.withGM == nil {
+		out := map[string]bool{}
+		for _, id := range ids {
+			out[id] = true
+		}
+		return out, nil
+	}
+	return f.withGM, nil
+}
+
+func (f *fakeSessionLookup) RemoveGMLess(_ context.Context, id string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	f.removed = append(f.removed, id)
+	return nil
 }
 
 func (f *fakeSessionLookup) LookupSessions(_ context.Context, ids []string) (map[string]bool, error) {
@@ -412,5 +440,127 @@ func TestAnExhaustedTuplePassFailsTheRestWithOneLogLineAndStillCollects(t *testi
 
 	if err == nil || res.Failed != 3 || len(mints.closed) != 1 {
 		t.Fatalf("res=%+v err=%v closed=%v; want 3 failed sessions (one blocked, two skipped) and garbage collection still run", res, err, mints.closed)
+	}
+}
+
+func TestAGMLessLiveSessionIsRemovedAndItsMintClosed(t *testing.T) {
+	gmless, healthy := "000000000000000000000015", "000000000000000000000016"
+	mints := &fakeMints{pages: [][]Mint{{{ID: gmless}, {ID: healthy}}}}
+	lookup := &fakeSessionLookup{found: map[string]bool{gmless: false, healthy: false}, withGM: map[string]bool{healthy: true}}
+
+	res, err := gc(mints, lookup)
+
+	if err != nil || res.GMLessRemoved != 1 || len(lookup.removed) != 1 || lookup.removed[0] != gmless {
+		t.Fatalf("res=%+v err=%v removed=%v; want only the GM-less session removed", res, err, lookup.removed)
+	}
+	if len(mints.closed) != 1 || mints.closed[0] != gmless {
+		t.Errorf("closed = %v, want the removed session's mint closed and the healthy session's left open", mints.closed)
+	}
+}
+
+func TestASessionThatStillHasItsGMIsUntouched(t *testing.T) {
+	id := "000000000000000000000017"
+	mints := &fakeMints{pages: [][]Mint{{{ID: id}}}}
+	lookup := &fakeSessionLookup{found: map[string]bool{id: false}}
+
+	res, err := gc(mints, lookup)
+
+	if err != nil || len(lookup.removed) != 0 || len(mints.closed) != 0 || res.GMLessRemoved != 0 {
+		t.Fatalf("res=%+v err=%v removed=%v closed=%v; want nothing touched", res, err, lookup.removed, mints.closed)
+	}
+}
+
+func TestAFailedGMLookupLeavesLiveSessionsAloneAndFailsTheJob(t *testing.T) {
+	id := "000000000000000000000018"
+	mints := &fakeMints{pages: [][]Mint{{{ID: id}}}}
+	lookup := &fakeSessionLookup{found: map[string]bool{id: false}, gmErr: errors.New("mongo down")}
+
+	res, err := gc(mints, lookup)
+
+	if err == nil || res.Failed != 1 || len(lookup.removed) != 0 || len(mints.closed) != 0 {
+		t.Fatalf("res=%+v err=%v removed=%v closed=%v; want nothing removed or closed and the job failed", res, err, lookup.removed, mints.closed)
+	}
+}
+
+func TestAFailedRemovalKeepsTheMintOpen(t *testing.T) {
+	id := "000000000000000000000019"
+	mints := &fakeMints{pages: [][]Mint{{{ID: id}}}}
+	lookup := &fakeSessionLookup{found: map[string]bool{id: false}, withGM: map[string]bool{}, removeErr: errors.New("boom")}
+
+	res, err := gc(mints, lookup)
+
+	if err == nil || res.Failed != 1 || len(mints.closed) != 0 {
+		t.Fatalf("res=%+v err=%v closed=%v; want the mint left open for the next pass", res, err, mints.closed)
+	}
+}
+
+func TestADeletedSessionIsStillJustClosed(t *testing.T) {
+	id := "00000000000000000000001a"
+	mints := &fakeMints{pages: [][]Mint{{{ID: id}}}}
+	lookup := &fakeSessionLookup{found: map[string]bool{id: true}, withGM: map[string]bool{}}
+
+	res, err := gc(mints, lookup)
+
+	if err != nil || len(lookup.removed) != 0 || len(mints.closed) != 1 || res.GMLessRemoved != 0 {
+		t.Fatalf("res=%+v err=%v removed=%v closed=%v; want the deleted session's mint closed without a removal", res, err, lookup.removed, mints.closed)
+	}
+}
+
+func gmlessPages(sizes ...int) ([][]Mint, map[string]bool) {
+	var pages [][]Mint
+	found := map[string]bool{}
+	n := 0
+	for _, size := range sizes {
+		var page []Mint
+		for i := 0; i < size; i++ {
+			n++
+			id := fmt.Sprintf("%024x", n)
+			page = append(page, Mint{ID: id})
+			found[id] = false
+		}
+		pages = append(pages, page)
+	}
+	return pages, found
+}
+
+func TestTheCapStopsRemovalsAcrossPagesAndFailsTheJobOnce(t *testing.T) {
+	pages, found := gmlessPages(7, 7, 7)
+	mints := &fakeMints{pages: pages}
+	lookup := &fakeSessionLookup{found: found, withGM: map[string]bool{}}
+
+	res, err := gc(mints, lookup)
+
+	if err == nil || res.Failed != 1 || !res.GMLessCapped || res.GMLessRemoved != maxGMLessPerPass || len(lookup.removed) != maxGMLessPerPass || len(mints.closed) != maxGMLessPerPass {
+		t.Fatalf("res=%+v err=%v removed=%d closed=%d; want exactly %d removed, one failure", res, err, len(lookup.removed), len(mints.closed), maxGMLessPerPass)
+	}
+}
+
+func TestAConflictFromTheRecheckIsLeftAloneWithoutFailing(t *testing.T) {
+	pages, found := gmlessPages(1)
+	mints := &fakeMints{pages: pages}
+	lookup := &fakeSessionLookup{found: found, withGM: map[string]bool{}, removeErr: data.ErrConflict}
+
+	res, err := gc(mints, lookup)
+
+	if err != nil || res.Failed != 0 || len(mints.closed) != 0 || res.GMLessRemoved != 0 {
+		t.Fatalf("res=%+v err=%v closed=%v; want the session and its mint left, no failure", res, err, mints.closed)
+	}
+}
+
+func TestExactlyTheCapOfGMLessSessionsIsStillRemoved(t *testing.T) {
+	var page []Mint
+	found := map[string]bool{}
+	for i := 0; i < maxGMLessPerPass; i++ {
+		id := fmt.Sprintf("%024x", i+1)
+		page = append(page, Mint{ID: id})
+		found[id] = false
+	}
+	mints := &fakeMints{pages: [][]Mint{page}}
+	lookup := &fakeSessionLookup{found: found, withGM: map[string]bool{}}
+
+	res, err := gc(mints, lookup)
+
+	if err != nil || res.GMLessRemoved != maxGMLessPerPass || res.GMLessCapped {
+		t.Fatalf("res=%+v err=%v; want all %d removed", res, err, maxGMLessPerPass)
 	}
 }
