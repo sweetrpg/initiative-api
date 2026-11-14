@@ -1,11 +1,16 @@
 package domain
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/relations"
+	"github.com/sweetrpg/initiative-api/store"
+	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // seat makes a session with a GM and the given extra members, writing through fa.
@@ -194,7 +199,7 @@ func TestACoGMManagesPlayersButNeverTouchesCoGMs(t *testing.T) {
 	}
 }
 
-func TestRevocationsDeleteTheExactTupleAndNeverFailTheRequest(t *testing.T) {
+func TestRevocationsDeleteTheMembersTuplesAndNeverFailTheRequest(t *testing.T) {
 	fa := &fakeAuth{}
 	s, id := seat(t, fa, map[string]string{"p1": data.RolePlayer, "p2": data.RolePlayer, "p3": data.RoleObserver})
 	ctx := withAuth(fa)
@@ -202,13 +207,13 @@ func TestRevocationsDeleteTheExactTupleAndNeverFailTheRequest(t *testing.T) {
 	if err := s.Remove(ctx, "gm", id, "p1"); err != nil {
 		t.Fatal(err)
 	}
-	if w := lastWrite(t, fa); len(w.Writes) != 0 || len(w.Deletes) != 1 || w.Deletes[0] != tupleOf("p1", data.RolePlayer) {
-		t.Fatalf("remove wrote %+v, want only the player tuple deleted", w)
+	if w := lastWrite(t, fa); len(w.Writes) != 0 || !slices.Contains(w.Deletes, tupleOf("p1", data.RolePlayer)) {
+		t.Fatalf("remove wrote %+v, want the player tuple deleted and nothing written", w)
 	}
 	if err := s.Block(ctx, "gm", id, "p2"); err != nil {
 		t.Fatal(err)
 	}
-	if w := lastWrite(t, fa); w.Deletes[0] != tupleOf("p2", data.RolePlayer) {
+	if w := lastWrite(t, fa); !slices.Contains(w.Deletes, tupleOf("p2", data.RolePlayer)) {
 		t.Errorf("block wrote %+v, want p2's player tuple deleted", w)
 	}
 	if err := s.Leave(ctx, "p3", id); err != nil {
@@ -251,5 +256,91 @@ func TestAPlantedTupleWithoutAMongoMemberGrantsNothing(t *testing.T) {
 	}
 	if _, _, err := s.CreateInvite(sctx, "obs", id, 0); !errors.Is(err, data.ErrForbidden) {
 		t.Errorf("an observer holding a planted co_gm tuple invites: %v", err)
+	}
+}
+
+// failDropDB makes member updates (the soft deletes DropSession does) fail once armed.
+type failDropDB struct {
+	*fake.DB
+	armed *bool
+}
+
+func (d failDropDB) Collection(name string) store.Collection {
+	c := d.DB.Collection(name)
+	if name == data.CollectionSessionMembers {
+		return failUpdateCol{c, d.armed}
+	}
+	return c
+}
+
+type failUpdateCol struct {
+	store.Collection
+	armed *bool
+}
+
+func (c failUpdateCol) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
+	if *c.armed {
+		return errors.New("members down")
+	}
+	return c.Collection.FindOneAndUpdate(ctx, f, u, out)
+}
+
+func TestDeleteEndsTheSessionEvenWhenDroppingTheMembersFails(t *testing.T) {
+	fa := &fakeAuth{}
+	armed := false
+	s := NewSessions(failDropDB{fake.NewDB(), &armed})
+	ctx := withAuth(fa)
+	sess, err := s.Create(ctx, "gm", "Friday")
+	if err != nil {
+		t.Fatal(err)
+	}
+	armed = true
+
+	err = s.Delete(ctx, "gm", sess.ID, sess.Revision)
+
+	if err == nil {
+		t.Fatal("delete succeeded though dropping the members failed")
+	}
+	if len(fa.ended) != 1 || fa.ended[0] != sess.ID {
+		t.Fatalf("ended = %v, want the session ended before the failing drop (a retry 404s once the session is soft-deleted)", fa.ended)
+	}
+}
+
+func TestTheGMsRemovalClearsEveryMemberRelationButAnyoneElsesOnlyTheExactOne(t *testing.T) {
+	fa := &fakeAuth{}
+	s, id := seat(t, fa, map[string]string{"co": data.RoleCoGM, "p1": data.RolePlayer, "p2": data.RolePlayer})
+	ctx := withAuth(fa)
+
+	if err := s.Remove(ctx, "gm", id, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastWrite(t, fa).Deletes; len(got) != 3 {
+		t.Errorf("the GM's removal deleted %+v, want all three member relations (a stale co_gm tuple must not outlive it)", got)
+	}
+	if err := s.Remove(ctx, "co", id, "p2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastWrite(t, fa).Deletes; len(got) != 1 || got[0] != tupleOf("p2", data.RolePlayer) {
+		t.Errorf("a co_gm's removal deleted %+v, want only the player tuple", got)
+	}
+}
+
+func TestAuthAPIRefusalsOnAGrantAreReturnedNotHiddenAsPending(t *testing.T) {
+	for name, refusal := range map[string]error{"denied": relations.ErrDenied, "limited": relations.ErrLimited, "full": relations.ErrConflict} {
+		fa := &fakeAuth{}
+		s, id := seat(t, fa, nil)
+		ctx := withAuth(fa)
+		_, code, _ := s.CreateInvite(ctx, "gm", id, 0)
+		jr, _ := s.Join(ctx, "p1", code)
+		fa.failW = refusal
+
+		_, err := s.Approve(ctx, "gm", id, jr.ID, data.RolePlayer)
+
+		if !errors.Is(err, refusal) || errors.Is(err, ErrSyncPending) {
+			t.Errorf("%s: approve = %v, want the refusal itself", name, err)
+		}
+		if _, gerr := s.Get(sctx, "p1", id); gerr != nil {
+			t.Errorf("%s: the member saved in Mongo is not readable: %v", name, gerr)
+		}
 	}
 }

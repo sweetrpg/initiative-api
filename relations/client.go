@@ -38,6 +38,9 @@ var (
 	ErrDenied = errors.New("relations: not permitted")
 	// ErrLimited means auth-api's mint or tuple limits stopped the call. Callers answer 429.
 	ErrLimited = errors.New("relations: rate limited")
+	// ErrConflict means auth-api refused the change as conflicting (the session's tuple cap).
+	// Callers answer 409.
+	ErrConflict = errors.New("relations: conflict")
 )
 
 // Client calls auth-api. The zero value is not usable; use New.
@@ -222,6 +225,8 @@ func (c *Client) call(ctx context.Context, method, path, token string, body any,
 		return ErrDenied
 	case http.StatusTooManyRequests:
 		return ErrLimited
+	case http.StatusConflict:
+		return ErrConflict
 	}
 	slog.WarnContext(ctx, "auth-api rejected a session call", "path", path, "status", resp.StatusCode)
 	return ErrUnavailable

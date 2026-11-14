@@ -56,7 +56,9 @@ func tupleOf(user, role string) relations.Tuple {
 // syncGrant writes user's role tuple after the Mongo record exists. It deletes the user's other
 // non-gm relations in the same atomic write, so a role change or a retry cannot leave two roles;
 // a non-GM actor leaves co_gm tuples alone because only the GM changes those (PADR-0040 section 2).
-// A rejected token is returned as such; every other failure is ErrSyncPending.
+// A refusal from auth-api is returned as such; an outage is ErrSyncPending. A SetRole retry by a
+// co_gm when Mongo already holds the new role cannot know the old relation, so it leaves a stale
+// co_gm tuple for the reconciler to remove (accepted: only the GM changes co_gm members).
 func (s *Sessions) syncGrant(ctx context.Context, actorRole, sessionID, user, role string) error {
 	a, err := authorityOf(ctx)
 	if err != nil {
@@ -72,7 +74,11 @@ func (s *Sessions) syncGrant(ctx context.Context, actorRole, sessionID, user, ro
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, relations.ErrUnauthorized):
+	case errors.Is(err, relations.ErrUnauthorized), errors.Is(err, relations.ErrDenied),
+		errors.Is(err, relations.ErrLimited), errors.Is(err, relations.ErrConflict):
+		// auth-api answered with a refusal the client should see as such (401, 403, 429, 409
+		// session_full). Mongo is already written, so the member is denied until the tuple exists,
+		// which is the safe direction; the reconciler repairs it. Only an outage is "pending".
 		return err
 	}
 	slog.WarnContext(ctx, "membership tuple write failed; the reconciler will repair it", "session", sessionID, "user", user, "error", err)
@@ -81,14 +87,23 @@ func (s *Sessions) syncGrant(ctx context.Context, actorRole, sessionID, user, ro
 
 // syncRevoke deletes user's role tuple after the Mongo record is gone. The change has already taken
 // effect (the member lost access when the record went), so a failure is logged and left to the
-// reconciler instead of failing the request.
-func (s *Sessions) syncRevoke(ctx context.Context, sessionID, user, role string) {
+// reconciler instead of failing the request. The GM deletes all three member relations in one
+// request, so a stale co_gm tuple left by a demotion whose write failed cannot outlive the removal;
+// anyone else deletes only the member's own role tuple, which is all their auth-api rights cover.
+func (s *Sessions) syncRevoke(ctx context.Context, actorRole, sessionID, user, role string) {
 	if !slices.Contains(memberRoles, role) {
 		return
 	}
+	deletes := []relations.Tuple{tupleOf(user, role)}
+	if actorRole == data.RoleGM {
+		deletes = deletes[:0]
+		for _, r := range memberRoles {
+			deletes = append(deletes, tupleOf(user, r))
+		}
+	}
 	a, err := authorityOf(ctx)
 	if err == nil {
-		err = a.svc.WriteTuples(ctx, a.token, sessionID, nil, []relations.Tuple{tupleOf(user, role)})
+		err = a.svc.WriteTuples(ctx, a.token, sessionID, nil, deletes)
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "membership tuple delete failed; the reconciler will remove it", "session", sessionID, "user", user, "error", err)

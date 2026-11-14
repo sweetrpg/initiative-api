@@ -452,3 +452,26 @@ func TestFailedTupleWriteAnswers503MembershipSyncPendingAndTheRetrySucceeds(t *t
 		t.Fatalf("retry = %d %s, want 200", w.Code, w.Body)
 	}
 }
+
+func TestAuthAPIRefusalsOnAGrantReachTheClient(t *testing.T) {
+	for status, want := range map[int]int{http.StatusForbidden: 403, http.StatusTooManyRequests: 429, http.StatusConflict: 409} {
+		var fail atomic.Bool
+		router := sessionRouterWith(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/authz/session-tuples" && fail.Load() {
+				w.WriteHeader(status)
+				return
+			}
+			allowRelations(w, r)
+		})
+		id := decodeBody(t, callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`))["id"].(string)
+		code := inviteCode(t, router, "user-ok", id)
+		reqID := decodeBody(t, callAs(router, "user-two", "POST", "/sessions/join", `{"code":"`+code+`"}`))["id"].(string)
+		fail.Store(true)
+
+		w := callAs(router, "user-ok", "POST", "/sessions/"+id+"/requests/"+reqID+"/approve", `{"role":"player"}`)
+
+		if w.Code != want {
+			t.Errorf("auth-api %d on a grant -> %d %s, want %d", status, w.Code, w.Body, want)
+		}
+	}
+}

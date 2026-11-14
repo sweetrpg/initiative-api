@@ -251,11 +251,11 @@ func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) erro
 	if err := s.repo.SoftDelete(ctx, d, rev); err != nil {
 		return err
 	}
-	if err := s.repo.DropSession(ctx, d); err != nil {
-		return err
-	}
+	// End the session at auth-api before dropping the member records: once the session record is
+	// soft-deleted a retry 404s at Live(), so a skipped end would leak the mint and tuples until
+	// garbage collection.
 	s.endSession(ctx, d.SessionID())
-	return nil
+	return s.repo.DropSession(ctx, d)
 }
 
 func hashCode(code string) string {
@@ -462,7 +462,7 @@ func (s *Sessions) Remove(ctx context.Context, actor, id, user string) error {
 	if err := s.repo.RemoveMember(ctx, d, user); err != nil {
 		return err
 	}
-	s.syncRevoke(ctx, d.SessionID(), user, t.Role)
+	s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	return nil
 }
 
@@ -478,7 +478,7 @@ func (s *Sessions) Leave(ctx context.Context, actor, id string) error {
 	if err := s.repo.RemoveMember(ctx, d, actor); err != nil {
 		return err
 	}
-	s.syncRevoke(ctx, d.SessionID(), actor, m.Role)
+	s.syncRevoke(ctx, m.Role, d.SessionID(), actor, m.Role)
 	return nil
 }
 
@@ -506,7 +506,7 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	}
 	switch err := s.repo.RemoveMember(ctx, d, user); {
 	case err == nil:
-		s.syncRevoke(ctx, d.SessionID(), user, t.Role)
+		s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	case !errors.Is(err, data.ErrNotFound):
 		return err
 	}

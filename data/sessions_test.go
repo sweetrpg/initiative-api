@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sweetrpg/initiative-api/relations"
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 )
 
@@ -419,5 +420,40 @@ func TestOpenCreatesTheSessionAtTheMintedIDWithItsGM(t *testing.T) {
 	}
 	if err := r.Open(ctx, "gm", id, &Session{Name: "again"}); err == nil {
 		t.Errorf("a second open at the same id succeeded")
+	}
+}
+
+// failMembersDB fails every insert into the member collection.
+type failMembersDB struct{ *fake.DB }
+
+func (d failMembersDB) Collection(name string) store.Collection {
+	c := d.DB.Collection(name)
+	if name == CollectionSessionMembers {
+		return failInsertCol{c}
+	}
+	return c
+}
+
+type failInsertCol struct{ store.Collection }
+
+func (failInsertCol) InsertOne(context.Context, any) error { return errors.New("members down") }
+
+func TestOpenRemovesTheSessionWhenTheGMInsertFails(t *testing.T) {
+	db := fake.NewDB()
+	r := NewSessions(failMembersDB{db})
+	const id = "0123456789abcdef01234567"
+
+	err := r.Open(ctx, "gm", id, &Session{Name: "Friday"})
+
+	if err == nil {
+		t.Fatal("open succeeded though the GM member could not be stored")
+	}
+	if n, _ := r.Count(ctx, "gm"); n != 0 {
+		t.Errorf("owned sessions = %d, want 0: a GM-less session would count against sessions_per_gm", n)
+	}
+	for _, d := range db.Fake(CollectionSessions).Docs() {
+		if d["deleted_at"] == nil {
+			t.Errorf("session left live without a GM: %v", d)
+		}
 	}
 }

@@ -57,6 +57,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "membership_sync_pending", Message: "Your change was saved, but access is still being updated. Repeat the request in a moment."}, http.StatusServiceUnavailable
 	case errors.Is(err, relations.ErrDenied):
 		return ErrorBody{Code: "forbidden", Message: "You may not do that."}, http.StatusForbidden
+	case errors.Is(err, relations.ErrConflict):
+		return ErrorBody{Code: "session_full", Message: "The session has reached its member limit."}, http.StatusConflict
 	case errors.Is(err, relations.ErrLimited):
 		return ErrorBody{Code: "rate_limited", Message: "Too many requests. Try again shortly."}, http.StatusTooManyRequests
 	case errors.Is(err, relations.ErrUnavailable):

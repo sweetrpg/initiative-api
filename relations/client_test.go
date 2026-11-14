@@ -182,7 +182,7 @@ func TestEndSessionDeletesTheSession(t *testing.T) {
 }
 
 func TestSessionCallsMapAuthAPIAnswers(t *testing.T) {
-	for status, want := range map[int]error{401: ErrUnauthorized, 403: ErrDenied, 429: ErrLimited, 500: ErrUnavailable, 502: ErrUnavailable, 200: ErrUnavailable} {
+	for status, want := range map[int]error{401: ErrUnauthorized, 403: ErrDenied, 409: ErrConflict, 429: ErrLimited, 500: ErrUnavailable, 502: ErrUnavailable, 200: ErrUnavailable} {
 		var got struct{ Method, Path, Auth, Body string }
 		c := sessionServer(t, status, `{}`, &got)
 

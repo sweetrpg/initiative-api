@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/store"
@@ -176,7 +177,15 @@ func (r *Sessions) Open(ctx context.Context, actor, id string, s *Session) error
 		return err
 	}
 	m := Member{ID: newID(), SessionID: s.ID, UserID: actor, Role: RoleGM, CreatedAt: r.now(), CreatedBy: actor, Live: true}
-	return r.members.InsertOne(ctx, m)
+	if err := r.members.InsertOne(ctx, m); err != nil {
+		// Without its GM the session could never be deleted, and it would count against
+		// sessions_per_gm. Remove it; if even that fails, say so, since the caller ends the mint.
+		if derr := r.owned.SoftDelete(ctx, actor, actor, s.ID, s.Revision); derr != nil {
+			return fmt.Errorf("%w (and removing the session failed: %v)", err, derr)
+		}
+		return err
+	}
+	return nil
 }
 
 // Count returns how many sessions owner has, including inactive ones.
