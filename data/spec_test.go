@@ -36,11 +36,15 @@ func TestOwnerScopedIndexesLeadWithOwner(t *testing.T) {
 	}
 }
 
-func TestMemberIndexesLetSessionsWithGMUseASessionIDPrefix(t *testing.T) {
+func TestSessionMemberIndexMatchesTheGMLookupFilters(t *testing.T) {
 	for _, ix := range SessionMemberSpec.Indexes {
-		if ix.Name == "session_user" && ix.Keys[0].Key == "session_id" {
-			return
+		if ix.Name != "session_user" {
+			continue
 		}
+		if ix.Keys[0].Key != "session_id" || len(ix.Partial) != 1 || ix.Partial[0].Key != "live" {
+			t.Fatalf("session_user = keys %v partial %v; the GM lookups filter on session_id and live $exists", ix.Keys, ix.Partial)
+		}
+		return
 	}
-	t.Fatal("members has no index led by session_id; the reconciler's $in query would scan")
+	t.Fatal("members has no session_user index")
 }

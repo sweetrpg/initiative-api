@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
@@ -25,6 +26,7 @@ func (f *failingUpdates) FindOneAndUpdate(ctx context.Context, filter, update bs
 func TestRemoveGMLessReapsASessionWhoseOnlyGMRecordIsSoftDeleted(t *testing.T) {
 	db := fake.NewDB()
 	r := NewSessions(db)
+	r.now = func() time.Time { return time.Now().Add(time.Hour) }
 	s := &Session{Name: "Stripped"}
 	if err := r.owned.Create(ctx, "gm", "gm", s); err != nil {
 		t.Fatal(err)
@@ -47,6 +49,7 @@ func TestRemoveGMLessReapsASessionWhoseOnlyGMRecordIsSoftDeleted(t *testing.T) {
 func TestRemoveGMLessFinishesOnTheNextPassAfterADropFailsMidway(t *testing.T) {
 	db := fake.NewDB()
 	r := NewSessions(db)
+	r.now = func() time.Time { return time.Now().Add(time.Hour) }
 	s := &Session{Name: "Orphan"}
 	if err := r.owned.Create(ctx, "gm", "gm", s); err != nil {
 		t.Fatal(err)
@@ -75,5 +78,45 @@ func TestRemoveGMLessFinishesOnTheNextPassAfterADropFailsMidway(t *testing.T) {
 		if d["deleted_at"] == nil {
 			t.Errorf("member %v left live", d)
 		}
+	}
+}
+
+func TestRemoveGMLessReapsAStrippedGMsSessionAndDropsItsOtherMembers(t *testing.T) {
+	db := fake.NewDB()
+	r := NewSessions(db)
+	r.now = func() time.Time { return time.Now().Add(time.Hour) }
+	s := &Session{Name: "Stripped"}
+	if err := r.owned.Create(ctx, "gm", "gm", s); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []struct{ u, role string }{{"gm", RoleGM}, {"p1", RolePlayer}} {
+		if _, err := r.AddMember(ctx, dc(t, "gm", s.ID), m.u, m.role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.softDelete(ctx, r.members, sessionUser(s.ID, "gm"), "operator"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RemoveGMLess(ctx, s.ID); err != nil {
+		t.Fatalf("remove = %v", err)
+	}
+	for _, d := range db.Fake(CollectionSessionMembers).Docs() {
+		if d["deleted_at"] == nil {
+			t.Errorf("member %v left live", d)
+		}
+	}
+}
+
+func TestRemoveGMLessRefusesASessionYoungerThanTheMintAge(t *testing.T) {
+	db := fake.NewDB()
+	r := NewSessions(db)
+	s := &Session{Name: "New"}
+	if err := r.owned.Create(ctx, "gm", "gm", s); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RemoveGMLess(ctx, s.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("remove = %v, want ErrConflict for a session younger than %v", err, gmLessMinAge)
 	}
 }

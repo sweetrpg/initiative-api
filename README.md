@@ -94,9 +94,10 @@ whose session is missing or soft-deleted in Mongo (auth-api `GET /internal/openf
 (records first, session last, so a failed pass is retried), and its mint closed. Nothing in this repo removes a
 live GM record today, so this only reaps double-failure orphans (`Open` stored the session but neither its GM
 record nor its own removal) and sessions an operator stripped of a GM; the latter lose their co_gm and player
-data 15 minutes later. One extra `$in` query per mint page finds them, covered by the `session_user` index
-(prefix `session_id`). A pass that finds more than 10 fails the job and removes none (a wrong database or an
-empty members collection would otherwise wipe every old session); a failed query leaves live sessions alone
+data 15 minutes later. One extra `$in` query per mint page finds them, covered by the partial `session_user` index
+(`session_id` prefix, `live` exists). A pass stops after removing 10 and fails the job once (a wrong database or an
+empty members collection would otherwise wipe every old session; earlier pages may already have removed up to 10).
+A session younger than 15 minutes, or one that gained a GM, is left alone; a failed query leaves live sessions alone
 and fails the job. The manifests are in
 `kubernetes/overlays/dev/reconciler.yaml`; `reconciler-alert.yaml` alerts when no run has succeeded in 15 minutes
 (token expired, job failing, or CronJob suspended).

@@ -114,8 +114,8 @@ type Result struct {
 	MintsClosed, MintsSkipped int
 	// GMLessRemoved counts live sessions with no GM that garbage collection soft-deleted.
 	GMLessRemoved int
-	// GMLessSeen counts GM-less sessions found this pass; past maxGMLessPerPass none is removed.
-	GMLessSeen int
+	// GMLessCapped is set when a pass reached maxGMLessPerPass and left further GM-less sessions.
+	GMLessCapped bool
 }
 
 var roleRelations = map[string]bool{data.RoleGM: true, data.RoleCoGM: true, data.RolePlayer: true, data.RoleObserver: true}
@@ -283,7 +283,20 @@ func (r Reconciler) closeOrphans(ctx context.Context, mints []Mint, res *Result)
 			if !gmless[id] {
 				continue // a live session with its GM
 			}
-			if err := r.Sessions.RemoveGMLess(ctx, id); err != nil {
+			if res.GMLessRemoved >= maxGMLessPerPass {
+				if !res.GMLessCapped {
+					res.GMLessCapped = true
+					res.Failed++
+					slog.ErrorContext(ctx, "reconcile: reached the cap of sessions with no GM removed in one pass; leaving the rest", "cap", maxGMLessPerPass)
+				}
+				continue
+			}
+			err := r.Sessions.RemoveGMLess(ctx, id)
+			if errors.Is(err, data.ErrConflict) {
+				slog.InfoContext(ctx, "reconcile: session has a GM or is too new to remove; leaving it", "session", id)
+				continue
+			}
+			if err != nil {
 				res.Failed++
 				slog.ErrorContext(ctx, "reconcile: removing a session with no GM failed", "session", id, "error", err)
 				continue
@@ -328,12 +341,6 @@ func (r Reconciler) gmLess(ctx context.Context, ids []string, found map[string]b
 		if !withGM[id] {
 			out[id] = true
 		}
-	}
-	res.GMLessSeen += len(out)
-	if len(out) > 0 && res.GMLessSeen > maxGMLessPerPass {
-		res.Failed++
-		slog.ErrorContext(ctx, "reconcile: too many sessions with no GM; removing none", "found", res.GMLessSeen, "cap", maxGMLessPerPass)
-		return nil
 	}
 	return out
 }

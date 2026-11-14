@@ -506,21 +506,44 @@ func TestADeletedSessionIsStillJustClosed(t *testing.T) {
 	}
 }
 
-func TestMoreThanTheCapOfGMLessSessionsRemovesNoneAndFailsTheJob(t *testing.T) {
-	var page []Mint
+func gmlessPages(sizes ...int) ([][]Mint, map[string]bool) {
+	var pages [][]Mint
 	found := map[string]bool{}
-	for i := 0; i <= maxGMLessPerPass; i++ {
-		id := fmt.Sprintf("%024x", i+1)
-		page = append(page, Mint{ID: id})
-		found[id] = false
+	n := 0
+	for _, size := range sizes {
+		var page []Mint
+		for i := 0; i < size; i++ {
+			n++
+			id := fmt.Sprintf("%024x", n)
+			page = append(page, Mint{ID: id})
+			found[id] = false
+		}
+		pages = append(pages, page)
 	}
-	mints := &fakeMints{pages: [][]Mint{page}}
+	return pages, found
+}
+
+func TestTheCapStopsRemovalsAcrossPagesAndFailsTheJobOnce(t *testing.T) {
+	pages, found := gmlessPages(7, 7, 7)
+	mints := &fakeMints{pages: pages}
 	lookup := &fakeSessionLookup{found: found, withGM: map[string]bool{}}
 
 	res, err := gc(mints, lookup)
 
-	if err == nil || res.Failed != 1 || len(lookup.removed) != 0 || len(mints.closed) != 0 {
-		t.Fatalf("res=%+v err=%v removed=%v closed=%v; want nothing removed and the job failed", res, err, lookup.removed, mints.closed)
+	if err == nil || res.Failed != 1 || !res.GMLessCapped || res.GMLessRemoved != maxGMLessPerPass || len(lookup.removed) != maxGMLessPerPass || len(mints.closed) != maxGMLessPerPass {
+		t.Fatalf("res=%+v err=%v removed=%d closed=%d; want exactly %d removed, one failure", res, err, len(lookup.removed), len(mints.closed), maxGMLessPerPass)
+	}
+}
+
+func TestAConflictFromTheRecheckIsLeftAloneWithoutFailing(t *testing.T) {
+	pages, found := gmlessPages(1)
+	mints := &fakeMints{pages: pages}
+	lookup := &fakeSessionLookup{found: found, withGM: map[string]bool{}, removeErr: data.ErrConflict}
+
+	res, err := gc(mints, lookup)
+
+	if err != nil || res.Failed != 0 || len(mints.closed) != 0 || res.GMLessRemoved != 0 {
+		t.Fatalf("res=%+v err=%v closed=%v; want the session and its mint left, no failure", res, err, mints.closed)
 	}
 }
 
@@ -537,7 +560,7 @@ func TestExactlyTheCapOfGMLessSessionsIsStillRemoved(t *testing.T) {
 
 	res, err := gc(mints, lookup)
 
-	if err != nil || res.GMLessRemoved != maxGMLessPerPass {
+	if err != nil || res.GMLessRemoved != maxGMLessPerPass || res.GMLessCapped {
 		t.Fatalf("res=%+v err=%v; want all %d removed", res, err, maxGMLessPerPass)
 	}
 }

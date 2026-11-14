@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
+
 	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
@@ -531,6 +533,7 @@ func TestSessionsWithGMListsOnlyLiveGMRecords(t *testing.T) {
 func TestRemoveGMLessSoftDeletesTheSessionAndItsRecordsAsTheSystem(t *testing.T) {
 	db := fake.NewDB()
 	r := NewSessions(db)
+	r.now = func() time.Time { return time.Now().Add(time.Hour) }
 	orphan := &Session{Name: "Orphan"}
 	if err := r.owned.Create(ctx, "gm", "gm", orphan); err != nil {
 		t.Fatal(err)
@@ -567,8 +570,17 @@ func TestRemoveGMLessRefusesASessionThatHasAGM(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := r.AddMember(ctx, dc(t, "gm", id), "p1", RolePlayer); err != nil {
+		t.Fatal(err)
+	}
+	r.now = func() time.Time { return time.Now().Add(time.Hour) }
+
 	if err := r.RemoveGMLess(ctx, id); !errors.Is(err, ErrConflict) {
 		t.Fatalf("remove = %v, want ErrConflict", err)
+	}
+	live, _ := r.members.CountDocuments(ctx, bson.D{{Key: "session_id", Value: id}, {Key: "deleted_at", Value: nil}})
+	if live != 2 {
+		t.Errorf("live member records = %d, want the GM and the player untouched", live)
 	}
 	if n, _ := r.Count(ctx, "gm"); n != 1 {
 		t.Errorf("owned sessions = %d, want the session untouched", n)
