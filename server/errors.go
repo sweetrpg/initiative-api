@@ -35,6 +35,9 @@ func writeError(c *gin.Context, err error, current any) {
 	if status >= http.StatusInternalServerError && status != http.StatusServiceUnavailable {
 		slog.ErrorContext(c.Request.Context(), "request failed", "error", err, "correlation_id", body.CorrelationID)
 	}
+	if body.Code == "membership_sync_pending" || body.Code == "rate_limited" {
+		c.Header("Retry-After", "5")
+	}
 	c.AbortWithStatusJSON(status, body)
 }
 
@@ -50,6 +53,14 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "credentials_unavailable", Message: "Integration credentials are temporarily unavailable."}, http.StatusServiceUnavailable
 	case errors.Is(err, domain.ErrOwnerLimitsUnknown):
 		return ErrorBody{Code: "owner_entitlements_pending", Message: "The session owner has not connected yet. Try again after they do."}, http.StatusServiceUnavailable
+	case errors.Is(err, domain.ErrSyncPending):
+		return ErrorBody{Code: "membership_sync_pending", Message: "Your change was saved, but access is still being updated. Repeat the request in a moment."}, http.StatusServiceUnavailable
+	case errors.Is(err, relations.ErrDenied):
+		return ErrorBody{Code: "forbidden", Message: "You may not do that."}, http.StatusForbidden
+	case errors.Is(err, relations.ErrConflict):
+		return ErrorBody{Code: "session_full", Message: "The session has reached its member limit."}, http.StatusConflict
+	case errors.Is(err, relations.ErrLimited):
+		return ErrorBody{Code: "rate_limited", Message: "Too many requests. Try again shortly."}, http.StatusTooManyRequests
 	case errors.Is(err, relations.ErrUnavailable):
 		return ErrorBody{Code: "authorization_unavailable", Message: "Session access cannot be checked right now. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, relations.ErrUnauthorized):

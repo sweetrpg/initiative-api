@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,9 +35,20 @@ func credRouterDB(t *testing.T, limit string, db store.Database) (*gin.Engine, *
 	return credRouterRel(t, limit, db, allowRelations)
 }
 
-// allowRelations is an auth-api check-relation endpoint that grants every check.
-func allowRelations(w http.ResponseWriter, _ *http.Request) {
-	_, _ = w.Write([]byte(`{"allowed":true}`))
+// allowRelations is an auth-api that grants every check-relation and accepts every session call:
+// it mints sequential-looking 24-hex ids, and 200/204s the tuple and end calls.
+func allowRelations(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/authz/sessions" && r.Method == http.MethodPost:
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"session_id":"` + primitive.NewObjectID().Hex() + `"}`))
+	case strings.HasPrefix(r.URL.Path, "/authz/sessions/") && r.Method == http.MethodDelete:
+		w.WriteHeader(http.StatusNoContent)
+	case r.URL.Path == "/authz/session-tuples":
+		_, _ = w.Write([]byte(`{"writes":0,"deletes":0}`))
+	default:
+		_, _ = w.Write([]byte(`{"allowed":true}`))
+	}
 }
 
 // credRouterRel is credRouterDB with a caller-supplied check-relation handler.

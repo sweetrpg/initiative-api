@@ -73,11 +73,19 @@ func requireOwnerActor(owner, actor string) error {
 // Create stores doc as owner's new record: it assigns the ID, owner, revision 1, and the audit
 // stamp (created_by and updated_by are actor). Any ID or owner already on doc is overwritten.
 func (r *Owned[T, P]) Create(ctx context.Context, ownerUserID, actingUserID string, doc P) error {
+	return r.createWithID(ctx, ownerUserID, actingUserID, "", doc)
+}
+
+// createWithID is Create with a caller-chosen ID; an empty id means generate one.
+func (r *Owned[T, P]) createWithID(ctx context.Context, ownerUserID, actingUserID, id string, doc P) error {
 	if err := requireOwnerActor(ownerUserID, actingUserID); err != nil {
 		return err
 	}
 	m := doc.GetMeta()
-	m.ID = r.newID()
+	m.ID = id
+	if id == "" {
+		m.ID = r.newID()
+	}
 	m.OwnerUserID = ownerUserID
 	m.Revision = 1
 	m.DeletedAt, m.DeletedBy = nil, nil

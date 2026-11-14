@@ -33,6 +33,14 @@ var (
 	ErrUnavailable = errors.New("relations: authorization unavailable")
 	// ErrUnauthorized means auth-api rejected the user's token. Callers answer 401.
 	ErrUnauthorized = errors.New("relations: token rejected")
+	// ErrDenied means auth-api refused the change: the caller lacks the relation, or is denied
+	// the service. Callers answer 403.
+	ErrDenied = errors.New("relations: not permitted")
+	// ErrLimited means auth-api's mint or tuple limits stopped the call. Callers answer 429.
+	ErrLimited = errors.New("relations: rate limited")
+	// ErrConflict means auth-api refused the change as conflicting (the session's tuple cap).
+	// Callers answer 409.
+	ErrConflict = errors.New("relations: conflict")
 )
 
 // Client calls auth-api. The zero value is not usable; use New.
@@ -130,4 +138,96 @@ func (c *Client) remember(key string) {
 		}
 	}
 	c.cache[key] = c.now().Add(positiveTTL)
+}
+
+// Tuple is one membership relation, written for the session object the call names.
+type Tuple struct {
+	User     string `json:"user"` // "user:<canonical id>"
+	Relation string `json:"relation"`
+}
+
+// Mint asks auth-api for a new session ID and writes the caller's gm tuple on it. The ID comes
+// from auth-api, never from the client (PADR-0040).
+func (c *Client) Mint(ctx context.Context, token string) (string, error) {
+	var out struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := c.call(ctx, http.MethodPost, "/authz/sessions", token, nil, http.StatusCreated, &out); err != nil {
+		return "", err
+	}
+	if out.SessionID == "" {
+		return "", ErrUnavailable
+	}
+	return out.SessionID, nil
+}
+
+// EndSession deletes every tuple on the session and closes its mint. Only the GM may.
+func (c *Client) EndSession(ctx context.Context, token, sessionID string) error {
+	return c.call(ctx, http.MethodDelete, "/authz/sessions/"+sessionID, token, nil, http.StatusNoContent, nil)
+}
+
+// WriteTuples applies membership tuple changes on one session in a single atomic write. Writing a
+// tuple that exists and deleting one that does not are no-ops, so a retry is safe.
+func (c *Client) WriteTuples(ctx context.Context, token, sessionID string, writes, deletes []Tuple) error {
+	body := struct {
+		SessionID string  `json:"session_id"`
+		Writes    []Tuple `json:"writes"`
+		Deletes   []Tuple `json:"deletes"`
+	}{sessionID, writes, deletes}
+	if body.Writes == nil {
+		body.Writes = []Tuple{}
+	}
+	if body.Deletes == nil {
+		body.Deletes = []Tuple{}
+	}
+	return c.call(ctx, http.MethodPost, "/authz/session-tuples", token, body, http.StatusOK, nil)
+}
+
+// call sends one authenticated request and maps the answer: 401 is ErrUnauthorized, 403 ErrDenied,
+// 429 ErrLimited, anything else but want (or an unreadable body) ErrUnavailable.
+func (c *Client) call(ctx context.Context, method, path, token string, body any, want int, out any) error {
+	if token == "" {
+		return ErrUnauthorized
+	}
+	var rdr io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("relations: encode request: %w", err)
+		}
+		rdr = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
+	if err != nil {
+		return fmt.Errorf("relations: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		slog.WarnContext(ctx, "auth-api call failed", "path", path, "error", err)
+		return ErrUnavailable
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case want:
+		if out == nil {
+			return nil
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out); err != nil {
+			return ErrUnavailable
+		}
+		return nil
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	case http.StatusForbidden:
+		return ErrDenied
+	case http.StatusTooManyRequests:
+		return ErrLimited
+	case http.StatusConflict:
+		return ErrConflict
+	}
+	slog.WarnContext(ctx, "auth-api rejected a session call", "path", path, "status", resp.StatusCode)
+	return ErrUnavailable
 }

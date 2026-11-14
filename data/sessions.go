@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/store"
@@ -164,14 +165,27 @@ func checkUserID(u string) error {
 	return nil
 }
 
-// Open creates the session owned by actor and records actor as its GM. Creating is not a session
-// read: it is gated by the sessions_per_gm entitlement, which the caller checks first.
-func (r *Sessions) Open(ctx context.Context, actor string, s *Session) error {
-	if err := r.owned.Create(ctx, actor, actor, s); err != nil {
+// Open creates the session owned by actor with the ID auth-api minted for them and records actor
+// as its GM. Creating is not a session read: it is gated by the sessions_per_gm entitlement, which
+// the caller checks first, and by the mint that put the GM tuple on id.
+func (r *Sessions) Open(ctx context.Context, actor, id string, s *Session) error {
+	id, ok := cleanID(id)
+	if !ok {
+		return invalid("session id is not valid")
+	}
+	if err := r.owned.createWithID(ctx, actor, actor, id, s); err != nil {
 		return err
 	}
 	m := Member{ID: newID(), SessionID: s.ID, UserID: actor, Role: RoleGM, CreatedAt: r.now(), CreatedBy: actor, Live: true}
-	return r.members.InsertOne(ctx, m)
+	if err := r.members.InsertOne(ctx, m); err != nil {
+		// Without its GM the session could never be deleted, and it would count against
+		// sessions_per_gm. Remove it; if even that fails, say so, since the caller ends the mint.
+		if derr := r.owned.SoftDelete(ctx, actor, actor, s.ID, s.Revision); derr != nil {
+			return fmt.Errorf("%w (and removing the session failed: %v)", err, derr)
+		}
+		return err
+	}
+	return nil
 }
 
 // Count returns how many sessions owner has, including inactive ones.

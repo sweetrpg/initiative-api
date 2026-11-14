@@ -121,8 +121,17 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 	if owned >= int64(res.Limit) {
 		return SessionView{}, &EntitlementError{Key: KeySessionsPerGM, Limit: res.Limit}
 	}
+	auth, err := authorityOf(ctx)
+	if err != nil {
+		return SessionView{}, err
+	}
+	id, err := auth.svc.Mint(ctx, auth.token)
+	if err != nil {
+		return SessionView{}, err
+	}
 	sess := data.Session{Name: name}
-	if err := s.repo.Open(ctx, actor, &sess); err != nil {
+	if err := s.repo.Open(ctx, actor, id, &sess); err != nil {
+		s.endSession(ctx, id) // frees the mint slot; garbage collection covers a failure here
 		return SessionView{}, err
 	}
 	return SessionView{Session: sess, Role: data.RoleGM}, nil
@@ -242,6 +251,10 @@ func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) erro
 	if err := s.repo.SoftDelete(ctx, d, rev); err != nil {
 		return err
 	}
+	// End the session at auth-api before dropping the member records: once the session record is
+	// soft-deleted a retry 404s at Live(), so a skipped end would leak the mint and tuples until
+	// garbage collection.
+	s.endSession(ctx, d.SessionID())
 	return s.repo.DropSession(ctx, d)
 }
 
@@ -339,11 +352,17 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 	if !slices.Contains(assignable, role) {
 		return data.Member{}, invalid("role must be one of %s", strings.Join(assignable, ", "))
 	}
-	_, _, d, err := s.as(ctx, actor, id, ActDecideRequest)
+	_, am, d, err := s.as(ctx, actor, id, ActDecideRequest)
 	if err != nil {
 		return data.Member{}, err
 	}
+	if !canManageRole(am.Role, role) {
+		return data.Member{}, data.ErrForbidden
+	}
 	jr, err := s.repo.Decide(ctx, d, requestID, data.RequestApproved, role, "")
+	if errors.Is(err, data.ErrConflict) && jr.Status == data.RequestApproved && jr.Role == role {
+		return s.finishApproval(ctx, d, am.Role, jr)
+	}
 	if err != nil {
 		return data.Member{}, err
 	}
@@ -353,7 +372,21 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 		}
 		return data.Member{}, err
 	}
-	return s.repo.AddMember(ctx, d, jr.UserID, role)
+	m, err := s.repo.AddMember(ctx, d, jr.UserID, role)
+	if err != nil {
+		return data.Member{}, err
+	}
+	return m, s.syncGrant(ctx, am.Role, d.SessionID(), m.UserID, role)
+}
+
+// finishApproval is the retry of an approval that settled but whose tuple write failed: the member
+// record exists, so only the tuple is written again. Any other state is the original conflict.
+func (s *Sessions) finishApproval(ctx context.Context, d data.Decision, actorRole string, jr data.JoinRequest) (data.Member, error) {
+	m, err := s.repo.Member(ctx, d, jr.UserID)
+	if err != nil || m.Role != jr.Role {
+		return data.Member{}, data.ErrConflict
+	}
+	return m, s.syncGrant(ctx, actorRole, d.SessionID(), m.UserID, m.Role)
 }
 
 // Reject settles a pending request with a reason; the requester stays out.
@@ -395,26 +428,42 @@ func (s *Sessions) SetRole(ctx context.Context, actor, id, user, role string) (d
 	if !slices.Contains(assignable, role) {
 		return data.Member{}, invalid("role must be one of %s", strings.Join(assignable, ", "))
 	}
-	_, _, d, err := s.as(ctx, actor, id, ActManageMembers)
+	_, am, d, err := s.as(ctx, actor, id, ActManageMembers)
 	if err != nil {
 		return data.Member{}, err
 	}
-	if _, err := s.target(ctx, d, user); err != nil {
+	t, err := s.target(ctx, d, user)
+	if err != nil {
 		return data.Member{}, err
 	}
-	return s.repo.SetRole(ctx, d, user, role)
+	if !canManageRole(am.Role, role) || !canManageRole(am.Role, t.Role) {
+		return data.Member{}, data.ErrForbidden
+	}
+	m, err := s.repo.SetRole(ctx, d, user, role)
+	if err != nil {
+		return data.Member{}, err
+	}
+	return m, s.syncGrant(ctx, am.Role, d.SessionID(), user, role)
 }
 
 // Remove ends a member's access.
 func (s *Sessions) Remove(ctx context.Context, actor, id, user string) error {
-	_, _, d, err := s.as(ctx, actor, id, ActManageMembers)
+	_, am, d, err := s.as(ctx, actor, id, ActManageMembers)
 	if err != nil {
 		return err
 	}
-	if _, err := s.target(ctx, d, user); err != nil {
+	t, err := s.target(ctx, d, user)
+	if err != nil {
 		return err
 	}
-	return s.repo.RemoveMember(ctx, d, user)
+	if !canManageRole(am.Role, t.Role) {
+		return data.ErrForbidden
+	}
+	if err := s.repo.RemoveMember(ctx, d, user); err != nil {
+		return err
+	}
+	s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
+	return nil
 }
 
 // Leave removes actor from the session. The GM cannot leave; they delete the session.
@@ -426,20 +475,28 @@ func (s *Sessions) Leave(ctx context.Context, actor, id string) error {
 	if !Allowed(m.Role, ActLeave) {
 		return invalid("the GM cannot leave; delete the session instead")
 	}
-	return s.repo.RemoveMember(ctx, d, actor)
+	if err := s.repo.RemoveMember(ctx, d, actor); err != nil {
+		return err
+	}
+	s.syncRevoke(ctx, m.Role, d.SessionID(), actor, m.Role)
+	return nil
 }
 
 // Block keeps user out of the session, removing them and any pending request.
 func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
-	_, _, d, err := s.as(ctx, actor, id, ActBlock)
+	_, am, d, err := s.as(ctx, actor, id, ActBlock)
 	if err != nil {
 		return err
 	}
 	if user == actor {
 		return invalid("you cannot block yourself")
 	}
-	if _, err := s.target(ctx, d, user); err != nil && !errors.Is(err, data.ErrNotFound) {
+	t, err := s.target(ctx, d, user)
+	if err != nil && !errors.Is(err, data.ErrNotFound) {
 		return err
+	}
+	if err == nil && !canManageRole(am.Role, t.Role) {
+		return data.ErrForbidden
 	}
 	if err := s.repo.AddBlock(ctx, d, user); err != nil {
 		return err
@@ -447,7 +504,10 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	if err := s.repo.DropRequest(ctx, d, user); err != nil {
 		return err
 	}
-	if err := s.repo.RemoveMember(ctx, d, user); err != nil && !errors.Is(err, data.ErrNotFound) {
+	switch err := s.repo.RemoveMember(ctx, d, user); {
+	case err == nil:
+		s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
+	case !errors.Is(err, data.ErrNotFound):
 		return err
 	}
 	return nil
