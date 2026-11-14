@@ -62,6 +62,12 @@ func (r *Sessions) LookupSessions(ctx context.Context, ids []string) (map[string
 	return out, nil
 }
 
+// liveGMFilter matches live GM member records of the sessions in session (an id or an $in). The
+// live predicate lets Mongo use the partial session_user index; deleted_at alone would scan.
+func liveGMFilter(session any) bson.D {
+	return bson.D{{Key: "session_id", Value: session}, {Key: "role", Value: RoleGM}, {Key: "live", Value: bson.D{{Key: "$exists", Value: true}}}}
+}
+
 // SessionsWithGM returns the IDs among ids that have a live GM member record. Reconciler only.
 func (r *Sessions) SessionsWithGM(ctx context.Context, ids []string) (map[string]bool, error) {
 	in := make(bson.A, 0, len(ids))
@@ -69,8 +75,7 @@ func (r *Sessions) SessionsWithGM(ctx context.Context, ids []string) (map[string
 		in = append(in, id)
 	}
 	var gms []Member
-	filter := bson.D{{Key: "session_id", Value: bson.D{{Key: "$in", Value: in}}}, {Key: "role", Value: RoleGM}, {Key: "deleted_at", Value: nil}}
-	if err := r.members.Find(ctx, filter, store.FindOptions{}, &gms); err != nil {
+	if err := r.members.Find(ctx, liveGMFilter(bson.D{{Key: "$in", Value: in}}), store.FindOptions{}, &gms); err != nil {
 		return nil, err
 	}
 	out := make(map[string]bool, len(gms))
@@ -106,7 +111,7 @@ func (r *Sessions) RemoveGMLess(ctx context.Context, sessionID string) error {
 		return ErrConflict // too young: Open may still be between its two inserts
 	}
 	var gm Member
-	switch err := r.members.FindOne(ctx, bson.D{{Key: "session_id", Value: id}, {Key: "role", Value: RoleGM}, {Key: "live", Value: bson.D{{Key: "$exists", Value: true}}}}, &gm); {
+	switch err := r.members.FindOne(ctx, liveGMFilter(id), &gm); {
 	case err == nil:
 		return ErrConflict
 	case !errors.Is(err, store.ErrNotFound):
