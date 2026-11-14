@@ -11,6 +11,7 @@ resources:
   - ingress.yaml
   - middlewares.yaml
   - reconciler.yaml
+  - reconciler-alert.yaml
   - secrets.yaml
 
 labels:

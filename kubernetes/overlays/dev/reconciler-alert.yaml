@@ -1,0 +1,40 @@
+# Alerts when the OpenFGA tuple reconciler stops succeeding (PADR-0040 section 5). While it is
+# stopped, deleted tuples are not restored and mint garbage is not collected. Causes: the
+# operator-minted token expired (the job exits 3), the job is failing, or the CronJob is suspended.
+# Prometheus picks rules up by the release=prometheus label (kube-prometheus-stack ruleSelector).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+
+metadata:
+  name: initiative-reconciler
+  labels:
+    release: prometheus
+
+spec:
+  groups:
+    - name: initiative-reconciler
+      rules:
+        - alert: InitiativeReconcilerStalled
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="sweetrpg-initiative", cronjob="reconciler"} > 900
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: The Initiative tuple reconciler has not succeeded in 15 minutes
+            description: >-
+              Check the latest reconciler Job in sweetrpg-initiative. Exit code 3 means auth-api
+              rejected the reconciler token: mint a new one (PADR-0038).
+        - alert: InitiativeReconcilerNeverSucceeded
+          expr: absent(kube_cronjob_status_last_successful_time{namespace="sweetrpg-initiative", cronjob="reconciler"})
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The Initiative tuple reconciler has no successful run on record
+        - alert: InitiativeReconcilerSuspended
+          expr: kube_cronjob_spec_suspend{namespace="sweetrpg-initiative", cronjob="reconciler"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The Initiative tuple reconciler CronJob is suspended

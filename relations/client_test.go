@@ -199,3 +199,14 @@ func TestSessionCallsMapAuthAPIAnswers(t *testing.T) {
 		t.Errorf("no token = %v, want ErrUnauthorized", err)
 	}
 }
+
+func TestAMalformedRequestIsRejectedNotRetryable(t *testing.T) {
+	var got struct{ Method, Path, Auth, Body string }
+	c := sessionServer(t, http.StatusBadRequest, `{"error":"invalid_request"}`, &got)
+
+	err := c.WriteTuples(context.Background(), "tok", "0123456789abcdef01234567", nil, nil)
+
+	if !errors.Is(err, ErrRejected) || errors.Is(err, ErrUnavailable) {
+		t.Fatalf("400 = %v, want ErrRejected and not ErrUnavailable", err)
+	}
+}

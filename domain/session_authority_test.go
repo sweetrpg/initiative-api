@@ -344,3 +344,18 @@ func TestAuthAPIRefusalsOnAGrantAreReturnedNotHiddenAsPending(t *testing.T) {
 		}
 	}
 }
+
+func TestAMalformedTupleRequestIsNotReportedAsAPendingSync(t *testing.T) {
+	fa := &fakeAuth{}
+	s, id := seat(t, fa, nil)
+	ctx := withAuth(fa)
+	_, code, _ := s.CreateInvite(ctx, "gm", id, 0)
+	jr, _ := s.Join(ctx, "p1", code)
+	fa.failW = relations.ErrRejected
+
+	_, err := s.Approve(ctx, "gm", id, jr.ID, data.RolePlayer)
+
+	if !errors.Is(err, relations.ErrRejected) || errors.Is(err, ErrSyncPending) {
+		t.Fatalf("approve = %v, want the rejection, not a retryable pending sync", err)
+	}
+}

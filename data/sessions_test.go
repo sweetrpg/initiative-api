@@ -457,3 +457,53 @@ func TestOpenRemovesTheSessionWhenTheGMInsertFails(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionMembersReadsOneSessionIncludingDeleted(t *testing.T) {
+	r, id := newSessionRepo(t)
+	other := &Session{Name: "Other"}
+	if err := r.owned.Create(ctx, "gm2", "gm2", other); err != nil {
+		t.Fatal(err)
+	}
+	gm := dc(t, "gm", id)
+	for _, u := range []string{"u1", "u2"} {
+		if _, err := r.AddMember(ctx, gm, u, RolePlayer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.AddMember(ctx, dc(t, "gm2", other.ID), "u9", RolePlayer); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RemoveMember(ctx, gm, "u2"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.SessionMembers(ctx, id)
+
+	if err != nil || len(got) != 2 {
+		t.Fatalf("members = %+v, %v; want u1 and the deleted u2, and nothing from the other session", got, err)
+	}
+	if _, err := r.SessionMembers(ctx, "junk"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("bad id = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLookupSessionsReportsLiveDeletedAndMissing(t *testing.T) {
+	r, live := newSessionRepo(t)
+	gone := &Session{Name: "Gone"}
+	if err := r.owned.Create(ctx, "gm", "gm", gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SoftDelete(ctx, dc(t, "gm", gone.ID), 1); err != nil {
+		t.Fatal(err)
+	}
+	missing := "0123456789abcdef01234567"
+
+	got, err := r.LookupSessions(ctx, []string{live, gone.ID, missing})
+
+	if err != nil || len(got) != 2 || got[live] || !got[gone.ID] {
+		t.Fatalf("lookup = %+v, %v; want live=false, deleted=true, missing absent", got, err)
+	}
+	if _, present := got[missing]; present {
+		t.Errorf("a missing id is present in %+v", got)
+	}
+}

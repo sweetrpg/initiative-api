@@ -75,7 +75,8 @@ func (s *Sessions) syncGrant(ctx context.Context, actorRole, sessionID, user, ro
 	case err == nil:
 		return nil
 	case errors.Is(err, relations.ErrUnauthorized), errors.Is(err, relations.ErrDenied),
-		errors.Is(err, relations.ErrLimited), errors.Is(err, relations.ErrConflict):
+		errors.Is(err, relations.ErrLimited), errors.Is(err, relations.ErrConflict),
+		errors.Is(err, relations.ErrRejected):
 		// auth-api answered with a refusal the client should see as such (401, 403, 429, 409
 		// session_full). Mongo is already written, so the member is denied until the tuple exists,
 		// which is the safe direction; the reconciler repairs it. Only an outage is "pending".

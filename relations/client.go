@@ -41,6 +41,9 @@ var (
 	// ErrConflict means auth-api refused the change as conflicting (the session's tuple cap).
 	// Callers answer 409.
 	ErrConflict = errors.New("relations: conflict")
+	// ErrRejected means auth-api answered 400: this service sent a malformed request, so retrying
+	// the same call never helps. Callers answer 500.
+	ErrRejected = errors.New("relations: request rejected as malformed")
 )
 
 // Client calls auth-api. The zero value is not usable; use New.
@@ -227,6 +230,9 @@ func (c *Client) call(ctx context.Context, method, path, token string, body any,
 		return ErrLimited
 	case http.StatusConflict:
 		return ErrConflict
+	case http.StatusBadRequest:
+		slog.ErrorContext(ctx, "auth-api rejected a session call as malformed", "path", path)
+		return ErrRejected
 	}
 	slog.WarnContext(ctx, "auth-api rejected a session call", "path", path, "status", resp.StatusCode)
 	return ErrUnavailable

@@ -37,14 +37,16 @@ func run() int {
 	database.SetupDatabase()
 	defer database.TeardownDatabase()
 
+	// Under the CronJob's activeDeadlineSeconds (270); the last minute is reserved for mint
+	// garbage collection (reconcile.Reconciler.GCReserve).
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	r := reconcile.Reconciler{
-		Members: data.NewSessions(store.MongoDatabase{DB: database.Db}),
-		Tuples:  reconcile.NewAuthAPI(authURL, token),
-	}
+	sessions := data.NewSessions(store.MongoDatabase{DB: database.Db})
+	api := reconcile.NewAuthAPI(authURL, token)
+	r := reconcile.Reconciler{Members: sessions, Tuples: api, Mints: api, Sessions: sessions}
 	res, err := r.Run(ctx)
-	logging.Logger.Info("reconcile finished", "sessions", res.Sessions, "written", res.Written, "deleted", res.Deleted, "failed", res.Failed)
+	logging.Logger.Info("reconcile finished", "sessions", res.Sessions, "written", res.Written, "deleted", res.Deleted, "failed", res.Failed,
+		"mints_closed", res.MintsClosed, "mints_skipped", res.MintsSkipped)
 	switch {
 	case errors.Is(err, reconcile.ErrTokenRejected):
 		logging.Logger.Error("reconciler token rejected or expired; an operator must mint a new one")
