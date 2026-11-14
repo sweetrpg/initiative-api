@@ -78,10 +78,32 @@ func (a *AuthAPI) do(ctx context.Context, method, path string, body []byte, out 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return ErrTokenRejected
-	case resp.StatusCode != http.StatusOK:
+	case resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent:
 		return fmt.Errorf("auth-api %s: status %d", path, resp.StatusCode)
 	case out == nil:
 		return nil
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out)
+}
+
+// ListMints returns one page of open mints at least minAge old (by auth-api's clock) after the
+// cursor, and the cursor for the next page, empty on the last.
+func (a *AuthAPI) ListMints(ctx context.Context, minAge time.Duration, after string) ([]Mint, string, error) {
+	q := url.Values{"min_age": {minAge.String()}, "limit": {"200"}}
+	if after != "" {
+		q.Set("after", after)
+	}
+	var page struct {
+		Mints []Mint `json:"mints"`
+		Next  string `json:"next"`
+	}
+	if err := a.do(ctx, http.MethodGet, "/internal/openfga/session-mints?"+q.Encode(), nil, &page); err != nil {
+		return nil, "", err
+	}
+	return page.Mints, page.Next, nil
+}
+
+// CloseMint deletes every tuple on the minted session and closes its mint.
+func (a *AuthAPI) CloseMint(ctx context.Context, id string) error {
+	return a.do(ctx, http.MethodPost, "/internal/openfga/session-mints/"+url.PathEscape(id)+"/close", nil, nil)
 }
