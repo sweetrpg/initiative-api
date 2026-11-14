@@ -24,7 +24,7 @@ spec:
             summary: The Initiative tuple reconciler has not succeeded in 15 minutes
             description: >-
               Check the latest reconciler Job in sweetrpg-initiative. Exit code 3 means auth-api
-              rejected a freshly fetched token: check the initiative-reconciler role, deny entries and the login_profiles mapping (PADR-0041).
+              rejected the reconciler token: check the initiative-reconciler role, deny entries and the login_profiles mapping (PADR-0041).
         - alert: InitiativeReconcilerNeverSucceeded
           expr: absent(kube_cronjob_status_last_successful_time{namespace="sweetrpg-initiative", cronjob="reconciler"})
           for: 15m

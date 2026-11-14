@@ -1,7 +1,7 @@
 // Command reconciler runs one OpenFGA tuple reconciliation pass and exits (PADR-0035, PADR-0038).
 // It authenticates to auth-api as an Auth0 machine-to-machine client and caches the token in Redis
 // (PADR-0041). Exit codes: 1 pass failed or Auth0/Redis failed, 2 missing configuration, 3 auth-api
-// rejected a freshly fetched token. Any non-zero exit shows on the CronJob and fires the alert.
+// rejected the token. Any non-zero exit shows on the CronJob and fires the alert.
 package main
 
 import (
@@ -44,7 +44,7 @@ func run() int {
 		"mints_closed", res.MintsClosed, "mints_skipped", res.MintsSkipped)
 	switch {
 	case errors.Is(err, reconcile.ErrTokenRejected):
-		logging.Logger.Error("auth-api rejected a freshly fetched reconciler token; check the initiative-reconciler role, deny entries and login_profiles mapping (PADR-0041)")
+		logging.Logger.Error("auth-api rejected the reconciler token (401, 403, or a rejection recorded in the last hour); check the initiative-reconciler role, deny entries, login_profiles mapping and audience (PADR-0041)")
 		return 3
 	case err != nil:
 		logging.Logger.Error("reconcile failed", "error", err.Error())
@@ -73,8 +73,8 @@ func loadSettings(get func(string) string) (settings, error) {
 			return settings{}, errors.New(f.name + " is required")
 		}
 	}
-	if u, err := url.Parse(s.tokenURL); err != nil || u.Scheme != "https" || u.Host == "" {
-		return settings{}, errors.New("RECONCILER_TOKEN_URL must be an https URL")
+	if u, err := url.Parse(s.tokenURL); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return settings{}, errors.New("RECONCILER_TOKEN_URL must be an https URL without credentials")
 	}
 	return s, nil
 }

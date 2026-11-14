@@ -28,6 +28,11 @@ const (
 	// spend the monthly token allowance. Delete it to retry sooner.
 	rejectedKey = "reconciler:rejected"
 	rejectedTTL = time.Hour
+	// fetchGuardKey is set (NX, 60s) before every Auth0 call. A Redis that cannot take writes then
+	// stops the run before Auth0 is called, and a working one limits fetches to one a minute, so a
+	// cache that silently fails to store cannot cost a token per run.
+	fetchGuardKey = "reconciler:fetch-guard"
+	fetchGuardTTL = 60 * time.Second
 	// maxLifetime caps a lifetime Auth0 reports, so a bad value cannot cache a token for years.
 	maxLifetime = 30 * 24 * time.Hour
 )
@@ -39,8 +44,9 @@ type TokenSource interface {
 	// Refresh discards the current token after auth-api answered 401 and returns a new one. It
 	// returns ErrNoRefresh when a replacement cannot help, such as a token fetched this run.
 	Refresh(ctx context.Context) (string, error)
-	// Rejected records that auth-api rejected a token fetched this run, so later runs stop.
-	Rejected(ctx context.Context)
+	// Rejected records that auth-api rejected a token fetched this run, so later runs stop. It
+	// returns an error when the record could not be written.
+	Rejected(ctx context.Context) error
 	// Accepted records that auth-api accepted the token, ending any earlier rejection.
 	Accepted(ctx context.Context)
 }
@@ -58,7 +64,7 @@ func (s StaticToken) Token(context.Context) (string, error) { return string(s), 
 func (s StaticToken) Refresh(context.Context) (string, error) { return "", ErrNoRefresh }
 
 // Rejected does nothing for a fixed token.
-func (s StaticToken) Rejected(context.Context) {}
+func (s StaticToken) Rejected(context.Context) error { return nil }
 
 // Accepted does nothing for a fixed token.
 func (s StaticToken) Accepted(context.Context) {}
@@ -134,14 +140,15 @@ func (c *ClientCredentials) Refresh(ctx context.Context) (string, error) {
 }
 
 // Rejected clears the bad cached token and sets the rejection marker, so no run calls Auth0 for an
-// hour. Best effort: a Redis failure is logged, and the stall alert still fires.
-func (c *ClientCredentials) Rejected(ctx context.Context) {
+// hour. The fetch guard still limits Auth0 calls to one a minute if the marker cannot be written.
+func (c *ClientCredentials) Rejected(context.Context) error {
 	conn := c.Pool.Get()
 	defer func() { _ = conn.Close() }()
 	_ = conn.Send("DEL", tokenCacheKey)
 	if _, err := conn.Do("SET", rejectedKey, "1", "EX", int64(rejectedTTL/time.Second)); err != nil {
-		slog.ErrorContext(ctx, "reconcile: could not record the token rejection", "error", err)
+		return fmt.Errorf("record token rejection: %w", err)
 	}
+	return nil
 }
 
 // Accepted deletes the rejection marker once per run.
@@ -182,6 +189,9 @@ func (c *ClientCredentials) cached() (string, error) {
 }
 
 func (c *ClientCredentials) fetchAndStore(ctx context.Context) (string, error) {
+	if err := c.takeFetchGuard(); err != nil {
+		return "", err
+	}
 	tok, lifetime, err := c.fetch(ctx)
 	if err != nil {
 		return "", err
@@ -197,6 +207,21 @@ func (c *ClientCredentials) fetchAndStore(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("cache token: %w", err)
 	}
 	return tok, nil
+}
+
+// takeFetchGuard claims the right to call Auth0. It fails when Redis cannot take the write or
+// another fetch happened in the last minute, in both cases before any Auth0 call.
+func (c *ClientCredentials) takeFetchGuard() error {
+	conn := c.Pool.Get()
+	defer func() { _ = conn.Close() }()
+	reply, err := redis.String(conn.Do("SET", fetchGuardKey, "1", "NX", "EX", int64(fetchGuardTTL/time.Second)))
+	if errors.Is(err, redis.ErrNil) {
+		return fmt.Errorf("a token was fetched in the last %v; not calling Auth0 again", fetchGuardTTL)
+	}
+	if err != nil || reply != "OK" {
+		return fmt.Errorf("fetch guard: redis cannot take writes, not calling Auth0: %v", err)
+	}
+	return nil
 }
 
 // fetch requests a token from Auth0. Errors carry the status, never the response body or secret.
@@ -228,6 +253,9 @@ func (c *ClientCredentials) fetch(ctx context.Context) (string, time.Duration, e
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&out); err != nil || strings.TrimSpace(out.AccessToken) == "" || !strings.EqualFold(out.TokenType, "Bearer") {
 		return "", 0, errors.New("token endpoint returned no bearer access token")
+	}
+	if out.ExpiresIn <= 0 {
+		return "", 0, errors.New("token endpoint returned no token lifetime")
 	}
 	return out.AccessToken, time.Duration(min(out.ExpiresIn, int64(maxLifetime/time.Second))) * time.Second, nil
 }

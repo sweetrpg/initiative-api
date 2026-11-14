@@ -323,3 +323,86 @@ func TestAnUnreachableAuth0NamesTheFailureClassNotTheURL(t *testing.T) {
 		t.Fatalf("err = %v, want the class and no URL", err)
 	}
 }
+
+// readOnlyFor fails SET on the named keys (all keys when none are named), as a READONLY replica
+// or a full noeviction Redis would, while reads keep working.
+type readOnlyFor struct {
+	redis.Conn
+	keys []string
+}
+
+func (r readOnlyFor) Do(cmd string, args ...any) (any, error) {
+	if strings.EqualFold(cmd, "SET") && len(args) > 0 {
+		if len(r.keys) == 0 {
+			return nil, errors.New("READONLY You can't write against a read only replica")
+		}
+		for _, k := range r.keys {
+			if args[0] == k {
+				return nil, errors.New("OOM command not allowed when used memory > 'maxmemory'")
+			}
+		}
+	}
+	return r.Conn.Do(cmd, args...)
+}
+
+func sourceWithBrokenSet(t *testing.T, f *fakeAuth0, mr *miniredis.Miniredis, keys ...string) *ClientCredentials {
+	t.Helper()
+	addr := mr.Addr()
+	pool := &redis.Pool{Dial: func() (redis.Conn, error) {
+		c, err := redis.Dial("tcp", addr)
+		return readOnlyFor{Conn: c, keys: keys}, err
+	}}
+	t.Cleanup(func() { _ = pool.Close() })
+	return NewClientCredentials(f.srv.URL, "client-id", testSecret, "aud", pool)
+}
+
+func TestARedisThatCannotTakeWritesStopsTheRunBeforeAnyAuth0Call(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+
+	for i := 0; i < 3; i++ { // separate instances, as separate runs
+		if _, err := sourceWithBrokenSet(t, f, mr).Token(context.Background()); err == nil {
+			t.Fatal("err = nil, want a failure")
+		}
+	}
+
+	if f.calls != 0 {
+		t.Fatalf("auth0 calls = %d, want 0 while Redis rejects writes", f.calls)
+	}
+}
+
+func TestTheFetchGuardLimitsAuth0ToOneCallAMinute(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+	f.expiresIn = 100 // too short to cache, so every run wants a fetch
+
+	_, err1 := newSource(t, f, mr).Token(context.Background())
+	_, err2 := newSource(t, f, mr).Token(context.Background())
+	mr.FastForward(fetchGuardTTL + time.Second)
+	_, err3 := newSource(t, f, mr).Token(context.Background())
+
+	if err1 != nil || err2 == nil || err3 != nil || f.calls != 2 {
+		t.Fatalf("err1=%v err2=%v err3=%v calls=%d; want fetch, blocked, fetch after the guard expires", err1, err2, err3, f.calls)
+	}
+}
+
+func TestAFailedRejectionMarkerWriteIsReportedWithTheRejection(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+	srv, _ := authAPIAccepting(t)
+
+	_, err := NewAuthAPIWithSource(srv.URL, sourceWithBrokenSet(t, f, mr, rejectedKey)).Read(context.Background(), "session:s1")
+
+	if !errors.Is(err, ErrTokenRejected) || !strings.Contains(err.Error(), "record token rejection") {
+		t.Fatalf("err = %v, want ErrTokenRejected noting the failed marker write", err)
+	}
+	if mr.Exists(rejectedKey) {
+		t.Error("the marker exists although its write failed")
+	}
+}
+
+func TestATokenWithNoLifetimeIsRefused(t *testing.T) {
+	f, mr := newFakeAuth0(t), miniredis.RunT(t)
+	f.expiresIn = 0
+
+	if _, err := newSource(t, f, mr).Token(context.Background()); err == nil {
+		t.Fatal("err = nil, want a refusal")
+	}
+}

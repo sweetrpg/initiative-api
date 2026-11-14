@@ -32,7 +32,7 @@ func TestLoadSettingsNamesEachMissingVariable(t *testing.T) {
 }
 
 func TestLoadSettingsRejectsAnInsecureTokenURLWithoutEchoingTheSecret(t *testing.T) {
-	for _, u := range []string{"http://tenant.example/oauth/token", "ftp://x/y", "https://", "not a url"} {
+	for _, u := range []string{"http://tenant.example/oauth/token", "ftp://x/y", "https://", "https://user:pw@tenant.example/oauth/token", "not a url"} {
 		_, err := loadSettings(env(map[string]string{"RECONCILER_TOKEN_URL": u}))
 		if err == nil || strings.Contains(err.Error(), "secret") {
 			t.Errorf("token url %q: err = %v, want a rejection", u, err)

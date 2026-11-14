@@ -80,19 +80,26 @@ func (a *AuthAPI) do(ctx context.Context, method, path string, body []byte, out 
 		fresh, rerr := a.Tokens.Refresh(ctx)
 		switch {
 		case errors.Is(rerr, ErrNoRefresh):
-			a.Tokens.Rejected(ctx)
-			return ErrTokenRejected
+			return a.rejected(ctx)
 		case rerr != nil:
 			return fmt.Errorf("reconciler token: %w", rerr)
 		}
 		if status, err = a.send(ctx, method, path, body, fresh, out); status == http.StatusUnauthorized {
-			a.Tokens.Rejected(ctx)
+			return a.rejected(ctx)
 		}
 	}
 	if err == nil {
 		a.Tokens.Accepted(ctx)
 	}
 	return err
+}
+
+// rejected records the rejection and returns ErrTokenRejected, noting when the record failed.
+func (a *AuthAPI) rejected(ctx context.Context) error {
+	if err := a.Tokens.Rejected(ctx); err != nil {
+		return fmt.Errorf("%w (%v)", ErrTokenRejected, err)
+	}
+	return ErrTokenRejected
 }
 
 // send makes one call and returns the HTTP status (0 when none arrived) with its error.
