@@ -104,8 +104,9 @@ func (r *Sessions) RemoveGMLess(ctx context.Context, sessionID string) error {
 	case !errors.Is(err, store.ErrNotFound):
 		return err
 	}
-	if err := r.owned.SoftDelete(ctx, s.OwnerUserID, models.SystemActor, id, s.Revision); err != nil {
+	// Records first: a failure here leaves the session live, so the next pass finds it again.
+	if err := r.dropRecords(ctx, id, models.SystemActor); err != nil {
 		return err
 	}
-	return r.dropRecords(ctx, id, models.SystemActor)
+	return r.owned.SoftDelete(ctx, s.OwnerUserID, models.SystemActor, id, s.Revision)
 }
