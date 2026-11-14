@@ -4,8 +4,8 @@
 // reads the tuples on each session, then that session's current memberships, diffs them, and
 // applies the difference, so a failed pass is finished by the next one. Reading tuples first means
 // a grant or revoke that lands between the two reads is, at worst, corrected by the next pass
-// (two narrow interleavings remain, accepted by PADR-0040 section 4). After the tuple pass it collects session mints that never became
-// sessions (PADR-0040 section 1).
+// (two narrow interleavings remain, accepted by PADR-0040 section 4). After the tuple pass it
+// collects session mints that never became sessions (PADR-0040 section 1).
 package reconcile
 
 import (
@@ -157,7 +157,14 @@ func (r Reconciler) Run(ctx context.Context) (Result, error) {
 		return Result{}, err
 	}
 	res := Result{Sessions: len(ids)}
-	for _, id := range ids {
+	for i, id := range ids {
+		if tupleCtx.Err() != nil {
+			// The tuple pass's budget is spent: one line and one failure per session left, so the
+			// job fails and garbage collection (on the full context) still runs.
+			res.Failed += len(ids) - i
+			slog.ErrorContext(ctx, "reconcile: tuple pass ran out of time", "done", i, "left", len(ids)-i)
+			break
+		}
 		w, d, err := r.one(tupleCtx, id)
 		res.Written += w
 		res.Deleted += d

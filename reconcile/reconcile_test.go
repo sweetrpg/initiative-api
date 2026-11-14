@@ -400,3 +400,17 @@ func TestGarbageCollectionStillRunsWhenTheTuplePassUsesItsBudget(t *testing.T) {
 		t.Fatalf("res=%+v closed=%v; want the orphan closed from the reserved slice of the deadline", res, mints.closed)
 	}
 }
+
+func TestAnExhaustedTuplePassFailsTheRestWithOneLogLineAndStillCollects(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	mints := &fakeMints{pages: [][]Mint{{{ID: "00000000000000000000000d"}}}}
+	members := fakeMembers{member("s1", "u1", "gm"), member("s2", "u1", "gm"), member("s3", "u1", "gm")}
+	r := Reconciler{members, &blockingTuples{}, mints, &fakeSessionLookup{found: map[string]bool{}}, 400 * time.Millisecond}
+
+	res, err := r.Run(ctx)
+
+	if err == nil || res.Failed != 3 || len(mints.closed) != 1 {
+		t.Fatalf("res=%+v err=%v closed=%v; want 3 failed sessions (one blocked, two skipped) and garbage collection still run", res, err, mints.closed)
+	}
+}
