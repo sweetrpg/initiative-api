@@ -507,3 +507,83 @@ func TestLookupSessionsReportsLiveDeletedAndMissing(t *testing.T) {
 		t.Errorf("a missing id is present in %+v", got)
 	}
 }
+
+func TestGMlessSessionsListsOnlyOldLiveSessionsWithoutAGM(t *testing.T) {
+	db := fake.NewDB()
+	r := NewSessions(db)
+	clk := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	r.owned.now = func() time.Time { return clk }
+	open := func(id, owner string, withGM bool) {
+		t.Helper()
+		s := &Session{Name: id}
+		if err := r.owned.createWithID(ctx, owner, owner, id, s); err != nil {
+			t.Fatal(err)
+		}
+		if withGM {
+			m := Member{ID: newID(), SessionID: id, UserID: owner, Role: RoleGM, CreatedAt: clk, CreatedBy: owner, Live: true}
+			if err := r.members.InsertOne(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	open("00000000000000000000000a", "gm1", false) // old, no GM
+	open("00000000000000000000000b", "gm2", true)  // old, has a GM
+	r.owned.now = func() time.Time { return clk.Add(time.Hour) }
+	open("00000000000000000000000c", "gm3", false) // young, no GM
+	open("00000000000000000000000d", "gm4", false)
+	if err := r.owned.SoftDelete(ctx, "gm4", "gm4", "00000000000000000000000d", 1); err != nil { // deleted
+		t.Fatal(err)
+	}
+
+	got, err := r.GMlessSessions(ctx, clk.Add(time.Minute))
+
+	if err != nil || len(got) != 1 || got[0] != "00000000000000000000000a" {
+		t.Fatalf("gm-less = %v, %v; want only the old live session with no GM", got, err)
+	}
+}
+
+func TestReapGMlessSessionRemovesTheSessionAndEverythingUnderItButNotOneWithAGM(t *testing.T) {
+	db := fake.NewDB()
+	r := NewSessions(db)
+	const bare, healthy = "00000000000000000000000a", "00000000000000000000000b"
+	for _, id := range []string{bare, healthy} {
+		if err := r.owned.createWithID(ctx, "gm", "gm", id, &Session{Name: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.members.InsertOne(ctx, Member{ID: newID(), SessionID: healthy, UserID: "gm", Role: RoleGM, Live: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.members.InsertOne(ctx, Member{ID: newID(), SessionID: bare, UserID: "p1", Role: RolePlayer, Live: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	done, err := r.ReapGMlessSession(ctx, bare)
+	if err != nil || !done {
+		t.Fatalf("reap bare = %v, %v; want true", done, err)
+	}
+	if kept, err := r.ReapGMlessSession(ctx, healthy); err != nil || kept {
+		t.Fatalf("reap a session with a GM = %v, %v; want false", kept, err)
+	}
+	if again, err := r.ReapGMlessSession(ctx, bare); err != nil || again {
+		t.Errorf("reaping twice = %v, %v; want false (already gone)", again, err)
+	}
+
+	for _, d := range db.Fake(CollectionSessions).Docs() {
+		deleted := d["deleted_at"] != nil
+		if (d["_id"] == bare) != deleted {
+			t.Errorf("session %v deleted=%v", d["_id"], deleted)
+		}
+		if d["_id"] == bare && d["deleted_by"] != "system" {
+			t.Errorf("deleted_by = %v, want the system actor", d["deleted_by"])
+		}
+	}
+	for _, d := range db.Fake(CollectionSessionMembers).Docs() {
+		if d["session_id"] == bare && d["deleted_at"] == nil {
+			t.Errorf("a member of the reaped session was left live: %v", d)
+		}
+	}
+	if gone, err := r.ReapGMlessSession(ctx, "junk"); !errors.Is(err, ErrNotFound) || gone {
+		t.Errorf("bad id = %v, %v; want ErrNotFound", gone, err)
+	}
+}

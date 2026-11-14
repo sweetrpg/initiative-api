@@ -73,6 +73,15 @@ type Mints interface {
 	CloseMint(ctx context.Context, id string) error
 }
 
+// Reaper finds and removes live sessions with no live GM member record, which nobody can delete.
+type Reaper interface {
+	// GMlessSessions lists live sessions created before createdBefore with no live GM record.
+	GMlessSessions(ctx context.Context, createdBefore time.Time) ([]string, error)
+	// ReapGMlessSession re-checks the session and, if it is still GM-less, soft-deletes it and
+	// everything under it. It reports whether it did.
+	ReapGMlessSession(ctx context.Context, id string) (bool, error)
+}
+
 // Sessions looks sessions up by ID in the sessions collection, soft-deleted ones included.
 type Sessions interface {
 	// LookupSessions maps each found ID to whether it is soft-deleted. A missing ID is absent.
@@ -96,6 +105,8 @@ type Reconciler struct {
 	// GCReserve is how much of ctx's deadline the tuple pass leaves for garbage collection; zero
 	// means 60 seconds. It has no effect when ctx has no deadline.
 	GCReserve time.Duration
+	// Reaper enables removal of GM-less sessions (it needs Mints to close their mints); nil skips it.
+	Reaper Reaper
 }
 
 // Result counts one pass.
@@ -104,6 +115,8 @@ type Result struct {
 	// MintsClosed counts mints garbage collection closed; MintsSkipped counts those it left for
 	// the next pass because the sessions lookup failed.
 	MintsClosed, MintsSkipped int
+	// SessionsReaped counts GM-less sessions removed.
+	SessionsReaped int
 }
 
 var roleRelations = map[string]bool{data.RoleGM: true, data.RoleCoGM: true, data.RolePlayer: true, data.RoleObserver: true}
@@ -180,10 +193,51 @@ func (r Reconciler) Run(ctx context.Context) (Result, error) {
 	if err := r.collect(ctx, &res); err != nil {
 		return res, err
 	}
+	if err := r.reap(ctx, &res); err != nil {
+		return res, err
+	}
 	if res.Failed > 0 {
 		return res, fmt.Errorf("reconcile: %d failures across %d sessions", res.Failed, res.Sessions)
 	}
 	return res, nil
+}
+
+// reap removes live sessions that have had no live GM record for mintMinAge: a failed GM insert
+// whose rollback also failed leaves one, which no member can delete (as() refuses everyone) and
+// which still counts against sessions_per_gm. Each is soft-deleted with its records, then its mint
+// is closed, which deletes every tuple on it. A mint close that fails is retried next pass because
+// the mint stays open and garbage collection finds the deleted session.
+func (r Reconciler) reap(ctx context.Context, res *Result) error {
+	if r.Reaper == nil || r.Mints == nil {
+		return nil
+	}
+	ids, err := r.Reaper.GMlessSessions(ctx, time.Now().UTC().Add(-mintMinAge))
+	if err != nil {
+		res.Failed++
+		slog.ErrorContext(ctx, "reconcile: listing GM-less sessions failed", "error", err)
+		return nil
+	}
+	for _, id := range ids {
+		reaped, err := r.Reaper.ReapGMlessSession(ctx, id)
+		if err != nil {
+			res.Failed++
+			slog.ErrorContext(ctx, "reconcile: reaping a GM-less session failed", "session", id, "error", err)
+			continue
+		}
+		if !reaped {
+			continue
+		}
+		res.SessionsReaped++
+		slog.WarnContext(ctx, "reconcile: removed a live session with no GM member", "session", id)
+		if err := r.Mints.CloseMint(ctx, id); err != nil {
+			if errors.Is(err, ErrTokenRejected) {
+				return err
+			}
+			res.Failed++
+			slog.ErrorContext(ctx, "reconcile: closing the mint of a reaped session failed", "session", id, "error", err)
+		}
+	}
+	return nil
 }
 
 // tuplePassContext is ctx with its deadline moved earlier by the GC reserve, so the tuple pass

@@ -575,9 +575,15 @@ func (r *Sessions) DropSession(ctx context.Context, d Decision) error {
 	if err := d.require(relGM); err != nil {
 		return err
 	}
+	return r.dropRecords(ctx, d.session, d.actor)
+}
+
+// dropRecords soft-deletes every membership, invite, request, and block record of the session,
+// attributed to actor.
+func (r *Sessions) dropRecords(ctx context.Context, sessionID, actor string) error {
 	for _, c := range []store.Collection{r.members, r.invites, r.requests, r.blocks} {
 		for {
-			err := r.softDelete(ctx, c, sessionScope(d.session), d.actor)
+			err := r.softDelete(ctx, c, sessionScope(sessionID), actor)
 			if errors.Is(err, ErrNotFound) {
 				break
 			}

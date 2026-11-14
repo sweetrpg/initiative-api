@@ -65,7 +65,7 @@ func tup(session, user, rel string) Tuple {
 
 func TestMissingTupleIsWritten(t *testing.T) {
 	ft := &fakeTuples{}
-	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm"), member("s1", "u2", "player")}, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm"), member("s1", "u2", "player")}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if err != nil || res.Written != 2 || len(ft.writes) != 2 {
 		t.Fatalf("res=%+v err=%v writes=%v", res, err, ft.writes)
 	}
@@ -73,7 +73,7 @@ func TestMissingTupleIsWritten(t *testing.T) {
 
 func TestExtraTupleIsDeleted(t *testing.T) {
 	ft := &fakeTuples{have: map[string][]Tuple{"session:s1": {tup("s1", "u1", "gm"), tup("s1", "gone", "player")}}}
-	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if err != nil || res.Deleted != 1 || ft.deletes[0] != tup("s1", "gone", "player") || res.Written != 0 {
 		t.Fatalf("res=%+v err=%v deletes=%v", res, err, ft.deletes)
 	}
@@ -81,7 +81,7 @@ func TestExtraTupleIsDeleted(t *testing.T) {
 
 func TestRoleChangeReplacesTheOldTuple(t *testing.T) {
 	ft := &fakeTuples{have: map[string][]Tuple{"session:s1": {tup("s1", "u2", "player")}}}
-	_, err := Reconciler{fakeMembers{member("s1", "u2", "co_gm")}, ft, nil, nil, 0}.Run(context.Background())
+	_, err := Reconciler{fakeMembers{member("s1", "u2", "co_gm")}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if err != nil || len(ft.writes) != 1 || len(ft.deletes) != 1 || ft.calls != 1 {
 		t.Fatalf("err=%v writes=%v deletes=%v calls=%d; want one batch with both", err, ft.writes, ft.deletes, ft.calls)
 	}
@@ -89,7 +89,7 @@ func TestRoleChangeReplacesTheOldTuple(t *testing.T) {
 
 func TestEqualStateWritesNothing(t *testing.T) {
 	ft := &fakeTuples{have: map[string][]Tuple{"session:s1": {tup("s1", "u1", "gm")}}}
-	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if err != nil || ft.calls != 0 || res.Written+res.Deleted != 0 {
 		t.Fatalf("res=%+v err=%v calls=%d", res, err, ft.calls)
 	}
@@ -100,7 +100,7 @@ func TestDeletedMemberAndDeletedSessionLoseTheirTuples(t *testing.T) {
 	gone := member("s2", "u9", "player")
 	gone.DeletedAt = &now
 	ft := &fakeTuples{have: map[string][]Tuple{"session:s2": {tup("s2", "u9", "player")}}}
-	res, err := Reconciler{fakeMembers{gone}, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{gone}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if err != nil || res.Deleted != 1 {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
@@ -108,7 +108,7 @@ func TestDeletedMemberAndDeletedSessionLoseTheirTuples(t *testing.T) {
 
 func TestForeignTuplesAreLeftAlone(t *testing.T) {
 	ft := &fakeTuples{have: map[string][]Tuple{"session:s1": {tup("s1", "u1", "gm"), {User: "session:x", Relation: "parent", Object: "session:s1"}}}}
-	res, _ := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0}.Run(context.Background())
+	res, _ := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if res.Deleted != 0 {
 		t.Fatalf("deleted a tuple this job does not own: %+v", ft.deletes)
 	}
@@ -116,7 +116,7 @@ func TestForeignTuplesAreLeftAlone(t *testing.T) {
 
 func TestRejectedTokenStopsThePass(t *testing.T) {
 	ft := &fakeTuples{err: ErrTokenRejected}
-	_, err := Reconciler{fakeMembers{member("s1", "u1", "gm"), member("s2", "u1", "gm")}, ft, nil, nil, 0}.Run(context.Background())
+	_, err := Reconciler{fakeMembers{member("s1", "u1", "gm"), member("s2", "u1", "gm")}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if !errors.Is(err, ErrTokenRejected) {
 		t.Fatalf("err = %v, want ErrTokenRejected", err)
 	}
@@ -124,7 +124,7 @@ func TestRejectedTokenStopsThePass(t *testing.T) {
 
 func TestOneFailureDoesNotSkipTheRest(t *testing.T) {
 	ft := &fakeTuples{failObject: "session:s1"}
-	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm"), member("s2", "u1", "gm")}, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm"), member("s2", "u1", "gm")}, ft, nil, nil, 0, nil}.Run(context.Background())
 	if err == nil || res.Failed != 1 || len(ft.writes) != 1 || ft.writes[0].Object != "session:s2" {
 		t.Fatalf("res=%+v err=%v writes=%v", res, err, ft.writes)
 	}
@@ -136,7 +136,7 @@ func TestLargeDiffsAreBatched(t *testing.T) {
 		ms = append(ms, member("s1", "u"+string(rune('A'+i/26))+string(rune('a'+i%26)), "player"))
 	}
 	ft := &fakeTuples{}
-	res, err := Reconciler{ms, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{ms, ft, nil, nil, 0, nil}.Run(context.Background())
 	if err != nil || res.Written != 250 || ft.calls != 3 {
 		t.Fatalf("res=%+v err=%v calls=%d", res, err, ft.calls)
 	}
@@ -165,7 +165,7 @@ func (o orderTuples) Read(ctx context.Context, object string) ([]Tuple, error) {
 
 func TestTuplesAreReadBeforeTheSessionsMembers(t *testing.T) {
 	var log []string
-	r := Reconciler{orderMembers{fakeMembers{member("s1", "u1", "gm")}, &log}, orderTuples{&fakeTuples{}, &log}, nil, nil, 0}
+	r := Reconciler{orderMembers{fakeMembers{member("s1", "u1", "gm")}, &log}, orderTuples{&fakeTuples{}, &log}, nil, nil, 0, nil}
 
 	if _, err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestTuplesAreReadBeforeTheSessionsMembers(t *testing.T) {
 func TestAPlantedCoGMTupleWithNoMemberIsDeleted(t *testing.T) {
 	ft := &fakeTuples{have: map[string][]Tuple{"session:s1": {tup("s1", "u1", "gm"), tup("s1", "planted", "co_gm"), tup("s1", "planted2", "player")}}}
 
-	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{member("s1", "u1", "gm")}, ft, nil, nil, 0, nil}.Run(context.Background())
 
 	if err != nil || res.Deleted != 2 || len(ft.writes) != 0 {
 		t.Fatalf("res=%+v err=%v deletes=%v; want both planted tuples deleted", res, err, ft.deletes)
@@ -232,7 +232,7 @@ func (f *fakeSessionLookup) LookupSessions(_ context.Context, ids []string) (map
 }
 
 func gc(mints *fakeMints, lookup *fakeSessionLookup) (Result, error) {
-	return Reconciler{fakeMembers{}, &fakeTuples{}, mints, lookup, 0}.Run(context.Background())
+	return Reconciler{fakeMembers{}, &fakeTuples{}, mints, lookup, 0, nil}.Run(context.Background())
 }
 
 func TestGarbageCollectionClosesMissingAndDeletedButNeverLiveSessions(t *testing.T) {
@@ -327,7 +327,7 @@ func (l *loopMints) CloseMint(context.Context, string) error { return nil }
 func TestARepeatedMintCursorStopsThePagingAsAFailure(t *testing.T) {
 	l := &loopMints{}
 
-	res, err := Reconciler{fakeMembers{}, &fakeTuples{}, l, &fakeSessionLookup{}, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{}, &fakeTuples{}, l, &fakeSessionLookup{}, 0, nil}.Run(context.Background())
 
 	if err == nil || res.Failed != 1 || l.calls != 2 {
 		t.Fatalf("res=%+v err=%v calls=%d; want a counted failure after the cursor repeated", res, err, l.calls)
@@ -346,7 +346,7 @@ func (e *endlessMints) CloseMint(context.Context, string) error { return nil }
 func TestMintPagingIsCapped(t *testing.T) {
 	e := &endlessMints{}
 
-	res, err := Reconciler{fakeMembers{}, &fakeTuples{}, e, &fakeSessionLookup{}, 0}.Run(context.Background())
+	res, err := Reconciler{fakeMembers{}, &fakeTuples{}, e, &fakeSessionLookup{}, 0, nil}.Run(context.Background())
 
 	if err == nil || res.Failed != 1 || e.calls != maxMintPages {
 		t.Fatalf("res=%+v err=%v calls=%d; want a counted failure at %d pages", res, err, e.calls, maxMintPages)
@@ -372,7 +372,7 @@ func (failingMembers) SessionMembers(context.Context, string) ([]data.Member, er
 func TestAFailedMemberReadDeletesNothingAndCountsTheSessionFailed(t *testing.T) {
 	ft := &fakeTuples{have: map[string][]Tuple{"session:s1": {tup("s1", "u1", "gm")}}}
 
-	res, err := Reconciler{failingMembers{fakeMembers{member("s1", "u1", "gm")}}, ft, nil, nil, 0}.Run(context.Background())
+	res, err := Reconciler{failingMembers{fakeMembers{member("s1", "u1", "gm")}}, ft, nil, nil, 0, nil}.Run(context.Background())
 
 	if err == nil || res.Failed != 1 || len(ft.deletes) != 0 || len(ft.writes) != 0 {
 		t.Fatalf("res=%+v err=%v deletes=%v; want no change and one failed session", res, err, ft.deletes)
@@ -392,7 +392,7 @@ func TestGarbageCollectionStillRunsWhenTheTuplePassUsesItsBudget(t *testing.T) {
 	defer cancel()
 	orphan := "00000000000000000000000c"
 	mints := &fakeMints{pages: [][]Mint{{{ID: orphan}}}}
-	r := Reconciler{fakeMembers{member("s1", "u1", "gm")}, &blockingTuples{}, mints, &fakeSessionLookup{found: map[string]bool{}}, 400 * time.Millisecond}
+	r := Reconciler{fakeMembers{member("s1", "u1", "gm")}, &blockingTuples{}, mints, &fakeSessionLookup{found: map[string]bool{}}, 400 * time.Millisecond, nil}
 
 	res, _ := r.Run(ctx)
 
@@ -406,11 +406,81 @@ func TestAnExhaustedTuplePassFailsTheRestWithOneLogLineAndStillCollects(t *testi
 	defer cancel()
 	mints := &fakeMints{pages: [][]Mint{{{ID: "00000000000000000000000d"}}}}
 	members := fakeMembers{member("s1", "u1", "gm"), member("s2", "u1", "gm"), member("s3", "u1", "gm")}
-	r := Reconciler{members, &blockingTuples{}, mints, &fakeSessionLookup{found: map[string]bool{}}, 400 * time.Millisecond}
+	r := Reconciler{members, &blockingTuples{}, mints, &fakeSessionLookup{found: map[string]bool{}}, 400 * time.Millisecond, nil}
 
 	res, err := r.Run(ctx)
 
 	if err == nil || res.Failed != 3 || len(mints.closed) != 1 {
 		t.Fatalf("res=%+v err=%v closed=%v; want 3 failed sessions (one blocked, two skipped) and garbage collection still run", res, err, mints.closed)
+	}
+}
+
+type fakeReaper struct {
+	ids     []string
+	reaped  map[string]bool
+	errFor  map[string]error
+	listErr error
+	asked   []string
+	cutoff  time.Time
+}
+
+func (f *fakeReaper) GMlessSessions(_ context.Context, before time.Time) ([]string, error) {
+	f.cutoff = before
+	return f.ids, f.listErr
+}
+
+func (f *fakeReaper) ReapGMlessSession(_ context.Context, id string) (bool, error) {
+	f.asked = append(f.asked, id)
+	return f.reaped[id], f.errFor[id]
+}
+
+func reapRun(rp *fakeReaper, mints *fakeMints) (Result, error) {
+	return Reconciler{fakeMembers{}, &fakeTuples{}, mints, &fakeSessionLookup{found: map[string]bool{}}, 0, rp}.Run(context.Background())
+}
+
+func TestAGMlessSessionIsReapedAndItsMintClosed(t *testing.T) {
+	a, b := "00000000000000000000000a", "00000000000000000000000b"
+	rp := &fakeReaper{ids: []string{a, b}, reaped: map[string]bool{a: true}} // b gained a GM since listing
+	mints := &fakeMints{pages: [][]Mint{{}}}
+
+	res, err := reapRun(rp, mints)
+
+	if err != nil || res.SessionsReaped != 1 || len(mints.closed) != 1 || mints.closed[0] != a {
+		t.Fatalf("res=%+v err=%v closed=%v; want only the reaped session's mint closed", res, err, mints.closed)
+	}
+	if age := time.Since(rp.cutoff); age < 14*time.Minute || age > 16*time.Minute {
+		t.Errorf("cutoff is %v old, want about 15 minutes so a session still being created is left alone", age)
+	}
+}
+
+func TestReapFailuresAreCountedAndTheRestStillRun(t *testing.T) {
+	a, b := "00000000000000000000000a", "00000000000000000000000b"
+	rp := &fakeReaper{ids: []string{a, b}, reaped: map[string]bool{b: true}, errFor: map[string]error{a: errors.New("revision moved")}}
+	mints := &fakeMints{pages: [][]Mint{{}}}
+
+	res, err := reapRun(rp, mints)
+
+	if err == nil || res.Failed != 1 || res.SessionsReaped != 1 || len(mints.closed) != 1 {
+		t.Fatalf("res=%+v err=%v closed=%v; want one counted failure and the second session still reaped", res, err, mints.closed)
+	}
+	if res, err := reapRun(&fakeReaper{listErr: errors.New("mongo")}, mints); err == nil || res.Failed != 1 {
+		t.Errorf("list failure: res=%+v err=%v, want a counted failure", res, err)
+	}
+}
+
+func TestReapingStopsOnARejectedToken(t *testing.T) {
+	a := "00000000000000000000000a"
+	rp := &fakeReaper{ids: []string{a}, reaped: map[string]bool{a: true}}
+	mints := &fakeMints{pages: [][]Mint{{}}, closeE: ErrTokenRejected}
+
+	if _, err := reapRun(rp, mints); !errors.Is(err, ErrTokenRejected) {
+		t.Fatalf("err = %v, want ErrTokenRejected", err)
+	}
+}
+
+func TestNoReaperOrNoMintsMeansNoReaping(t *testing.T) {
+	rp := &fakeReaper{ids: []string{"00000000000000000000000a"}, reaped: map[string]bool{"00000000000000000000000a": true}}
+	if _, err := (Reconciler{fakeMembers{}, &fakeTuples{}, nil, nil, 0, rp}).Run(context.Background()); err != nil || len(rp.asked) != 0 {
+		t.Errorf("without Mints the reaper asked %v, err %v; want no reaping", rp.asked, err)
 	}
 }

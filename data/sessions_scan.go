@@ -2,6 +2,8 @@ package data
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/sweetrpg/initiative-api/store"
 	"go.mongodb.org/mongo-driver/bson"
@@ -57,4 +59,82 @@ func (r *Sessions) LookupSessions(ctx context.Context, ids []string) (map[string
 		out[s.ID] = s.DeletedAt != nil
 	}
 	return out, nil
+}
+
+// systemActor attributes the reconciler's own writes (PADR-0001's sentinel for non-user writes).
+const systemActor = "system"
+
+// GMlessSessions lists the live sessions created before createdBefore that have no live GM member
+// record, so none of them can be deleted by anyone (PADR-0040 section 1, a failed GM insert whose
+// rollback also failed). The age bound keeps it away from a session still being created.
+// Reconciler only: it has no acting user and reads every session.
+func (r *Sessions) GMlessSessions(ctx context.Context, createdBefore time.Time) ([]string, error) {
+	base := bson.D{{Key: "deleted_at", Value: nil}, {Key: "created_at", Value: bson.D{{Key: "$lte", Value: createdBefore}}}}
+	var out []string
+	cursor := ""
+	for {
+		page, err := runQuery[Session](ctx, r.c, SessionSpec, base,
+			Query{Sort: []SortKey{{Field: "created_at"}}, Limit: MaxLimit, Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		if len(page.Items) > 0 {
+			ids := make(bson.A, 0, len(page.Items))
+			for _, s := range page.Items {
+				ids = append(ids, s.ID)
+			}
+			var gms []Member
+			if err := r.members.Find(ctx, bson.D{
+				{Key: "session_id", Value: bson.D{{Key: "$in", Value: ids}}},
+				{Key: "role", Value: RoleGM}, {Key: "deleted_at", Value: nil},
+			}, store.FindOptions{}, &gms); err != nil {
+				return nil, err
+			}
+			has := make(map[string]bool, len(gms))
+			for _, m := range gms {
+				has[m.SessionID] = true
+			}
+			for _, s := range page.Items {
+				if !has[s.ID] {
+					out = append(out, s.ID)
+				}
+			}
+		}
+		if page.NextCursor == "" {
+			return out, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// ReapGMlessSession soft-deletes a live session that still has no live GM member record, and every
+// record under it, and reports whether it did. It re-reads both facts first, so a session whose GM
+// record appeared since GMlessSessions listed it is left alone. A revision that moved is an error
+// for the next pass to retry. Reconciler only.
+func (r *Sessions) ReapGMlessSession(ctx context.Context, id string) (bool, error) {
+	id, ok := cleanID(id)
+	if !ok {
+		return false, ErrNotFound
+	}
+	var s Session
+	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "deleted_at", Value: nil}}, &s)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var gms []Member
+	if err := r.members.Find(ctx, bson.D{
+		{Key: "session_id", Value: id}, {Key: "role", Value: RoleGM}, {Key: "deleted_at", Value: nil},
+	}, store.FindOptions{Limit: 1}, &gms); err != nil {
+		return false, err
+	}
+	if len(gms) > 0 {
+		return false, nil
+	}
+	if err := r.owned.SoftDelete(ctx, s.OwnerUserID, systemActor, id, s.Revision); err != nil {
+		return false, err
+	}
+	return true, r.dropRecords(ctx, id, systemActor)
 }
