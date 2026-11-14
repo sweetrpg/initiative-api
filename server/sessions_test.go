@@ -454,7 +454,7 @@ func TestFailedTupleWriteAnswers503MembershipSyncPendingAndTheRetrySucceeds(t *t
 }
 
 func TestAuthAPIRefusalsOnAGrantReachTheClient(t *testing.T) {
-	for status, want := range map[int]int{http.StatusForbidden: 403, http.StatusTooManyRequests: 429, http.StatusConflict: 409} {
+	for status, want := range map[int]int{http.StatusForbidden: 403, http.StatusTooManyRequests: 429, http.StatusConflict: 409, http.StatusBadRequest: 500} {
 		var fail atomic.Bool
 		router := sessionRouterWith(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/authz/session-tuples" && fail.Load() {

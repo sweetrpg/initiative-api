@@ -57,7 +57,15 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "membership_sync_pending", Message: "Your change was saved, but access is still being updated. Repeat the request in a moment."}, http.StatusServiceUnavailable
 	case errors.Is(err, relations.ErrDenied):
 		return ErrorBody{Code: "forbidden", Message: "You may not do that."}, http.StatusForbidden
+	case errors.Is(err, relations.ErrRejected):
+		// A malformed request is our bug and retrying cannot help; not 503. It falls to the opaque
+		// 500 and writeError logs it.
+		return ErrorBody{Code: "internal", Message: "Something went wrong."}, http.StatusInternalServerError
 	case errors.Is(err, relations.ErrConflict):
+		// The member record is already saved, and the reconciler writes tuples from Mongo through
+		// the internal path, which the 200-tuple cap does not cover, so a refused member is let in
+		// on the next pass. Accepted: the members_per_session entitlement caps a session at 20
+		// members, and only a direct caller of auth-api can reach the tuple cap.
 		return ErrorBody{Code: "session_full", Message: "The session has reached its member limit."}, http.StatusConflict
 	case errors.Is(err, relations.ErrLimited):
 		return ErrorBody{Code: "rate_limited", Message: "Too many requests. Try again shortly."}, http.StatusTooManyRequests
