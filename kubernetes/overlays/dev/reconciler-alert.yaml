@@ -1,6 +1,7 @@
 # Alerts when the OpenFGA tuple reconciler stops succeeding (PADR-0040 section 5). While it is
 # stopped, deleted tuples are not restored and mint garbage is not collected. Causes: the
-# Auth0 or Redis failing, a rotated client secret Akeyless does not hold yet, auth-api rejecting the token (the job exits 3), the job is failing, or the CronJob is suspended.
+# Auth0 or Redis failing, a rotated client secret Akeyless does not hold yet, auth-api rejecting
+# the token (the job exits 3), the job is failing, or the CronJob is suspended.
 # Prometheus picks rules up by the release=prometheus label (kube-prometheus-stack ruleSelector).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule

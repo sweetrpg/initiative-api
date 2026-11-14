@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/url"
 	"os"
 	"time"
 
@@ -52,23 +53,43 @@ func run() int {
 	return 0
 }
 
-// tokenSource builds the Auth0 client-credentials source from the environment. The client secret
-// is read here and never logged.
-func tokenSource() (src reconcile.TokenSource, authURL string, ok bool) {
-	authURL = os.Getenv("AUTH_API_URL")
-	id, secret := os.Getenv("RECONCILER_CLIENT_ID"), os.Getenv("RECONCILER_CLIENT_SECRET")
-	tokenURL, audience := os.Getenv("RECONCILER_TOKEN_URL"), os.Getenv("RECONCILER_AUDIENCE")
-	for name, v := range map[string]string{"AUTH_API_URL": authURL, "RECONCILER_CLIENT_ID": id, "RECONCILER_CLIENT_SECRET": secret,
-		"RECONCILER_TOKEN_URL": tokenURL, "RECONCILER_AUDIENCE": audience} {
-		if v == "" {
-			log.Print(name + " is required")
-			return nil, "", false
+// settings is the reconciler's token configuration.
+type settings struct {
+	authURL, clientID, clientSecret, tokenURL, audience string
+}
+
+// loadSettings reads and validates the environment. The token URL must be https so the client
+// secret never crosses the network in clear text. The secret is read here and never logged.
+func loadSettings(get func(string) string) (settings, error) {
+	s := settings{
+		authURL: get("AUTH_API_URL"), clientID: get("RECONCILER_CLIENT_ID"), clientSecret: get("RECONCILER_CLIENT_SECRET"),
+		tokenURL: get("RECONCILER_TOKEN_URL"), audience: get("RECONCILER_AUDIENCE"),
+	}
+	for _, f := range []struct{ name, value string }{
+		{"AUTH_API_URL", s.authURL}, {"RECONCILER_CLIENT_ID", s.clientID}, {"RECONCILER_CLIENT_SECRET", s.clientSecret},
+		{"RECONCILER_TOKEN_URL", s.tokenURL}, {"RECONCILER_AUDIENCE", s.audience}, {"REDIS_HOST", get("REDIS_HOST")},
+	} {
+		if f.value == "" {
+			return settings{}, errors.New(f.name + " is required")
 		}
+	}
+	if u, err := url.Parse(s.tokenURL); err != nil || u.Scheme != "https" || u.Host == "" {
+		return settings{}, errors.New("RECONCILER_TOKEN_URL must be an https URL")
+	}
+	return s, nil
+}
+
+// tokenSource builds the Auth0 client-credentials source from the environment.
+func tokenSource() (src reconcile.TokenSource, authURL string, ok bool) {
+	s, err := loadSettings(os.Getenv)
+	if err != nil {
+		log.Print(err.Error())
+		return nil, "", false
 	}
 	pool := util.RedisPool()
 	if pool == nil {
 		log.Print("REDIS_HOST is required for the token cache")
 		return nil, "", false
 	}
-	return reconcile.NewClientCredentials(tokenURL, id, secret, audience, pool), authURL, true
+	return reconcile.NewClientCredentials(s.tokenURL, s.clientID, s.clientSecret, s.audience, pool), s.authURL, true
 }

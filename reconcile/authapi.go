@@ -67,8 +67,9 @@ func (a *AuthAPI) Write(ctx context.Context, writes, deletes []Tuple) error {
 	return a.do(ctx, http.MethodPost, "/internal/openfga/tuples", body, nil)
 }
 
-// do sends one request. A 401 refreshes the token and retries once; a second 401, a 403, or a
-// source that cannot refresh is ErrTokenRejected.
+// do sends one request. A 401 on a cached token refreshes it and retries once. A 401 on a token
+// fetched in this run, or a second 401, is ErrTokenRejected and tells the source to stop later runs
+// calling Auth0. A 403 is not retried.
 func (a *AuthAPI) do(ctx context.Context, method, path string, body []byte, out any) error {
 	token, err := a.Tokens.Token(ctx)
 	if err != nil {
@@ -76,12 +77,20 @@ func (a *AuthAPI) do(ctx context.Context, method, path string, body []byte, out 
 	}
 	status, err := a.send(ctx, method, path, body, token, out)
 	if status == http.StatusUnauthorized {
-		if token, err = a.Tokens.Refresh(ctx); errors.Is(err, ErrNoRefresh) {
+		fresh, rerr := a.Tokens.Refresh(ctx)
+		switch {
+		case errors.Is(rerr, ErrNoRefresh):
+			a.Tokens.Rejected(ctx)
 			return ErrTokenRejected
-		} else if err != nil {
-			return fmt.Errorf("reconciler token: %w", err)
+		case rerr != nil:
+			return fmt.Errorf("reconciler token: %w", rerr)
 		}
-		_, err = a.send(ctx, method, path, body, token, out)
+		if status, err = a.send(ctx, method, path, body, fresh, out); status == http.StatusUnauthorized {
+			a.Tokens.Rejected(ctx)
+		}
+	}
+	if err == nil {
+		a.Tokens.Accepted(ctx)
 	}
 	return err
 }
