@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,14 +21,17 @@ const (
 // AuthAPI calls auth-api's internal tuple endpoints with the reconciler's own bearer
 // (PADR-0037, PADR-0038). No service token is involved.
 type AuthAPI struct {
-	Base  string
-	Token string
-	HTTP  *http.Client
+	Base   string
+	Tokens TokenSource
+	HTTP   *http.Client
 }
 
-// NewAuthAPI returns a client for base using token.
-func NewAuthAPI(base, token string) *AuthAPI {
-	return &AuthAPI{Base: base, Token: token, HTTP: &http.Client{Timeout: callTimeout}}
+// NewAuthAPI returns a client for base using one fixed token.
+func NewAuthAPI(base, token string) *AuthAPI { return NewAuthAPIWithSource(base, StaticToken(token)) }
+
+// NewAuthAPIWithSource returns a client for base that takes its bearer from tokens.
+func NewAuthAPIWithSource(base string, tokens TokenSource) *AuthAPI {
+	return &AuthAPI{Base: base, Tokens: tokens, HTTP: &http.Client{Timeout: callTimeout}}
 }
 
 // Read returns every tuple on object, following continuation tokens.
@@ -63,27 +67,47 @@ func (a *AuthAPI) Write(ctx context.Context, writes, deletes []Tuple) error {
 	return a.do(ctx, http.MethodPost, "/internal/openfga/tuples", body, nil)
 }
 
+// do sends one request. A 401 refreshes the token and retries once; a second 401, a 403, or a
+// source that cannot refresh is ErrTokenRejected.
 func (a *AuthAPI) do(ctx context.Context, method, path string, body []byte, out any) error {
+	token, err := a.Tokens.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("reconciler token: %w", err)
+	}
+	status, err := a.send(ctx, method, path, body, token, out)
+	if status == http.StatusUnauthorized {
+		if token, err = a.Tokens.Refresh(ctx); errors.Is(err, ErrNoRefresh) {
+			return ErrTokenRejected
+		} else if err != nil {
+			return fmt.Errorf("reconciler token: %w", err)
+		}
+		_, err = a.send(ctx, method, path, body, token, out)
+	}
+	return err
+}
+
+// send makes one call and returns the HTTP status (0 when none arrived) with its error.
+func (a *AuthAPI) send(ctx context.Context, method, path string, body []byte, token string, out any) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, a.Base+path, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("auth-api %s: %w", path, err)
+		return 0, fmt.Errorf("auth-api %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return ErrTokenRejected
+		return resp.StatusCode, ErrTokenRejected
 	case resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent:
-		return fmt.Errorf("auth-api %s: status %d", path, resp.StatusCode)
+		return resp.StatusCode, fmt.Errorf("auth-api %s: status %d", path, resp.StatusCode)
 	case out == nil:
-		return nil
+		return resp.StatusCode, nil
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out)
+	return resp.StatusCode, json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out)
 }
 
 // ListMints returns one page of open mints at least minAge old (by auth-api's clock) after the

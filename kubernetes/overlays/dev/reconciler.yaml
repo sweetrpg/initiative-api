@@ -1,9 +1,11 @@
-# OpenFGA tuple reconciler (PADR-0035, PADR-0038, PADR-0040). Listed in kustomization.yaml and
-# running (suspend: false). It needs:
-#   1. User "initiative-reconciler" in users-api with only the openfga-writer role.
-#   2. Akeyless item /sweetrpg/initiative/api/reconciler, whose "token" key holds an operator-minted
-#      short-lived bearer for that user.
-# The job exits non-zero (3) when auth-api rejects the token; mint a new one then (PADR-0038).
+# OpenFGA tuple reconciler (PADR-0035, PADR-0038, PADR-0040, PADR-0041). Listed in
+# kustomization.yaml and running (suspend: false). It needs:
+#   1. User "initiative-reconciler" in users-api with only the openfga-writer role, and a
+#      login_profiles entry mapping "<client_id>@clients" to it.
+#   2. Akeyless item /sweetrpg/initiative/api/reconciler with keys client_id and client_secret, the
+#      Auth0 machine-to-machine application "initiative-reconciler". The job fetches a token with
+#      the client-credentials grant and caches it in the namespace Redis (key reconciler:token).
+# Exit codes: 1 pass or Auth0/Redis failed, 2 missing configuration, 3 auth-api rejected a fresh token.
 # reconciler-alert.yaml alerts when no run has succeeded in 15 minutes.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -20,10 +22,14 @@ spec:
     name: api-reconciler
     creationPolicy: Owner
   data:
-    - secretKey: token
+    - secretKey: client_id
       remoteRef:
         key: /sweetrpg/initiative/api/reconciler
-        property: token
+        property: client_id
+    - secretKey: client_secret
+      remoteRef:
+        key: /sweetrpg/initiative/api/reconciler
+        property: client_secret
 
 ---
 apiVersion: batch/v1
@@ -60,13 +66,24 @@ spec:
                     name: api-env
                 - secretRef:
                     name: api-db
+                # REDIS_PASS for the token cache (REDIS_HOST and REDIS_PORT come from api-env).
+                - secretRef:
+                    name: api-cache
               env:
-                - name: RECONCILER_TOKEN_FILE
-                  value: /var/run/reconciler/token
-              volumeMounts:
-                - name: token
-                  mountPath: /var/run/reconciler
-                  readOnly: true
+                - name: RECONCILER_TOKEN_URL
+                  value: https://sweetrpg-dev.us.auth0.com/oauth/token
+                - name: RECONCILER_AUDIENCE
+                  value: https://sweetrpg.com/api/
+                - name: RECONCILER_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: api-reconciler
+                      key: client_id
+                - name: RECONCILER_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: api-reconciler
+                      key: client_secret
               resources:
                 requests:
                   cpu: "20m"
@@ -74,7 +91,3 @@ spec:
                 limits:
                   cpu: "250m"
                   memory: "128Mi"
-          volumes:
-            - name: token
-              secret:
-                secretName: api-reconciler
