@@ -43,7 +43,7 @@ func TestAFailedFetchArmsTheBackoffForFiveMinutesAndCountsTheFailure(t *testing.
 			f, mr := newFakeAuth0(t), miniredis.RunT(t)
 			f.status, f.retry = tc.status, tc.retry
 
-			failOnce(t, f, mr)
+			_ = failOnce(t, f, mr)
 
 			if got := mr.TTL(auth0BackoffKey); got != tc.want {
 				t.Errorf("backoff ttl = %v, want %v", got, tc.want)
@@ -58,14 +58,14 @@ func TestAFailedFetchArmsTheBackoffForFiveMinutesAndCountsTheFailure(t *testing.
 func TestANetworkErrorAndAMalformed200AlsoArmTheBackoff(t *testing.T) {
 	f, mr := newFakeAuth0(t), miniredis.RunT(t)
 	f.srv.Close()
-	failOnce(t, f, mr)
+	_ = failOnce(t, f, mr)
 	if mr.TTL(auth0BackoffKey) != 5*time.Minute {
 		t.Errorf("network error: backoff ttl = %v, want 5m", mr.TTL(auth0BackoffKey))
 	}
 
 	f2, mr2 := newFakeAuth0(t), miniredis.RunT(t)
 	f2.expiresIn = 0 // a 200 without a usable lifetime
-	failOnce(t, f2, mr2)
+	_ = failOnce(t, f2, mr2)
 	if mr2.TTL(auth0BackoffKey) != 5*time.Minute {
 		t.Errorf("malformed 200: backoff ttl = %v, want 5m", mr2.TTL(auth0BackoffKey))
 	}
@@ -77,7 +77,7 @@ func TestTheBackoffDoublesToAnHourAndStaysThere(t *testing.T) {
 	want := []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 40 * time.Minute, time.Hour, time.Hour, time.Hour}
 
 	for i, w := range want {
-		failOnce(t, f, mr)
+		_ = failOnce(t, f, mr)
 		if got := mr.TTL(auth0BackoffKey); got != w {
 			t.Fatalf("failure %d: backoff ttl = %v, want %v", i+1, got, w)
 		}
@@ -88,7 +88,7 @@ func TestTheBackoffDoublesToAnHourAndStaysThere(t *testing.T) {
 func TestTheBackoffBlocksEverySourceWithoutCallingAuth0(t *testing.T) {
 	f, mr := newFakeAuth0(t), miniredis.RunT(t)
 	f.status = 429
-	failOnce(t, f, mr)
+	_ = failOnce(t, f, mr)
 	mr.FastForward(2 * time.Minute) // past the fetch guard, inside the backoff
 
 	for i := 0; i < 3; i++ {
@@ -123,7 +123,7 @@ func TestACachedTokenIsStillServedDuringTheBackoff(t *testing.T) {
 func TestTheProbeAfterTheBackoffClearsBothKeysOnSuccess(t *testing.T) {
 	f, mr := newFakeAuth0(t), miniredis.RunT(t)
 	f.status = 500
-	failOnce(t, f, mr)
+	_ = failOnce(t, f, mr)
 	mr.FastForward(5*time.Minute + time.Second)
 	f.status = 0
 
@@ -137,10 +137,10 @@ func TestTheProbeAfterTheBackoffClearsBothKeysOnSuccess(t *testing.T) {
 func TestAFailedProbeIncrementsAndReArms(t *testing.T) {
 	f, mr := newFakeAuth0(t), miniredis.RunT(t)
 	f.status = 500
-	failOnce(t, f, mr)
+	_ = failOnce(t, f, mr)
 	mr.FastForward(5*time.Minute + time.Second)
 
-	failOnce(t, f, mr)
+	_ = failOnce(t, f, mr)
 
 	if got := mr.TTL(auth0BackoffKey); got != 10*time.Minute {
 		t.Fatalf("backoff ttl = %v, want 10m after a failed probe", got)
@@ -150,13 +150,13 @@ func TestAFailedProbeIncrementsAndReArms(t *testing.T) {
 func TestTheFailureCountExpiresAfterTwoHoursAndRestartsAtFiveMinutes(t *testing.T) {
 	f, mr := newFakeAuth0(t), miniredis.RunT(t)
 	f.status = 500
-	failOnce(t, f, mr)
+	_ = failOnce(t, f, mr)
 	if got := mr.TTL(auth0FailuresKey); got != failuresTTL {
 		t.Fatalf("failures ttl = %v, want %v", got, failuresTTL)
 	}
 	mr.FastForward(failuresTTL + time.Second)
 
-	failOnce(t, f, mr)
+	_ = failOnce(t, f, mr)
 
 	if got, n := mr.TTL(auth0BackoffKey), func() string { v, _ := mr.Get(auth0FailuresKey); return v }(); got != 5*time.Minute || n != "1" {
 		t.Fatalf("backoff ttl=%v failures=%q; want 5m and a count restarted at 1", got, n)
