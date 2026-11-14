@@ -507,3 +507,70 @@ func TestLookupSessionsReportsLiveDeletedAndMissing(t *testing.T) {
 		t.Errorf("a missing id is present in %+v", got)
 	}
 }
+
+func TestSessionsWithGMListsOnlyLiveGMRecords(t *testing.T) {
+	r, withGM := newSessionRepo(t)
+	if _, err := r.AddMember(ctx, dc(t, "gm", withGM), "gm", RoleGM); err != nil {
+		t.Fatal(err)
+	}
+	noGM := &Session{Name: "NoGM"}
+	if err := r.owned.Create(ctx, "gm", "gm", noGM); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.AddMember(ctx, dc(t, "gm", noGM.ID), "p1", RolePlayer); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.SessionsWithGM(ctx, []string{withGM, noGM.ID})
+
+	if err != nil || !got[withGM] || got[noGM.ID] || len(got) != 1 {
+		t.Fatalf("with GM = %+v, %v; want only the session with a GM record", got, err)
+	}
+}
+
+func TestRemoveGMLessSoftDeletesTheSessionAndItsRecordsAsTheSystem(t *testing.T) {
+	db := fake.NewDB()
+	r := NewSessions(db)
+	orphan := &Session{Name: "Orphan"}
+	if err := r.owned.Create(ctx, "gm", "gm", orphan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.AddMember(ctx, dc(t, "gm", orphan.ID), "p1", RolePlayer); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RemoveGMLess(ctx, orphan.ID); err != nil {
+		t.Fatalf("remove = %v", err)
+	}
+
+	if n, _ := r.Count(ctx, "gm"); n != 0 {
+		t.Errorf("owned sessions = %d, want the GM-less one to stop counting", n)
+	}
+	for _, d := range db.Fake(CollectionSessions).Docs() {
+		if d["deleted_at"] == nil || d["deleted_by"] != "system" {
+			t.Errorf("session = %v, want soft-deleted by the system", d)
+		}
+	}
+	for _, d := range db.Fake(CollectionSessionMembers).Docs() {
+		if d["deleted_at"] == nil || d["deleted_by"] != "system" {
+			t.Errorf("member = %v, want soft-deleted by the system", d)
+		}
+	}
+	if err := r.RemoveGMLess(ctx, orphan.ID); err != nil {
+		t.Errorf("a second remove = %v, want nil (already gone)", err)
+	}
+}
+
+func TestRemoveGMLessRefusesASessionThatHasAGM(t *testing.T) {
+	r, id := newSessionRepo(t)
+	if _, err := r.AddMember(ctx, dc(t, "gm", id), "gm", RoleGM); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RemoveGMLess(ctx, id); !errors.Is(err, ErrConflict) {
+		t.Fatalf("remove = %v, want ErrConflict", err)
+	}
+	if n, _ := r.Count(ctx, "gm"); n != 1 {
+		t.Errorf("owned sessions = %d, want the session untouched", n)
+	}
+}

@@ -2,8 +2,10 @@ package data
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sweetrpg/initiative-api/store"
+	"github.com/sweetrpg/model-core.go/models"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
@@ -57,4 +59,53 @@ func (r *Sessions) LookupSessions(ctx context.Context, ids []string) (map[string
 		out[s.ID] = s.DeletedAt != nil
 	}
 	return out, nil
+}
+
+// SessionsWithGM returns the IDs among ids that have a live GM member record. Reconciler only.
+func (r *Sessions) SessionsWithGM(ctx context.Context, ids []string) (map[string]bool, error) {
+	in := make(bson.A, 0, len(ids))
+	for _, id := range ids {
+		in = append(in, id)
+	}
+	var gms []Member
+	filter := bson.D{{Key: "session_id", Value: bson.D{{Key: "$in", Value: in}}}, {Key: "role", Value: RoleGM}, {Key: "deleted_at", Value: nil}}
+	if err := r.members.Find(ctx, filter, store.FindOptions{}, &gms); err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(gms))
+	for _, m := range gms {
+		out[m.SessionID] = true
+	}
+	return out, nil
+}
+
+// RemoveGMLess soft-deletes a live session that has no live GM record, and every membership record
+// of it, as the system. Such a session is left by a creation whose GM record could not be stored
+// and whose removal also failed (Open); nobody can delete it, and it counts toward the owner's
+// sessions_per_gm. It refuses (ErrConflict) a session that does have a GM, so a lookup that raced
+// a creation cannot remove a real session. Reconciler only.
+func (r *Sessions) RemoveGMLess(ctx context.Context, sessionID string) error {
+	id, ok := cleanID(sessionID)
+	if !ok {
+		return ErrNotFound
+	}
+	var s Session
+	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "deleted_at", Value: nil}}, &s)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil // already gone
+	}
+	if err != nil {
+		return err
+	}
+	var gm Member
+	switch err := r.members.FindOne(ctx, bson.D{{Key: "session_id", Value: id}, {Key: "role", Value: RoleGM}, {Key: "deleted_at", Value: nil}}, &gm); {
+	case err == nil:
+		return ErrConflict
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
+	if err := r.owned.SoftDelete(ctx, s.OwnerUserID, models.SystemActor, id, s.Revision); err != nil {
+		return err
+	}
+	return r.dropRecords(ctx, id, models.SystemActor)
 }
