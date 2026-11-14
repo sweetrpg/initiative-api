@@ -85,8 +85,13 @@ Invalid values stop the process at startup with every problem listed.
 - `GET /combatants?ref_key=&ref_value=`: the caller's combatants whose `external_refs` match.
 
 OpenFGA session tuples are rebuilt from the membership collection by `cmd/reconciler` (a CronJob every 5 minutes
-running as the `initiative-reconciler` user with the `openfga-writer` role; `RECONCILER_TOKEN_FILE` holds an
-operator-minted bearer, PADR-0038). Exit 3 means the token was rejected or expired. For each session it reads the
+running as the `initiative-reconciler` user with the `openfga-writer` role, signed in as an Auth0
+machine-to-machine client: `RECONCILER_CLIENT_ID`/`RECONCILER_CLIENT_SECRET`/`RECONCILER_TOKEN_URL`/`RECONCILER_AUDIENCE`
+fetch a client-credentials token, cached in Redis as `reconciler:token` until 120 seconds before it expires; PADR-0041).
+A 401 from auth-api clears the cache, fetches once more and retries once. Exit 1 is a failed pass or an Auth0 or Redis
+failure, 2 missing or invalid configuration (the token URL must be https), 3 auth-api rejected a token. A 401 on a token fetched
+in the same run sets `reconciler:rejected` for an hour so a persistent 401 cannot spend the Auth0 token allowance; fix the cause,
+then `DEL reconciler:rejected` in the initiative cache to retry at once. For each session it reads the
 tuples first and then that session's current members, so a grant or revoke between the two reads is at worst
 corrected by the next pass (PADR-0040). After the tuple pass it closes session mints older than 15 minutes
 whose session is missing or soft-deleted in Mongo (auth-api `GET /internal/openfga/session-mints`, paged by
