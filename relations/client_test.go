@@ -3,6 +3,7 @@ package relations
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -133,5 +134,68 @@ func TestMissingInputsAreRefused(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("a refused check must not call auth-api")
+	}
+}
+
+func sessionServer(t *testing.T, status int, body string, got *struct{ Method, Path, Auth, Body string }) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		*got = struct{ Method, Path, Auth, Body string }{r.Method, r.URL.Path, r.Header.Get("Authorization"), string(raw)}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return New(srv.URL)
+}
+
+func TestMintForwardsTheBearerAndReturnsTheID(t *testing.T) {
+	var got struct{ Method, Path, Auth, Body string }
+	c := sessionServer(t, http.StatusCreated, `{"session_id":"0123456789abcdef01234567"}`, &got)
+
+	id, err := c.Mint(context.Background(), "tok")
+
+	if err != nil || id != "0123456789abcdef01234567" || got.Method != "POST" || got.Path != "/authz/sessions" || got.Auth != "Bearer tok" {
+		t.Fatalf("mint = %q, %v; request %+v", id, err, got)
+	}
+}
+
+func TestWriteTuplesSendsOneBodyWithBothLists(t *testing.T) {
+	var got struct{ Method, Path, Auth, Body string }
+	c := sessionServer(t, http.StatusOK, `{}`, &got)
+
+	err := c.WriteTuples(context.Background(), "tok", "0123456789abcdef01234567", []Tuple{{User: "user:u1", Relation: "player"}}, nil)
+
+	want := `{"session_id":"0123456789abcdef01234567","writes":[{"user":"user:u1","relation":"player"}],"deletes":[]}`
+	if err != nil || got.Path != "/authz/session-tuples" || got.Body != want {
+		t.Fatalf("write = %v; request %+v, want body %s", err, got, want)
+	}
+}
+
+func TestEndSessionDeletesTheSession(t *testing.T) {
+	var got struct{ Method, Path, Auth, Body string }
+	c := sessionServer(t, http.StatusNoContent, ``, &got)
+
+	if err := c.EndSession(context.Background(), "tok", "0123456789abcdef01234567"); err != nil || got.Method != "DELETE" || got.Path != "/authz/sessions/0123456789abcdef01234567" {
+		t.Fatalf("end = %v; request %+v", err, got)
+	}
+}
+
+func TestSessionCallsMapAuthAPIAnswers(t *testing.T) {
+	for status, want := range map[int]error{401: ErrUnauthorized, 403: ErrDenied, 429: ErrLimited, 500: ErrUnavailable, 502: ErrUnavailable, 200: ErrUnavailable} {
+		var got struct{ Method, Path, Auth, Body string }
+		c := sessionServer(t, status, `{}`, &got)
+
+		_, err := c.Mint(context.Background(), "tok")
+
+		if !errors.Is(err, want) {
+			t.Errorf("auth-api %d -> %v, want %v (a 200 where 201 is promised is not a mint)", status, err, want)
+		}
+	}
+	if _, err := New("http://127.0.0.1:1").Mint(context.Background(), "tok"); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("unreachable = %v, want ErrUnavailable", err)
+	}
+	if _, err := New("http://127.0.0.1:1").Mint(context.Background(), ""); !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("no token = %v, want ErrUnauthorized", err)
 	}
 }

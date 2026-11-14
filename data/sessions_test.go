@@ -400,3 +400,24 @@ func TestJoinTicketIsBoundToItsActor(t *testing.T) {
 		t.Errorf("operator-shaped actor = %v, want ErrInvalid", err)
 	}
 }
+
+func TestOpenCreatesTheSessionAtTheMintedIDWithItsGM(t *testing.T) {
+	db := fake.NewDB()
+	r := NewSessions(db)
+	const id = "0123456789abcdef01234567"
+	s := &Session{Name: "Friday"}
+
+	if err := r.Open(ctx, "gm", id, s); err != nil || s.ID != id {
+		t.Fatalf("open = %v, id %q; want the minted id", err, s.ID)
+	}
+	m, err := r.Member(ctx, dc(t, "gm", id), "gm")
+	if err != nil || m.Role != RoleGM {
+		t.Fatalf("gm member = %+v, %v", m, err)
+	}
+	if err := r.Open(ctx, "gm", "not-an-id", &Session{Name: "x"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("open with a bad id = %v, want ErrInvalid", err)
+	}
+	if err := r.Open(ctx, "gm", id, &Session{Name: "again"}); err == nil {
+		t.Errorf("a second open at the same id succeeded")
+	}
+}

@@ -62,13 +62,16 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	}
 }
 
-// withGate gives the data layer the relation checker and the caller's own bearer token (PADR-0037),
-// so session data can be authorized per request. A nil client leaves ctx without a gate, which
+// withGate gives the data layer the relation checker, and the domain auth-api's session surface,
+// both with the caller's own bearer token (PADR-0037), so session data can be authorized and
+// membership tuples written per request. A nil client leaves ctx without a gate, which
 // makes session data fail closed.
 func withGate(c *relations.Client) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		if c != nil {
-			ctx.Request = ctx.Request.WithContext(data.WithGate(ctx.Request.Context(), c, authz.Token(ctx)))
+			token := authz.Token(ctx)
+			rc := data.WithGate(ctx.Request.Context(), c, token)
+			ctx.Request = ctx.Request.WithContext(domain.WithAuthority(rc, c, token))
 		}
 		ctx.Next()
 	}

@@ -251,8 +251,8 @@ func TestSessionRoutesAnswer503WhenAuthorizationIsDown(t *testing.T) {
 			t.Errorf("GET %s = %d %s, want 503 authorization_unavailable", path, w.Code, w.Body)
 		}
 	}
-	if w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Saturday"}`); w.Code != http.StatusCreated {
-		t.Errorf("create in an outage = %d %s, want 201: creating needs no relation check", w.Code, w.Body)
+	if w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Saturday"}`); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("create in an outage = %d %s, want 503: the session ID is minted by auth-api", w.Code, w.Body)
 	}
 }
 
@@ -274,6 +274,10 @@ type relProbe struct {
 }
 
 func (p *relProbe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/authz/check-relation" {
+		allowRelations(w, r)
+		return
+	}
 	var q struct{ Object, Relation string }
 	_ = json.NewDecoder(r.Body).Decode(&q)
 	p.mu.Lock()
@@ -384,5 +388,67 @@ func TestRejectedTokenAtAuthAPIIs401(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("get = %d %s, want 401", w.Code, w.Body)
+	}
+}
+
+func TestCreateReturnsTheSessionAtTheMintedID(t *testing.T) {
+	const minted = "0123456789abcdef01234567"
+	router := sessionRouterWith(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/authz/sessions" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"session_id":"` + minted + `"}`))
+			return
+		}
+		allowRelations(w, r)
+	})
+
+	w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
+
+	if w.Code != http.StatusCreated || decodeBody(t, w)["id"] != minted {
+		t.Fatalf("create = %d %s, want 201 with id %s", w.Code, w.Body, minted)
+	}
+}
+
+func TestMintRefusalsReachTheClient(t *testing.T) {
+	for status, want := range map[int]int{http.StatusForbidden: 403, http.StatusTooManyRequests: 429, http.StatusBadGateway: 503, http.StatusUnauthorized: 401} {
+		router := sessionRouterWith(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/authz/sessions" {
+				w.WriteHeader(status)
+				return
+			}
+			allowRelations(w, r)
+		})
+
+		w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
+
+		if w.Code != want {
+			t.Errorf("auth-api %d -> create %d %s, want %d", status, w.Code, w.Body, want)
+		}
+	}
+}
+
+func TestFailedTupleWriteAnswers503MembershipSyncPendingAndTheRetrySucceeds(t *testing.T) {
+	var failTuples atomic.Bool
+	router := sessionRouterWith(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/authz/session-tuples" && failTuples.Load() {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		allowRelations(w, r)
+	})
+	id := decodeBody(t, callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`))["id"].(string)
+	code := inviteCode(t, router, "user-ok", id)
+	reqID := decodeBody(t, callAs(router, "user-two", "POST", "/sessions/join", `{"code":"`+code+`"}`))["id"].(string)
+	approve := "/sessions/" + id + "/requests/" + reqID + "/approve"
+	failTuples.Store(true)
+
+	w := callAs(router, "user-ok", "POST", approve, `{"role":"player"}`)
+
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "membership_sync_pending") || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("approve with tuples failing = %d %s retry-after %q; want 503 membership_sync_pending with Retry-After", w.Code, w.Body, w.Header().Get("Retry-After"))
+	}
+	failTuples.Store(false)
+	if w := callAs(router, "user-ok", "POST", approve, `{"role":"player"}`); w.Code != http.StatusOK {
+		t.Fatalf("retry = %d %s, want 200", w.Code, w.Body)
 	}
 }

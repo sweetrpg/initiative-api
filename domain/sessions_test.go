@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,10 +11,63 @@ import (
 	"github.com/sweetrpg/initiative-api/entitlements"
 	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // sctx carries a checker that grants 10 of every limit, so session tests run unlimited by default.
-var sctx = data.WithGate(WithChecker(context.Background(), stubChecker{limit: 10}), gate{allow: true}, "tok")
+var sctx = WithAuthority(data.WithGate(WithChecker(context.Background(), stubChecker{limit: 10}), gate{allow: true}, "tok"), &fakeAuth{}, "tok")
+
+// fakeAuth is auth-api's session surface in memory: it mints real ObjectID hex IDs and records the
+// tuple traffic so tests can assert what was written and in what order.
+type fakeAuth struct {
+	mu      sync.Mutex
+	minted  []string
+	ended   []string
+	writes  []tupleCall
+	mintErr error
+	mintID  string // when set, Mint returns it instead of a fresh ObjectID
+	endErr  error
+	failW   error // returned by every WriteTuples when set
+}
+
+type tupleCall struct {
+	Session         string
+	Writes, Deletes []relations.Tuple
+}
+
+func (f *fakeAuth) Mint(context.Context, string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.mintErr != nil {
+		return "", f.mintErr
+	}
+	id := primitive.NewObjectID().Hex()
+	if f.mintID != "" {
+		id = f.mintID
+	}
+	f.minted = append(f.minted, id)
+	return id, nil
+}
+
+func (f *fakeAuth) EndSession(_ context.Context, _, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ended = append(f.ended, id)
+	return f.endErr
+}
+
+func (f *fakeAuth) WriteTuples(_ context.Context, _, id string, w, d []relations.Tuple) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failW != nil {
+		return f.failW
+	}
+	f.writes = append(f.writes, tupleCall{id, w, d})
+	return nil
+}
+
+// withAuth is sctx with its auth-api surface replaced by fa.
+func withAuth(fa *fakeAuth) context.Context { return WithAuthority(sctx, fa, "tok") }
 
 // gate is a relation checker with a fixed answer.
 type gate struct {
@@ -27,7 +81,7 @@ func (g gate) Check(context.Context, string, string, string, string) (bool, erro
 
 // grantAll is a context carrying checker c and a relation gate that grants everything.
 func grantAll(c Checker) context.Context {
-	return data.WithGate(WithChecker(context.Background(), c), gate{allow: true}, "tok")
+	return WithAuthority(data.WithGate(WithChecker(context.Background(), c), gate{allow: true}, "tok"), &fakeAuth{}, "tok")
 }
 
 // viewCtx is sctx with the relation checker replaced.
@@ -210,8 +264,11 @@ func TestJoinNeedsApprovalAndGrantsNothingBefore(t *testing.T) {
 	if _, err := s.Join(sctx, "newbie", code); !errors.Is(err, data.ErrConflict) {
 		t.Fatalf("member joins again = %v, want ErrConflict", err)
 	}
-	if _, err := s.Approve(sctx, "gm", sess.ID, jr.ID, data.RolePlayer); !errors.Is(err, data.ErrConflict) {
-		t.Fatalf("approve twice = %v, want ErrConflict", err)
+	if _, err := s.Approve(sctx, "gm", sess.ID, jr.ID, data.RolePlayer); err != nil {
+		t.Fatalf("approve twice with the same role = %v, want success (it finishes the tuple write)", err)
+	}
+	if _, err := s.Approve(sctx, "gm", sess.ID, jr.ID, data.RoleObserver); !errors.Is(err, data.ErrConflict) {
+		t.Fatalf("approve twice with another role = %v, want ErrConflict", err)
 	}
 }
 
@@ -537,7 +594,7 @@ func (m *meter) Check(_ context.Context, key string, _ entitlements.Policy) (ent
 
 func TestCreateStopsAtTheSessionLimit(t *testing.T) {
 	s := newSessions(t)
-	c := WithChecker(context.Background(), stubChecker{limit: 1})
+	c := grantAll(stubChecker{limit: 1})
 	if _, err := s.Create(c, "gm", "One"); err != nil {
 		t.Fatal(err)
 	}
@@ -821,12 +878,12 @@ func TestRejectedTokenIsReported(t *testing.T) {
 	}
 }
 
-func TestCreateAndJoinNeedNoDecision(t *testing.T) {
+func TestCreateAndJoinNeedNoRelationDecision(t *testing.T) {
 	s := newSessions(t)
-	noGate := WithChecker(context.Background(), stubChecker{limit: 10})
+	noGate := WithAuthority(WithChecker(context.Background(), stubChecker{limit: 10}), &fakeAuth{}, "tok") // no relation gate
 	sess, err := s.Create(noGate, "gm", "Friday")
 	if err != nil {
-		t.Fatalf("create with the authorization service down = %v, want success", err)
+		t.Fatalf("create with no relation decision = %v, want success", err)
 	}
 	_, code, err := s.CreateInvite(sctx, "gm", sess.ID, 0)
 	if err != nil {
@@ -836,6 +893,6 @@ func TestCreateAndJoinNeedNoDecision(t *testing.T) {
 	jr, err := s.Join(noGate, "p1", code)
 
 	if err != nil || jr.Status != data.RequestPending {
-		t.Fatalf("join with the authorization service down = %+v, %v; want a pending request", jr, err)
+		t.Fatalf("join with no relation decision = %+v, %v; want a pending request", jr, err)
 	}
 }

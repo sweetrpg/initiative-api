@@ -164,10 +164,15 @@ func checkUserID(u string) error {
 	return nil
 }
 
-// Open creates the session owned by actor and records actor as its GM. Creating is not a session
-// read: it is gated by the sessions_per_gm entitlement, which the caller checks first.
-func (r *Sessions) Open(ctx context.Context, actor string, s *Session) error {
-	if err := r.owned.Create(ctx, actor, actor, s); err != nil {
+// Open creates the session owned by actor with the ID auth-api minted for them and records actor
+// as its GM. Creating is not a session read: it is gated by the sessions_per_gm entitlement, which
+// the caller checks first, and by the mint that put the GM tuple on id.
+func (r *Sessions) Open(ctx context.Context, actor, id string, s *Session) error {
+	id, ok := cleanID(id)
+	if !ok {
+		return invalid("session id is not valid")
+	}
+	if err := r.owned.createWithID(ctx, actor, actor, id, s); err != nil {
 		return err
 	}
 	m := Member{ID: newID(), SessionID: s.ID, UserID: actor, Role: RoleGM, CreatedAt: r.now(), CreatedBy: actor, Live: true}
