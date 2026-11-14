@@ -37,6 +37,8 @@ func run() int {
 	database.SetupDatabase()
 	defer database.TeardownDatabase()
 
+	// Under the CronJob's activeDeadlineSeconds (270); the last minute is reserved for mint
+	// garbage collection (reconcile.Reconciler.GCReserve).
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	sessions := data.NewSessions(store.MongoDatabase{DB: database.Db})

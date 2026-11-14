@@ -3,8 +3,8 @@
 // openfga-writer role and an operator-minted bearer (PADR-0038). Every pass is idempotent: it
 // reads the tuples on each session, then that session's current memberships, diffs them, and
 // applies the difference, so a failed pass is finished by the next one. Reading tuples first means
-// a grant or revoke that lands between the two reads is added or deleted twice at worst, never
-// undone (PADR-0040 section 4). After the tuple pass it collects session mints that never became
+// a grant or revoke that lands between the two reads is, at worst, corrected by the next pass
+// (two narrow interleavings remain, accepted by PADR-0040 section 4). After the tuple pass it collects session mints that never became
 // sessions (PADR-0040 section 1).
 package reconcile
 
@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -28,7 +29,17 @@ const (
 	// mintMinAge keeps garbage collection away from sessions still being created; auth-api
 	// compares it against its own clock.
 	mintMinAge = 15 * time.Minute
+	// maxMintPages bounds the garbage-collection paging loop so a cursor that never ends cannot
+	// hold the job until its deadline.
+	maxMintPages = 1000
+	// defaultGCReserve is the end of the pass's time budget kept for garbage collection, so a slow
+	// tuple pass cannot starve it.
+	defaultGCReserve = 60 * time.Second
 )
+
+// mintIDPattern is what auth-api mints. Anything else matches no session, which would read as
+// "missing" and close a mint that is not ours to judge.
+var mintIDPattern = regexp.MustCompile(`^[0-9a-f]{24}$`)
 
 // ErrTokenRejected means auth-api refused the reconciler's bearer (expired, revoked, or missing
 // the openfga-writer role). The pass stops at once; an operator must mint a new token.
@@ -82,6 +93,9 @@ type Reconciler struct {
 	// Mints and Sessions enable the mint garbage collection; both nil skips it.
 	Mints    Mints
 	Sessions Sessions
+	// GCReserve is how much of ctx's deadline the tuple pass leaves for garbage collection; zero
+	// means 60 seconds. It has no effect when ctx has no deadline.
+	GCReserve time.Duration
 }
 
 // Result counts one pass.
@@ -136,13 +150,15 @@ func wanted(sessionID string, members []data.Member) map[Tuple]bool {
 // Run does one pass. It returns ErrTokenRejected if auth-api refuses the token; other failures
 // are logged per session and counted, and returned together after every session was tried.
 func (r Reconciler) Run(ctx context.Context) (Result, error) {
-	ids, err := r.sessionObjects(ctx)
+	tupleCtx, cancel := r.tuplePassContext(ctx)
+	defer cancel()
+	ids, err := r.sessionObjects(tupleCtx)
 	if err != nil {
 		return Result{}, err
 	}
 	res := Result{Sessions: len(ids)}
 	for _, id := range ids {
-		w, d, err := r.one(ctx, id)
+		w, d, err := r.one(tupleCtx, id)
 		res.Written += w
 		res.Deleted += d
 		if errors.Is(err, ErrTokenRejected) {
@@ -153,6 +169,7 @@ func (r Reconciler) Run(ctx context.Context) (Result, error) {
 			slog.ErrorContext(ctx, "reconcile session failed", "session", id, "error", err)
 		}
 	}
+	// Garbage collection runs on the whole context, not the tuple pass's shorter one.
 	if err := r.collect(ctx, &res); err != nil {
 		return res, err
 	}
@@ -160,6 +177,20 @@ func (r Reconciler) Run(ctx context.Context) (Result, error) {
 		return res, fmt.Errorf("reconcile: %d failures across %d sessions", res.Failed, res.Sessions)
 	}
 	return res, nil
+}
+
+// tuplePassContext is ctx with its deadline moved earlier by the GC reserve, so the tuple pass
+// cannot use the budget garbage collection needs.
+func (r Reconciler) tuplePassContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	reserve := r.GCReserve
+	if reserve <= 0 {
+		reserve = defaultGCReserve
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
 // collect closes mints that never became live sessions: for each open mint at least mintMinAge
@@ -172,7 +203,12 @@ func (r Reconciler) collect(ctx context.Context, res *Result) error {
 		return nil
 	}
 	after := ""
-	for {
+	for page := 0; ; page++ {
+		if page >= maxMintPages {
+			res.Failed++
+			slog.ErrorContext(ctx, "reconcile: mint paging did not end", "pages", page)
+			return nil
+		}
 		mints, next, err := r.Mints.ListMints(ctx, mintMinAge, after)
 		if err != nil {
 			if errors.Is(err, ErrTokenRejected) {
@@ -188,6 +224,11 @@ func (r Reconciler) collect(ctx context.Context, res *Result) error {
 		if next == "" {
 			return nil
 		}
+		if next == after {
+			res.Failed++
+			slog.ErrorContext(ctx, "reconcile: auth-api returned the same mint cursor twice", "cursor", next)
+			return nil
+		}
 		after = next
 	}
 }
@@ -196,13 +237,24 @@ func (r Reconciler) closeOrphans(ctx context.Context, mints []Mint, res *Result)
 	if len(mints) == 0 {
 		return nil
 	}
-	ids := make([]string, len(mints))
-	for i, m := range mints {
-		ids[i] = m.ID
+	ids := make([]string, 0, len(mints))
+	for _, m := range mints {
+		if !mintIDPattern.MatchString(m.ID) {
+			res.MintsSkipped++
+			slog.ErrorContext(ctx, "reconcile: ignoring a mint with a malformed id", "mint", m.ID)
+			continue
+		}
+		ids = append(ids, m.ID)
+	}
+	if len(ids) == 0 {
+		return nil
 	}
 	found, err := r.Sessions.LookupSessions(ctx, ids)
 	if err != nil {
+		// Counted as a failure too: a Mongo outage that persists must fail the job so the stall
+		// alert fires, not exit 0 with the mints left open.
 		res.MintsSkipped += len(ids)
+		res.Failed++
 		slog.ErrorContext(ctx, "reconcile: sessions lookup failed; leaving this batch of mints for the next pass", "mints", len(ids), "error", err)
 		return nil
 	}
