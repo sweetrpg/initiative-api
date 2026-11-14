@@ -1,4 +1,22 @@
 
+## 0.3.0 - 2026-11-14
+
+### Added
+- Require an OpenFGA decision for session data
+- Mint IDs and write membership tuples through auth-api
+- Read tuples before members, collect orphan mints, alert on stall
+
+
+### Fixed
+- Enforce each call's relation and gate joins on a resolved invite
+- Stop promoting the owner-scoped repository
+- End the session first on delete, keep Open retry-safe, finish revocations
+- Validate mint ids, bound paging, fail on lookup errors, reserve GC time
+- Answer 500 when auth-api rejects a request as malformed
+- Stop the tuple pass once its time is spent
+
+
+
 ## 0.2.1 - 2026-11-13
 
 ### Fixed
