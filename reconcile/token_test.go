@@ -22,7 +22,8 @@ type fakeAuth0 struct {
 	srv       *httptest.Server
 	calls     int
 	expiresIn int64
-	status    int // when non-zero, every request gets this status
+	status    int    // when non-zero, every request gets this status
+	retry     string // Retry-After header on error responses, when set
 	lastBody  map[string]string
 }
 
@@ -33,6 +34,9 @@ func newFakeAuth0(t *testing.T) *fakeAuth0 {
 		f.calls++
 		_ = json.NewDecoder(r.Body).Decode(&f.lastBody)
 		if f.status != 0 {
+			if f.retry != "" {
+				w.Header().Set("Retry-After", f.retry)
+			}
 			w.WriteHeader(f.status)
 			_, _ = w.Write([]byte(`{"error":"too_many_requests","echo":"` + testSecret + `"}`))
 			return

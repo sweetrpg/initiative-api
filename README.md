@@ -91,7 +91,12 @@ fetch a client-credentials token, cached in Redis as `reconciler:token` until 12
 A 401 from auth-api clears the cache, fetches once more and retries once. Exit 1 is a failed pass or an Auth0 or Redis
 failure, 2 missing or invalid configuration (the token URL must be https), 3 auth-api rejected a token. A 401 on a token fetched
 in the same run sets `reconciler:rejected` for an hour so a persistent 401 cannot spend the Auth0 token allowance; fix the cause,
-then `DEL reconciler:rejected` in the initiative cache to retry at once. For each session it reads the
+then `DEL reconciler:rejected` in the initiative cache to retry at once.
+A failed Auth0 token request (429, 5xx, 401/403 from Auth0, network error, malformed answer) backs off further fetches: 5, 10,
+20, 40, then 60 minutes (or Auth0's `Retry-After` on a 429 when longer, at most 60), tracked in `reconciler:auth0-failures`
+(2 hour TTL, cleared by a successful fetch) and `reconciler:auth0-backoff`. While it exists a run fails with exit 1 without
+calling Auth0, but a cached token is still used. After the cause is fixed, `DEL reconciler:auth0-backoff reconciler:auth0-failures`
+to retry at once. For each session it reads the
 tuples first and then that session's current members, so a grant or revoke between the two reads is at worst
 corrected by the next pass (PADR-0040). After the tuple pass it closes session mints older than 15 minutes
 whose session is missing or soft-deleted in Mongo (auth-api `GET /internal/openfga/session-mints`, paged by

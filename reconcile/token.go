@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,6 +34,15 @@ const (
 	// cache that silently fails to store cannot cost a token per run.
 	fetchGuardKey = "reconciler:fetch-guard"
 	fetchGuardTTL = 60 * time.Second
+	// auth0FailuresKey counts consecutive failed token fetches (TTL 2h, reset on success) and
+	// auth0BackoffKey blocks fetching while it exists, for 5m * 2^(failures-1) capped at 1h. After it
+	// expires the next fetch is the probe: success clears both keys, failure re-arms the backoff.
+	// A cached token is still served during backoff; only Auth0 calls stop.
+	auth0FailuresKey = "reconciler:auth0-failures"
+	auth0BackoffKey  = "reconciler:auth0-backoff"
+	failuresTTL      = 2 * time.Hour
+	backoffBase      = 5 * time.Minute
+	backoffMax       = time.Hour
 	// maxLifetime caps a lifetime Auth0 reports, so a bad value cannot cache a token for years.
 	maxLifetime = 30 * 24 * time.Hour
 )
@@ -50,6 +60,10 @@ type TokenSource interface {
 	// Accepted records that auth-api accepted the token, ending any earlier rejection.
 	Accepted(ctx context.Context)
 }
+
+// ErrAuth0Backoff is returned while earlier token fetches failed and the backoff has not expired.
+// It is not a token rejection: the run fails with exit 1 and Auth0 is not called.
+var ErrAuth0Backoff = errors.New("reconcile: Auth0 token fetch is backing off after earlier failures")
 
 // ErrNoRefresh is returned by a source that cannot replace a rejected token.
 var ErrNoRefresh = errors.New("reconcile: token cannot be refreshed")
@@ -189,14 +203,18 @@ func (c *ClientCredentials) cached() (string, error) {
 }
 
 func (c *ClientCredentials) fetchAndStore(ctx context.Context) (string, error) {
+	if err := c.checkBackoff(ctx); err != nil {
+		return "", err
+	}
 	if err := c.takeFetchGuard(); err != nil {
 		return "", err
 	}
 	tok, lifetime, err := c.fetch(ctx)
 	if err != nil {
-		return "", err
+		return "", c.recordFailure(ctx, err)
 	}
 	c.fetched = true
+	defer c.clearFailures(ctx)
 	ttl := lifetime - tokenSkew
 	if ttl < time.Second {
 		return tok, nil // too short to cache; the next run fetches again
@@ -208,6 +226,69 @@ func (c *ClientCredentials) fetchAndStore(ctx context.Context) (string, error) {
 	}
 	return tok, nil
 }
+
+// checkBackoff fails without calling Auth0 while the backoff key exists.
+func (c *ClientCredentials) checkBackoff(ctx context.Context) error {
+	conn := c.Pool.Get()
+	defer func() { _ = conn.Close() }()
+	left, err := redis.Int64(conn.Do("PTTL", auth0BackoffKey))
+	if err != nil {
+		return fmt.Errorf("read auth0 backoff: %w", err)
+	}
+	if left <= 0 { // -2: no key; -1: key without expiry, which this code never writes
+		return nil
+	}
+	remaining := (time.Duration(left) * time.Millisecond).Round(time.Second)
+	slog.WarnContext(ctx, "reconcile: Auth0 token fetch is backing off; not calling Auth0", "remaining", remaining.String())
+	return fmt.Errorf("%w (retry in %v)", ErrAuth0Backoff, remaining)
+}
+
+// recordFailure counts a failed fetch and arms the backoff: 5m, 10m, 20m, 40m, then 1h, or Auth0's
+// Retry-After when that is longer (capped at 1h). It returns the fetch error, joined with the Redis
+// error when the backoff could not be written. A Redis that cannot take this write could not take
+// the fetch guard's either, so the run would already have stopped before calling Auth0; the error
+// is still returned so a failure here is never silent.
+func (c *ClientCredentials) recordFailure(ctx context.Context, fetchErr error) error {
+	conn := c.Pool.Get()
+	defer func() { _ = conn.Close() }()
+	n, err := redis.Int64(conn.Do("INCR", auth0FailuresKey))
+	if err == nil {
+		_, err = conn.Do("EXPIRE", auth0FailuresKey, int64(failuresTTL/time.Second))
+	}
+	if err != nil {
+		return errors.Join(fetchErr, fmt.Errorf("count auth0 failure: %w", err))
+	}
+	wait := backoffBase << min(n-1, 10)
+	var fe *fetchError
+	if errors.As(fetchErr, &fe) && fe.retryAfter > wait {
+		wait = fe.retryAfter
+	}
+	wait = min(wait, backoffMax)
+	if _, err := conn.Do("SET", auth0BackoffKey, "1", "EX", int64(wait/time.Second)); err != nil {
+		return errors.Join(fetchErr, fmt.Errorf("arm auth0 backoff: %w", err))
+	}
+	slog.WarnContext(ctx, "reconcile: Auth0 token fetch failed; backing off", "failures", n, "wait", wait.String())
+	return fetchErr
+}
+
+// clearFailures ends the backoff after a successful fetch. A failure here only leaves keys that
+// expire on their own, so it is logged, not returned.
+func (c *ClientCredentials) clearFailures(ctx context.Context) {
+	conn := c.Pool.Get()
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Do("DEL", auth0BackoffKey, auth0FailuresKey); err != nil {
+		slog.ErrorContext(ctx, "reconcile: could not clear the Auth0 backoff keys", "error", err)
+	}
+}
+
+// fetchError is a failed token request. retryAfter is Auth0's Retry-After in seconds, when sent on
+// a 429.
+type fetchError struct {
+	msg        string
+	retryAfter time.Duration
+}
+
+func (e *fetchError) Error() string { return e.msg }
 
 // takeFetchGuard claims the right to call Auth0. It fails when Redis cannot take the write or
 // another fetch happened in the last minute, in both cases before any Auth0 call.
@@ -240,11 +321,17 @@ func (c *ClientCredentials) fetch(ctx context.Context) (string, time.Duration, e
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		// Only the failure class: the URL error text could echo the request.
-		return "", 0, fmt.Errorf("token endpoint unreachable (%s)", failureClass(err))
+		return "", 0, &fetchError{msg: fmt.Sprintf("token endpoint unreachable (%s)", failureClass(err))}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("token endpoint returned status %d", resp.StatusCode)
+		fe := &fetchError{msg: fmt.Sprintf("token endpoint returned status %d", resp.StatusCode)}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if secs, err := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("Retry-After")), 10, 64); err == nil && secs > 0 {
+				fe.retryAfter = time.Duration(min(secs, int64(backoffMax/time.Second))) * time.Second
+			}
+		}
+		return "", 0, fe
 	}
 	var out struct {
 		AccessToken string `json:"access_token"`
@@ -252,10 +339,10 @@ func (c *ClientCredentials) fetch(ctx context.Context) (string, time.Duration, e
 		ExpiresIn   int64  `json:"expires_in"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&out); err != nil || strings.TrimSpace(out.AccessToken) == "" || !strings.EqualFold(out.TokenType, "Bearer") {
-		return "", 0, errors.New("token endpoint returned no bearer access token")
+		return "", 0, &fetchError{msg: "token endpoint returned no bearer access token"}
 	}
 	if out.ExpiresIn <= 0 {
-		return "", 0, errors.New("token endpoint returned no token lifetime")
+		return "", 0, &fetchError{msg: "token endpoint returned no token lifetime"}
 	}
 	return out.AccessToken, time.Duration(min(out.ExpiresIn, int64(maxLifetime/time.Second))) * time.Second, nil
 }
