@@ -3,16 +3,89 @@ package domain
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // sctx carries a checker that grants 10 of every limit, so session tests run unlimited by default.
-var sctx = WithChecker(context.Background(), stubChecker{limit: 10})
+var sctx = WithAuthority(data.WithGate(WithChecker(context.Background(), stubChecker{limit: 10}), gate{allow: true}, "tok"), &fakeAuth{}, "tok")
+
+// fakeAuth is auth-api's session surface in memory: it mints real ObjectID hex IDs and records the
+// tuple traffic so tests can assert what was written and in what order.
+type fakeAuth struct {
+	mu      sync.Mutex
+	minted  []string
+	ended   []string
+	writes  []tupleCall
+	mintErr error
+	mintID  string // when set, Mint returns it instead of a fresh ObjectID
+	endErr  error
+	failW   error // returned by every WriteTuples when set
+}
+
+type tupleCall struct {
+	Session         string
+	Writes, Deletes []relations.Tuple
+}
+
+func (f *fakeAuth) Mint(context.Context, string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.mintErr != nil {
+		return "", f.mintErr
+	}
+	id := primitive.NewObjectID().Hex()
+	if f.mintID != "" {
+		id = f.mintID
+	}
+	f.minted = append(f.minted, id)
+	return id, nil
+}
+
+func (f *fakeAuth) EndSession(_ context.Context, _, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ended = append(f.ended, id)
+	return f.endErr
+}
+
+func (f *fakeAuth) WriteTuples(_ context.Context, _, id string, w, d []relations.Tuple) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failW != nil {
+		return f.failW
+	}
+	f.writes = append(f.writes, tupleCall{id, w, d})
+	return nil
+}
+
+// withAuth is sctx with its auth-api surface replaced by fa.
+func withAuth(fa *fakeAuth) context.Context { return WithAuthority(sctx, fa, "tok") }
+
+// gate is a relation checker with a fixed answer.
+type gate struct {
+	allow bool
+	err   error
+}
+
+func (g gate) Check(context.Context, string, string, string, string) (bool, error) {
+	return g.allow, g.err
+}
+
+// grantAll is a context carrying checker c and a relation gate that grants everything.
+func grantAll(c Checker) context.Context {
+	return WithAuthority(data.WithGate(WithChecker(context.Background(), c), gate{allow: true}, "tok"), &fakeAuth{}, "tok")
+}
+
+// viewCtx is sctx with the relation checker replaced.
+func viewCtx(g gate) context.Context { return data.WithGate(sctx, g, "tok") }
 
 func newSessions(t *testing.T) *Sessions {
 	t.Helper()
@@ -191,8 +264,11 @@ func TestJoinNeedsApprovalAndGrantsNothingBefore(t *testing.T) {
 	if _, err := s.Join(sctx, "newbie", code); !errors.Is(err, data.ErrConflict) {
 		t.Fatalf("member joins again = %v, want ErrConflict", err)
 	}
-	if _, err := s.Approve(sctx, "gm", sess.ID, jr.ID, data.RolePlayer); !errors.Is(err, data.ErrConflict) {
-		t.Fatalf("approve twice = %v, want ErrConflict", err)
+	if _, err := s.Approve(sctx, "gm", sess.ID, jr.ID, data.RolePlayer); err != nil {
+		t.Fatalf("approve twice with the same role = %v, want success (it finishes the tuple write)", err)
+	}
+	if _, err := s.Approve(sctx, "gm", sess.ID, jr.ID, data.RoleObserver); !errors.Is(err, data.ErrConflict) {
+		t.Fatalf("approve twice with another role = %v, want ErrConflict", err)
 	}
 }
 
@@ -471,7 +547,7 @@ func TestJoinHealsAnApprovalThatNeverAddedTheMember(t *testing.T) {
 	sess, _ := s.Create(sctx, "gm", "Friday")
 	_, code, _ := s.CreateInvite(sctx, "gm", sess.ID, 0)
 	jr, _ := s.Join(sctx, "u", code)
-	if _, err := s.repo.Decide(sctx, "gm", sess.ID, jr.ID, data.RequestApproved, data.RolePlayer, ""); err != nil {
+	if _, err := s.repo.Decide(sctx, mustDecision(t, "gm", sess.ID), jr.ID, data.RequestApproved, data.RolePlayer, ""); err != nil {
 		t.Fatal(err) // settled, but no member was added
 	}
 
@@ -518,7 +594,7 @@ func (m *meter) Check(_ context.Context, key string, _ entitlements.Policy) (ent
 
 func TestCreateStopsAtTheSessionLimit(t *testing.T) {
 	s := newSessions(t)
-	c := WithChecker(context.Background(), stubChecker{limit: 1})
+	c := grantAll(stubChecker{limit: 1})
 	if _, err := s.Create(c, "gm", "One"); err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +619,7 @@ func TestCreateFailsClosedWhenEntitlementsAreDown(t *testing.T) {
 
 func TestInactiveSessionIsReadableAndDeletableOnly(t *testing.T) {
 	s, id := table(t)
-	if err := s.repo.SetInactive(sctx, "gm", id, true); err != nil {
+	if err := s.repo.Limits().SetInactive(sctx, "gm", id, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -571,7 +647,7 @@ func TestInactiveSessionCannotBeJoined(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.repo.SetInactive(sctx, "gm", id, true); err != nil {
+	if err := s.repo.Limits().SetInactive(sctx, "gm", id, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -582,7 +658,7 @@ func TestInactiveSessionCannotBeJoined(t *testing.T) {
 
 func recorded(t *testing.T, s *Sessions, id string) data.Session {
 	t.Helper()
-	sess, err := s.repo.Live(sctx, "gm", id)
+	sess, err := s.repo.Live(sctx, mustDecision(t, "gm", id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +668,7 @@ func recorded(t *testing.T, s *Sessions, id string) data.Session {
 func TestGMRequestRecordsTheOwnersLimitAndUpgradeRefreshesIt(t *testing.T) {
 	s := newSessions(t)
 	m := &meter{limit: 10}
-	c := WithChecker(context.Background(), m)
+	c := grantAll(m)
 	sess, err := s.Create(c, "gm", "Friday")
 	if err != nil {
 		t.Fatal(err)
@@ -620,7 +696,7 @@ func TestMemberRequestsUseTheRecordAndNeverCallEntitlements(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &meter{err: errors.New("must not be called")}
-	c := WithChecker(context.Background(), m)
+	c := grantAll(m)
 
 	if _, err := s.Get(c, "p1", id); err != nil {
 		t.Fatalf("player get = %v", err)
@@ -637,7 +713,7 @@ func TestMemberRequestsUseTheRecordAndNeverCallEntitlements(t *testing.T) {
 func TestOutageOnRefreshKeepsTheRecordAndDoesNotFailTheGM(t *testing.T) {
 	s := newSessions(t)
 	m := &meter{limit: 10}
-	c := WithChecker(context.Background(), m)
+	c := grantAll(m)
 	sess, _ := s.Create(c, "gm", "Friday")
 	if _, err := s.Get(c, "gm", sess.ID); err != nil {
 		t.Fatal(err)
@@ -679,12 +755,12 @@ func TestAbsentGMAfterDowngradeLeavesTheStoredRecordAlone(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	m := &meter{limit: 10}
-	sess, err := s.Create(WithChecker(context.Background(), m), "gm", "Friday")
+	sess, err := s.Create(grantAll(m), "gm", "Friday")
 	if err != nil {
 		t.Fatal(err)
 	}
 	join(t, s, sess.ID, "p1", data.RolePlayer)
-	if _, err := s.Get(WithChecker(context.Background(), m), "gm", sess.ID); err != nil {
+	if _, err := s.Get(grantAll(m), "gm", sess.ID); err != nil {
 		t.Fatal(err)
 	}
 	before := recorded(t, s, sess.ID)
@@ -693,7 +769,7 @@ func TestAbsentGMAfterDowngradeLeavesTheStoredRecordAlone(t *testing.T) {
 	m.limit = 0
 	now = now.Add(48 * time.Hour)
 	for range 3 {
-		if _, err := s.Get(WithChecker(context.Background(), m), "p1", sess.ID); err != nil {
+		if _, err := s.Get(grantAll(m), "p1", sess.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -712,7 +788,7 @@ func TestStaleReadDoesNotAdvanceTheRecord(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	m := &meter{limit: 10}
-	c := WithChecker(context.Background(), m)
+	c := grantAll(m)
 	sess, _ := s.Create(c, "gm", "Friday")
 	if _, err := s.Get(c, "gm", sess.ID); err != nil {
 		t.Fatal(err)
@@ -728,5 +804,95 @@ func TestStaleReadDoesNotAdvanceTheRecord(t *testing.T) {
 	after := recorded(t, s, sess.ID)
 	if v, _ := OwnerLimit(after, KeyMembersPerSession); v != 10 || !after.OwnerLimitsAt.Equal(*before.OwnerLimitsAt) {
 		t.Fatalf("record = %d at %v; want 10 at %v unchanged", v, after.OwnerLimitsAt, before.OwnerLimitsAt)
+	}
+}
+
+func mustDecision(t *testing.T, actor, id string) data.Decision {
+	t.Helper()
+	d, err := data.Authorize(sctx, actor, id, "gm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestSessionReadsFailClosedWhenAuthorizationIsDown(t *testing.T) {
+	s, id := table(t)
+	down := viewCtx(gate{err: relations.ErrUnavailable})
+	reads := map[string]func() error{
+		"Get":     func() error { _, err := s.Get(down, "gm", id); return err },
+		"List":    func() error { _, err := s.List(down, "gm", data.Query{}); return err },
+		"Members": func() error { _, err := s.Members(down, "gm", id, data.Query{}); return err },
+		"Invites": func() error { _, err := s.Invites(down, "gm", id, data.Query{}); return err },
+		"Delete":  func() error { return s.Delete(down, "gm", id, 1) },
+		"Leave":   func() error { return s.Leave(down, "p1", id) },
+	}
+	for name, call := range reads {
+		if err := call(); !errors.Is(err, relations.ErrUnavailable) {
+			t.Errorf("%s = %v, want relations.ErrUnavailable", name, err)
+		}
+	}
+}
+
+func TestSessionWithoutAGateFailsClosed(t *testing.T) {
+	s, id := table(t)
+
+	_, err := s.Get(WithChecker(context.Background(), stubChecker{limit: 10}), "gm", id)
+
+	if !errors.Is(err, relations.ErrUnavailable) {
+		t.Fatalf("get with no gate = %v, want relations.ErrUnavailable", err)
+	}
+}
+
+func TestDeniedDecisionReturnsNoSessionData(t *testing.T) {
+	s, id := table(t)
+	denied := viewCtx(gate{})
+
+	got, err := s.Get(denied, "gm", id)
+
+	if !errors.Is(err, data.ErrForbidden) || got.ID != "" || got.Name != "" {
+		t.Fatalf("get = %+v, %v; want ErrForbidden and no session data", got, err)
+	}
+	if page, err := s.Members(denied, "gm", id, data.Query{}); !errors.Is(err, data.ErrForbidden) || len(page.Items) != 0 {
+		t.Fatalf("members = %+v, %v; want ErrForbidden and no items", page, err)
+	}
+}
+
+func TestListSkipsSessionsTheCallerMayNotView(t *testing.T) {
+	s, _ := table(t)
+
+	page, err := s.List(viewCtx(gate{}), "gm", data.Query{})
+
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("list = %+v, %v; want no items and no error", page.Items, err)
+	}
+}
+
+func TestRejectedTokenIsReported(t *testing.T) {
+	s, id := table(t)
+
+	_, err := s.Get(viewCtx(gate{err: relations.ErrUnauthorized}), "gm", id)
+
+	if !errors.Is(err, relations.ErrUnauthorized) {
+		t.Fatalf("get = %v, want relations.ErrUnauthorized", err)
+	}
+}
+
+func TestCreateAndJoinNeedNoRelationDecision(t *testing.T) {
+	s := newSessions(t)
+	noGate := WithAuthority(WithChecker(context.Background(), stubChecker{limit: 10}), &fakeAuth{}, "tok") // no relation gate
+	sess, err := s.Create(noGate, "gm", "Friday")
+	if err != nil {
+		t.Fatalf("create with no relation decision = %v, want success", err)
+	}
+	_, code, err := s.CreateInvite(sctx, "gm", sess.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jr, err := s.Join(noGate, "p1", code)
+
+	if err != nil || jr.Status != data.RequestPending {
+		t.Fatalf("join with no relation decision = %+v, %v; want a pending request", jr, err)
 	}
 }

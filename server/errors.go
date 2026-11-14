@@ -10,6 +10,7 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/relations"
 )
 
 // ErrorBody is the typed error response: a stable code, a safe message, the correlation ID, and
@@ -34,6 +35,9 @@ func writeError(c *gin.Context, err error, current any) {
 	if status >= http.StatusInternalServerError && status != http.StatusServiceUnavailable {
 		slog.ErrorContext(c.Request.Context(), "request failed", "error", err, "correlation_id", body.CorrelationID)
 	}
+	if body.Code == "membership_sync_pending" || body.Code == "rate_limited" {
+		c.Header("Retry-After", "5")
+	}
 	c.AbortWithStatusJSON(status, body)
 }
 
@@ -49,6 +53,26 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "credentials_unavailable", Message: "Integration credentials are temporarily unavailable."}, http.StatusServiceUnavailable
 	case errors.Is(err, domain.ErrOwnerLimitsUnknown):
 		return ErrorBody{Code: "owner_entitlements_pending", Message: "The session owner has not connected yet. Try again after they do."}, http.StatusServiceUnavailable
+	case errors.Is(err, domain.ErrSyncPending):
+		return ErrorBody{Code: "membership_sync_pending", Message: "Your change was saved, but access is still being updated. Repeat the request in a moment."}, http.StatusServiceUnavailable
+	case errors.Is(err, relations.ErrDenied):
+		return ErrorBody{Code: "forbidden", Message: "You may not do that."}, http.StatusForbidden
+	case errors.Is(err, relations.ErrRejected):
+		// A malformed request is our bug and retrying cannot help; not 503. It falls to the opaque
+		// 500 and writeError logs it.
+		return ErrorBody{Code: "internal", Message: "Something went wrong."}, http.StatusInternalServerError
+	case errors.Is(err, relations.ErrConflict):
+		// The member record is already saved, and the reconciler writes tuples from Mongo through
+		// the internal path, which the 200-tuple cap does not cover, so a refused member is let in
+		// on the next pass. Accepted: the members_per_session entitlement caps a session at 20
+		// members, and only a direct caller of auth-api can reach the tuple cap.
+		return ErrorBody{Code: "session_full", Message: "The session has reached its member limit."}, http.StatusConflict
+	case errors.Is(err, relations.ErrLimited):
+		return ErrorBody{Code: "rate_limited", Message: "Too many requests. Try again shortly."}, http.StatusTooManyRequests
+	case errors.Is(err, relations.ErrUnavailable):
+		return ErrorBody{Code: "authorization_unavailable", Message: "Session access cannot be checked right now. Try again shortly."}, http.StatusServiceUnavailable
+	case errors.Is(err, relations.ErrUnauthorized):
+		return ErrorBody{Code: "unauthorized", Message: "Your session is not valid."}, http.StatusUnauthorized
 	case errors.Is(err, entitlements.ErrUnavailable):
 		return ErrorBody{Code: "entitlements_unavailable", Message: "Entitlements are temporarily unavailable. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnauthorized):
