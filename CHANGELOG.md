@@ -1,4 +1,21 @@
 
+## 0.4.0 - 2026-11-14
+
+### Added
+- Remove live sessions that have no GM
+- Cap GM-less removals at 10 per pass and document the reaper
+- Authenticate as an Auth0 machine-to-machine client with a Redis token cache
+
+
+### Fixed
+- Drop membership records before soft-deleting a GM-less session
+- Use the partial members index, cap removals exactly, and skip young sessions
+- Filter SessionsWithGM on live so it uses the partial index
+- Bound Auth0 token use on a persistent 401 and harden the token client
+- Fail closed before Auth0 when Redis cannot take writes
+
+
+
 ## 0.3.0 - 2026-11-14
 
 ### Added
