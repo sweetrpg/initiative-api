@@ -35,6 +35,10 @@ const (
 	// defaultGCReserve is the end of the pass's time budget kept for garbage collection, so a slow
 	// tuple pass cannot starve it.
 	defaultGCReserve = 60 * time.Second
+	// maxGMLessPerPass is the most GM-less sessions one pass will remove. More than that looks like
+	// a wrong database or an empty members collection, which would otherwise wipe every session
+	// older than mintMinAge and its tuples.
+	maxGMLessPerPass = 10
 )
 
 // mintIDPattern is what auth-api mints. Anything else matches no session, which would read as
@@ -77,6 +81,10 @@ type Mints interface {
 type Sessions interface {
 	// LookupSessions maps each found ID to whether it is soft-deleted. A missing ID is absent.
 	LookupSessions(ctx context.Context, ids []string) (map[string]bool, error)
+	// SessionsWithGM returns the IDs among ids that have a live GM member record.
+	SessionsWithGM(ctx context.Context, ids []string) (map[string]bool, error)
+	// RemoveGMLess soft-deletes a live session that has no GM, and its membership records.
+	RemoveGMLess(ctx context.Context, sessionID string) error
 }
 
 // Tuples is auth-api's internal tuple surface.
@@ -104,6 +112,10 @@ type Result struct {
 	// MintsClosed counts mints garbage collection closed; MintsSkipped counts those it left for
 	// the next pass because the sessions lookup failed.
 	MintsClosed, MintsSkipped int
+	// GMLessRemoved counts live sessions with no GM that garbage collection soft-deleted.
+	GMLessRemoved int
+	// GMLessCapped is set when a pass reached maxGMLessPerPass and left further GM-less sessions.
+	GMLessCapped bool
 }
 
 var roleRelations = map[string]bool{data.RoleGM: true, data.RoleCoGM: true, data.RolePlayer: true, data.RoleObserver: true}
@@ -265,9 +277,32 @@ func (r Reconciler) closeOrphans(ctx context.Context, mints []Mint, res *Result)
 		slog.ErrorContext(ctx, "reconcile: sessions lookup failed; leaving this batch of mints for the next pass", "mints", len(ids), "error", err)
 		return nil
 	}
+	gmless := r.gmLess(ctx, ids, found, res)
 	for _, id := range ids {
 		if deleted, exists := found[id]; exists && !deleted {
-			continue // a live session
+			if !gmless[id] {
+				continue // a live session with its GM
+			}
+			if res.GMLessRemoved >= maxGMLessPerPass {
+				if !res.GMLessCapped {
+					res.GMLessCapped = true
+					res.Failed++
+					slog.ErrorContext(ctx, "reconcile: reached the cap of sessions with no GM removed in one pass; leaving the rest", "cap", maxGMLessPerPass)
+				}
+				continue
+			}
+			err := r.Sessions.RemoveGMLess(ctx, id)
+			if errors.Is(err, data.ErrConflict) {
+				slog.InfoContext(ctx, "reconcile: session has a GM or is too new to remove; leaving it", "session", id)
+				continue
+			}
+			if err != nil {
+				res.Failed++
+				slog.ErrorContext(ctx, "reconcile: removing a session with no GM failed", "session", id, "error", err)
+				continue
+			}
+			res.GMLessRemoved++
+			slog.InfoContext(ctx, "reconcile: removed a live session that has no GM", "session", id)
 		}
 		if err := r.Mints.CloseMint(ctx, id); err != nil {
 			if errors.Is(err, ErrTokenRejected) {
@@ -281,6 +316,33 @@ func (r Reconciler) closeOrphans(ctx context.Context, mints []Mint, res *Result)
 		slog.InfoContext(ctx, "reconcile: closed a mint with no live session", "mint", id)
 	}
 	return nil
+}
+
+// gmLess returns which of the live sessions among ids have no live GM record, using one query. A
+// failed query counts as a failure and returns nothing, so no session is removed on a guess.
+func (r Reconciler) gmLess(ctx context.Context, ids []string, found map[string]bool, res *Result) map[string]bool {
+	var live []string
+	for _, id := range ids {
+		if deleted, exists := found[id]; exists && !deleted {
+			live = append(live, id)
+		}
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	withGM, err := r.Sessions.SessionsWithGM(ctx, live)
+	if err != nil {
+		res.Failed++
+		slog.ErrorContext(ctx, "reconcile: GM lookup failed; leaving live sessions alone", "sessions", len(live), "error", err)
+		return nil
+	}
+	out := map[string]bool{}
+	for _, id := range live {
+		if !withGM[id] {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 // one reconciles a single session and returns how many tuples it wrote and deleted. It reads the

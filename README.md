@@ -90,7 +90,15 @@ operator-minted bearer, PADR-0038). Exit 3 means the token was rejected or expir
 tuples first and then that session's current members, so a grant or revoke between the two reads is at worst
 corrected by the next pass (PADR-0040). After the tuple pass it closes session mints older than 15 minutes
 whose session is missing or soft-deleted in Mongo (auth-api `GET /internal/openfga/session-mints`, paged by
-`after`/`next`, then `POST .../{id}/close`); a failed sessions lookup skips that batch until the next pass. The manifests are in
+`after`/`next`, then `POST .../{id}/close`); a failed sessions lookup skips that batch until the next pass. A live session with no live GM record is soft-deleted as the system, with its membership records
+(records first, session last, so a failed pass is retried), and its mint closed. Nothing in this repo removes a
+live GM record today, so this only reaps double-failure orphans (`Open` stored the session but neither its GM
+record nor its own removal) and sessions an operator stripped of a GM; the latter lose their co_gm and player
+data 15 minutes later. One extra `$in` query per mint page finds them, covered by the partial `session_user` index
+(`session_id` prefix, `live` exists). A pass stops after removing 10 and fails the job once (a wrong database or an
+empty members collection would otherwise wipe every old session; earlier pages may already have removed up to 10).
+A session younger than 15 minutes, or one that gained a GM, is left alone; a failed query leaves live sessions alone
+and fails the job. The manifests are in
 `kubernetes/overlays/dev/reconciler.yaml`; `reconciler-alert.yaml` alerts when no run has succeeded in 15 minutes
 (token expired, job failing, or CronJob suspended).
 
