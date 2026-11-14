@@ -22,7 +22,8 @@ type fakeAuth0 struct {
 	srv       *httptest.Server
 	calls     int
 	expiresIn int64
-	status    int // when non-zero, every request gets this status
+	status    int    // when non-zero, every request gets this status
+	retry     string // Retry-After header on error responses, when set
 	lastBody  map[string]string
 }
 
@@ -33,6 +34,9 @@ func newFakeAuth0(t *testing.T) *fakeAuth0 {
 		f.calls++
 		_ = json.NewDecoder(r.Body).Decode(&f.lastBody)
 		if f.status != 0 {
+			if f.retry != "" {
+				w.Header().Set("Retry-After", f.retry)
+			}
 			w.WriteHeader(f.status)
 			_, _ = w.Write([]byte(`{"error":"too_many_requests","echo":"` + testSecret + `"}`))
 			return
@@ -332,6 +336,15 @@ type readOnlyFor struct {
 }
 
 func (r readOnlyFor) Do(cmd string, args ...any) (any, error) {
+	if (strings.EqualFold(cmd, "EVALSHA") || strings.EqualFold(cmd, "EVAL")) && len(r.keys) > 0 {
+		for _, a := range args { // the script's KEYS name the keys it writes
+			for _, k := range r.keys {
+				if a == k {
+					return nil, errors.New("OOM command not allowed when used memory > 'maxmemory'")
+				}
+			}
+		}
+	}
 	if strings.EqualFold(cmd, "SET") && len(args) > 0 {
 		if len(r.keys) == 0 {
 			return nil, errors.New("READONLY You can't write against a read only replica")
