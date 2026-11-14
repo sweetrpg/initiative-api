@@ -35,6 +35,10 @@ const (
 	// defaultGCReserve is the end of the pass's time budget kept for garbage collection, so a slow
 	// tuple pass cannot starve it.
 	defaultGCReserve = 60 * time.Second
+	// maxGMLessPerPass is the most GM-less sessions one pass will remove. More than that looks like
+	// a wrong database or an empty members collection, which would otherwise wipe every session
+	// older than mintMinAge and its tuples.
+	maxGMLessPerPass = 10
 )
 
 // mintIDPattern is what auth-api mints. Anything else matches no session, which would read as
@@ -110,6 +114,8 @@ type Result struct {
 	MintsClosed, MintsSkipped int
 	// GMLessRemoved counts live sessions with no GM that garbage collection soft-deleted.
 	GMLessRemoved int
+	// GMLessSeen counts GM-less sessions found this pass; past maxGMLessPerPass none is removed.
+	GMLessSeen int
 }
 
 var roleRelations = map[string]bool{data.RoleGM: true, data.RoleCoGM: true, data.RolePlayer: true, data.RoleObserver: true}
@@ -322,6 +328,12 @@ func (r Reconciler) gmLess(ctx context.Context, ids []string, found map[string]b
 		if !withGM[id] {
 			out[id] = true
 		}
+	}
+	res.GMLessSeen += len(out)
+	if len(out) > 0 && res.GMLessSeen > maxGMLessPerPass {
+		res.Failed++
+		slog.ErrorContext(ctx, "reconcile: too many sessions with no GM; removing none", "found", res.GMLessSeen, "cap", maxGMLessPerPass)
+		return nil
 	}
 	return out
 }

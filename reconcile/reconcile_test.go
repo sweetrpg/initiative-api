@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -502,5 +503,41 @@ func TestADeletedSessionIsStillJustClosed(t *testing.T) {
 
 	if err != nil || len(lookup.removed) != 0 || len(mints.closed) != 1 || res.GMLessRemoved != 0 {
 		t.Fatalf("res=%+v err=%v removed=%v closed=%v; want the deleted session's mint closed without a removal", res, err, lookup.removed, mints.closed)
+	}
+}
+
+func TestMoreThanTheCapOfGMLessSessionsRemovesNoneAndFailsTheJob(t *testing.T) {
+	var page []Mint
+	found := map[string]bool{}
+	for i := 0; i <= maxGMLessPerPass; i++ {
+		id := fmt.Sprintf("%024x", i+1)
+		page = append(page, Mint{ID: id})
+		found[id] = false
+	}
+	mints := &fakeMints{pages: [][]Mint{page}}
+	lookup := &fakeSessionLookup{found: found, withGM: map[string]bool{}}
+
+	res, err := gc(mints, lookup)
+
+	if err == nil || res.Failed != 1 || len(lookup.removed) != 0 || len(mints.closed) != 0 {
+		t.Fatalf("res=%+v err=%v removed=%v closed=%v; want nothing removed and the job failed", res, err, lookup.removed, mints.closed)
+	}
+}
+
+func TestExactlyTheCapOfGMLessSessionsIsStillRemoved(t *testing.T) {
+	var page []Mint
+	found := map[string]bool{}
+	for i := 0; i < maxGMLessPerPass; i++ {
+		id := fmt.Sprintf("%024x", i+1)
+		page = append(page, Mint{ID: id})
+		found[id] = false
+	}
+	mints := &fakeMints{pages: [][]Mint{page}}
+	lookup := &fakeSessionLookup{found: found, withGM: map[string]bool{}}
+
+	res, err := gc(mints, lookup)
+
+	if err != nil || res.GMLessRemoved != maxGMLessPerPass {
+		t.Fatalf("res=%+v err=%v; want all %d removed", res, err, maxGMLessPerPass)
 	}
 }

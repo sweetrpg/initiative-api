@@ -35,3 +35,12 @@ func TestOwnerScopedIndexesLeadWithOwner(t *testing.T) {
 		}
 	}
 }
+
+func TestMemberIndexesLetSessionsWithGMUseASessionIDPrefix(t *testing.T) {
+	for _, ix := range SessionMemberSpec.Indexes {
+		if ix.Name == "session_user" && ix.Keys[0].Key == "session_id" {
+			return
+		}
+	}
+	t.Fatal("members has no index led by session_id; the reconciler's $in query would scan")
+}
