@@ -1,7 +1,8 @@
 # Alerts when the OpenFGA tuple reconciler stops succeeding (PADR-0040 section 5). While it is
-# stopped, deleted tuples are not restored and mint garbage is not collected. Causes: the
-# Auth0 or Redis failing, a rotated client secret Akeyless does not hold yet, auth-api rejecting
-# the token (the job exits 3), the job is failing, or the CronJob is suspended.
+# stopped, deleted tuples are not restored and mint garbage is not collected. Causes: Auth0 or
+# Redis failing (Auth0 failures back off up to an hour between attempts), a rotated client secret
+# Akeyless does not hold yet, auth-api rejecting the token (the job exits 3), the job is failing,
+# or the CronJob is suspended.
 # Prometheus picks rules up by the release=prometheus label (kube-prometheus-stack ruleSelector).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -24,7 +25,10 @@ spec:
             summary: The Initiative tuple reconciler has not succeeded in 15 minutes
             description: >-
               Check the latest reconciler Job in sweetrpg-initiative. Exit code 3 means auth-api
-              rejected the reconciler token: check the initiative-reconciler role, deny entries and the login_profiles mapping (PADR-0041).
+              rejected the reconciler token: check the initiative-reconciler role, deny entries
+              and the login_profiles mapping (PADR-0041). Exit code 1 with "backing off" in the
+              log means Auth0 failed earlier: fix the cause, then clear the reconciler:auth0-backoff
+              and reconciler:auth0-failures keys in the initiative cache.
         - alert: InitiativeReconcilerNeverSucceeded
           expr: absent(kube_cronjob_status_last_successful_time{namespace="sweetrpg-initiative", cronjob="reconciler"})
           for: 15m
