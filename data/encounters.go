@@ -146,6 +146,9 @@ func validateCombatant(c Combatant) error {
 	if !slices.Contains(Kinds, c.Kind) {
 		return fmt.Errorf("%w: combatant %q kind %q", ErrInvalid, c.ID, c.Kind)
 	}
+	if !slices.Contains([]string{"", HealthFull, HealthStatus, HealthHidden}, c.HealthVisibility) {
+		return fmt.Errorf("%w: combatant %q health visibility %q", ErrInvalid, c.ID, c.HealthVisibility)
+	}
 	for _, cond := range c.Conditions {
 		if strings.TrimSpace(cond.Name) == "" || (cond.RoundsRemaining != nil && *cond.RoundsRemaining < 1) {
 			return fmt.Errorf("%w: combatant %q has an invalid condition", ErrInvalid, c.ID)

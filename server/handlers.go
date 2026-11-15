@@ -56,6 +56,9 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	if s.Sessions != nil {
 		setupSessionHandlers(u, s.Sessions)
 	}
+	if s.Encounters != nil && s.Sessions != nil {
+		setupEncounterViewHandlers(u, s.Encounters, s.Sessions)
+	}
 	setupRefHandlers(g, s.Encounters)
 	if s.Credentials != nil {
 		setupAdminCredentialHandlers(ProtectedGroup(r, s.Authz, nil, authz.RoleAdmin), s.Credentials)
