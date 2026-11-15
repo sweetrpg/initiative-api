@@ -1,4 +1,15 @@
 
+## 0.5.0 - 2026-11-15
+
+### Added
+- Back off exponentially after failed Auth0 token requests
+
+
+### Fixed
+- Keep the cached token during Auth0 backoff and record failures atomically
+
+
+
 ## 0.4.0 - 2026-11-14
 
 ### Added
