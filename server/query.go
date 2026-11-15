@@ -36,9 +36,13 @@ func parseQuery(c *gin.Context, types map[string]string) (data.Query, bool) {
 	}
 	q.Fields = splitList(c.Query("fields"))
 	for key, values := range c.Request.URL.Query() {
+		if !strings.HasPrefix(key, "filter") {
+			continue
+		}
 		field, op, ok := filterKey(key)
 		if !ok {
-			continue
+			badRequest(c, "unrecognized filter parameter "+key+": use filter[field], filter[field][in] or filter[field][contains]")
+			return q, false
 		}
 		f := data.Filter{Field: field, Op: op}
 		for _, raw := range values {

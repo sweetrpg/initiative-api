@@ -43,11 +43,18 @@ func (b characterBody) character() data.Character {
 	return data.Character{Name: b.Name, Kind: b.Kind, Notes: b.Notes, Health: b.Health, ExternalRefs: b.ExternalRefs}
 }
 
-type rosterBody struct {
-	Revision   int64           `json:"revision"`
+// rosterCreate is the body of POST /rosters.
+type rosterCreate struct {
 	Name       *string         `json:"name"`
 	Favorite   *bool           `json:"favorite"`
 	Characters []characterBody `json:"characters"`
+}
+
+// rosterPatch is the body of PATCH /rosters/:id. Characters change through their own routes.
+type rosterPatch struct {
+	Revision int64   `json:"revision"`
+	Name     *string `json:"name"`
+	Favorite *bool   `json:"favorite"`
 }
 
 // conflict writes err, attaching the roster's current state to a revision conflict so the client
@@ -64,29 +71,44 @@ func (h rosterHandlers) conflict(c *gin.Context, err error, id string) {
 
 func (h rosterHandlers) list(c *gin.Context) {
 	q, ok := parseQuery(c, map[string]string{"favorite": typeBool})
-	if !ok {
+	if !ok || !checkFields(c, q.Fields, data.RosterSpec.Projectable) {
 		return
 	}
+	// The projection is applied to the rendered roster, so an unselected field is absent rather
+	// than a zero value.
+	fields := q.Fields
+	q.Fields = nil
 	page, err := h.svc.List(c.Request.Context(), authz.Viewer(c), q)
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": page.Items, "next_cursor": page.NextCursor})
+	items := make([]map[string]any, 0, len(page.Items))
+	for _, r := range page.Items {
+		items = append(items, projectMap(toMap(r), fields, "id", "revision"))
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "next_cursor": page.NextCursor})
 }
 
 func (h rosterHandlers) get(c *gin.Context) {
-	r, err := h.svc.Get(c.Request.Context(), authz.Viewer(c), c.Param("id"))
+	fields, ok := fieldsOf(c, data.RosterSpec.Projectable)
+	if !ok {
+		return
+	}
+	r, err := h.svc.Load(c.Request.Context(), authz.Viewer(c), c.Param("id"))
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
-	c.JSON(http.StatusOK, r)
+	c.JSON(http.StatusOK, projectMap(toMap(r), fields, "id", "revision"))
 }
 
 func (h rosterHandlers) create(c *gin.Context) {
-	var b rosterBody
-	if err := c.ShouldBindJSON(&b); err != nil || b.Name == nil {
+	var b rosterCreate
+	if !bindJSON(c, &b) {
+		return
+	}
+	if b.Name == nil {
 		badRequest(c, "request body must be a JSON roster with a name")
 		return
 	}
@@ -107,9 +129,8 @@ func (h rosterHandlers) create(c *gin.Context) {
 }
 
 func (h rosterHandlers) update(c *gin.Context) {
-	var b rosterBody
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON")
+	var b rosterPatch
+	if !bindJSON(c, &b) {
 		return
 	}
 	rev, ok := revisionOf(c, b.Revision)
@@ -117,7 +138,7 @@ func (h rosterHandlers) update(c *gin.Context) {
 		return
 	}
 	owner, id := authz.Viewer(c), c.Param("id")
-	cur, err := h.svc.Get(c.Request.Context(), owner, id)
+	cur, err := h.svc.Load(c.Request.Context(), owner, id)
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -158,8 +179,7 @@ type characterRequest struct {
 
 func (h rosterHandlers) addCharacter(c *gin.Context) {
 	var b characterRequest
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be a JSON character")
+	if !bindJSON(c, &b) {
 		return
 	}
 	rev, ok := revisionOf(c, b.Revision)
@@ -177,8 +197,7 @@ func (h rosterHandlers) addCharacter(c *gin.Context) {
 
 func (h rosterHandlers) replaceCharacter(c *gin.Context) {
 	var b characterRequest
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be a JSON character")
+	if !bindJSON(c, &b) {
 		return
 	}
 	rev, ok := revisionOf(c, b.Revision)

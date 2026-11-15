@@ -26,7 +26,7 @@ func (s *Rosters) CreateEncounterFromRoster(ctx context.Context, owner, actor, r
 	if err := requireSystem(ctx, enc.GameSystemID); err != nil {
 		return data.Encounter{}, err
 	}
-	roster, err := s.rosters.Get(ctx, owner, rosterID)
+	roster, err := s.Load(ctx, owner, rosterID)
 	if err != nil {
 		return data.Encounter{}, err
 	}
@@ -48,7 +48,7 @@ func (s *Rosters) CreateEncounterFromRoster(ctx context.Context, owner, actor, r
 // is not removed. Current health becomes the character's defaults. The encounter is not modified.
 // An empty name falls back to the encounter's name.
 func (s *Rosters) SaveAsRoster(ctx context.Context, owner, actor, encounterID, name string) (data.Roster, error) {
-	enc, err := s.encounters.Get(ctx, owner, encounterID)
+	enc, err := s.encounters.Load(ctx, owner, encounterID)
 	if err != nil {
 		return data.Roster{}, err
 	}

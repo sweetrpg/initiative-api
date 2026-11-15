@@ -60,7 +60,7 @@ func (h encounterViewHandlers) get(c *gin.Context) {
 		writeError(c, err, nil)
 		return
 	}
-	writeView(c, http.StatusOK, view)
+	writeView(c, http.StatusOK, view, nil)
 }
 
 // combatant answers from the encounter view, so a combatant the caller may not see is absent from
@@ -85,11 +85,11 @@ func (h encounterViewHandlers) combatant(c *gin.Context) {
 
 // writeView sends view with an ETag: the stored revision for a GM, and for everyone else the digest
 // of what they can see, so a hidden edit never changes what a player's client observes.
-func writeView(c *gin.Context, status int, view domain.EncounterView) {
+func writeView(c *gin.Context, status int, view domain.EncounterView, fields []string) {
 	if tag, ok := view[domain.FieldViewTag].(string); ok {
 		c.Header("ETag", `"`+tag+`"`)
 	} else if rev, ok := view["revision"].(int64); ok {
 		c.Header("ETag", `"r`+strconv.FormatInt(rev, 10)+`"`)
 	}
-	c.JSON(status, view)
+	c.JSON(status, projected(view, fields))
 }

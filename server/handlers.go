@@ -47,7 +47,7 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupStatusHandlers(r)
 
 	g := ProtectedGroup(r, s.Authz, s.Credentials)
-	g.Use(withOwnerRecord(s.OwnerLimits), withChecker(s.Entitlements), withGate(s.Relations))
+	g.Use(limitBody(), withOwnerRecord(s.OwnerLimits), withChecker(s.Entitlements), withGate(s.Relations))
 	if s.Limits != nil || s.Locks != nil {
 		g.Use(reconcileLimits(s))
 	}

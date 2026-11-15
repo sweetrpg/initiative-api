@@ -79,58 +79,62 @@ func (b combatantBody) combatant() data.Combatant {
 		Notes: b.Notes, ExternalRefs: b.ExternalRefs, Hidden: b.Hidden, HealthVisibility: b.HealthVisibility, NotesShared: b.NotesShared}
 }
 
-// encounterRequest is an encounter body: every field optional on update, the settings plus the
-// starting combatants on create.
-type encounterRequest struct {
-	Revision     int64           `json:"revision"`
-	Name         *string         `json:"name"`
-	GameSystemID *string         `json:"game_system_id"`
-	Ordering     *string         `json:"ordering"`
-	TieBreaker   *string         `json:"tie_breaker"`
-	Labels       *bool           `json:"labels"`
-	Colorblind   *bool           `json:"colorblind"`
-	ThemeID      *string         `json:"theme_id"`
-	Position     *int            `json:"position"`
-	Combatants   []combatantBody `json:"combatants"`
+// encounterSettings are the fields of an encounter a client sets. Every one is optional.
+type encounterSettings struct {
+	Name         *string `json:"name"`
+	GameSystemID *string `json:"game_system_id"`
+	Ordering     *string `json:"ordering"`
+	TieBreaker   *string `json:"tie_breaker"`
+	Labels       *bool   `json:"labels"`
+	Colorblind   *bool   `json:"colorblind"`
+	ThemeID      *string `json:"theme_id"`
+	Position     *int    `json:"position"`
+}
+
+// encounterCreate is the body of POST /encounters: the settings plus the starting combatants.
+type encounterCreate struct {
+	encounterSettings
+	Combatants []combatantBody `json:"combatants"`
+}
+
+// encounterPatch is the body of PATCH /encounters/:id. Combatants change through their own routes.
+type encounterPatch struct {
+	encounterSettings
+	Revision int64 `json:"revision"`
 }
 
 // settings is the set of fields the request names, keyed as the data layer's update list.
-func (b encounterRequest) settings() map[string]any {
+func (b encounterSettings) settings() map[string]any {
 	set := map[string]any{}
-	put := func(k string, ok bool, v any) {
-		if ok {
-			set[k] = v
-		}
-	}
 	if b.Name != nil {
-		put("name", true, *b.Name)
+		set["name"] = *b.Name
 	}
 	if b.GameSystemID != nil {
-		put("game_system_id", true, *b.GameSystemID)
+		set["game_system_id"] = *b.GameSystemID
 	}
 	if b.Ordering != nil {
-		put("ordering", true, *b.Ordering)
+		set["ordering"] = *b.Ordering
 	}
 	if b.TieBreaker != nil {
-		put("tie_breaker", true, *b.TieBreaker)
+		set["tie_breaker"] = *b.TieBreaker
 	}
 	if b.Labels != nil {
-		put("labels", true, *b.Labels)
+		set["labels"] = *b.Labels
 	}
 	if b.Colorblind != nil {
-		put("colorblind", true, *b.Colorblind)
+		set["colorblind"] = *b.Colorblind
 	}
 	if b.ThemeID != nil {
-		put("theme_id", true, *b.ThemeID)
+		set["theme_id"] = *b.ThemeID
 	}
 	if b.Position != nil {
-		put("position", true, *b.Position)
+		set["position"] = *b.Position
 	}
 	return set
 }
 
-// encounter builds a new draft from the request, defaulting the ordering mode and tie breaker.
-func (b encounterRequest) encounter() data.Encounter {
+// encounter builds a new draft from the settings, defaulting the ordering mode and tie breaker.
+func (b encounterSettings) encounter() data.Encounter {
 	e := data.Encounter{Ordering: data.OrderHighToLow, TieBreaker: data.TieRandom}
 	if b.Name != nil {
 		e.Name = *b.Name
@@ -156,10 +160,16 @@ func (b encounterRequest) encounter() data.Encounter {
 	if b.Position != nil {
 		e.Position = *b.Position
 	}
-	for _, cb := range b.Combatants {
-		e.Combatants = append(e.Combatants, cb.combatant())
-	}
 	return e
+}
+
+// encounterFields are the names ?fields= may select from an encounter view: the stored fields
+// the spec lists plus the derived count.
+var encounterFields = append(append([]string{}, data.EncounterSpec.Projectable...), "combatant_count")
+
+// projected keeps the fields the client selected; identity keys always stay.
+func projected(view domain.EncounterView, fields []string) map[string]any {
+	return projectMap(view, fields, "id", "revision", domain.FieldViewTag)
 }
 
 // respond is the one place these handlers write an encounter: the caller's view of enc.
@@ -169,7 +179,7 @@ func (h encounterHandlers) respond(c *gin.Context, status int, enc data.Encounte
 		writeError(c, err, nil)
 		return
 	}
-	writeView(c, status, view)
+	writeView(c, status, view, nil)
 }
 
 // fail writes err; a revision conflict carries the encounter's current view.
@@ -185,29 +195,44 @@ func (h encounterHandlers) fail(c *gin.Context, err error, id string) {
 
 func (h encounterHandlers) list(c *gin.Context) {
 	q, ok := parseQuery(c, map[string]string{"position": typeInt})
-	if !ok {
+	if !ok || !checkFields(c, q.Fields, encounterFields) {
 		return
 	}
+	// Projected after the view is built (below), never in the query: a view built from a partly
+	// loaded encounter would show zero values for the fields left out.
+	fields := q.Fields
+	q.Fields = nil
 	page, err := h.svc.ViewsOwned(c.Request.Context(), authz.Viewer(c), q)
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": page.Items, "next_cursor": page.NextCursor})
+	items := make([]map[string]any, 0, len(page.Items))
+	for _, v := range page.Items {
+		items = append(items, projected(v, fields))
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "next_cursor": page.NextCursor})
 }
 
 func (h encounterHandlers) get(c *gin.Context) {
+	fields, ok := fieldsOf(c, encounterFields)
+	if !ok {
+		return
+	}
 	view, err := h.svc.ViewOwned(c.Request.Context(), authz.Viewer(c), c.Param("id"))
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
-	writeView(c, http.StatusOK, view)
+	writeView(c, http.StatusOK, view, fields)
 }
 
 func (h encounterHandlers) create(c *gin.Context) {
-	var b encounterRequest
-	if err := c.ShouldBindJSON(&b); err != nil || b.Name == nil {
+	var b encounterCreate
+	if !bindJSON(c, &b) {
+		return
+	}
+	if b.Name == nil {
 		badRequest(c, "request body must be a JSON encounter with a name")
 		return
 	}
@@ -215,7 +240,11 @@ func (h encounterHandlers) create(c *gin.Context) {
 		return
 	}
 	owner := authz.Viewer(c)
-	enc, err := h.svc.Create(c.Request.Context(), owner, owner, b.encounter())
+	e := b.encounter()
+	for _, cb := range b.Combatants {
+		e.Combatants = append(e.Combatants, cb.combatant())
+	}
+	enc, err := h.svc.Create(c.Request.Context(), owner, owner, e)
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -224,9 +253,8 @@ func (h encounterHandlers) create(c *gin.Context) {
 }
 
 func (h encounterHandlers) update(c *gin.Context) {
-	var b encounterRequest
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON")
+	var b encounterPatch
+	if !bindJSON(c, &b) {
 		return
 	}
 	rev, ok := revisionOf(c, b.Revision)
@@ -260,8 +288,7 @@ func (h encounterHandlers) addCombatant(c *gin.Context) {
 		combatantBody
 		Revision int64 `json:"revision"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be a JSON combatant")
+	if !bindJSON(c, &b) {
 		return
 	}
 	rev, ok := revisionOf(c, b.Revision)
@@ -290,8 +317,7 @@ func (h encounterHandlers) updateCombatant(c *gin.Context) {
 		HealthVisibility *string          `json:"health_visibility"`
 		NotesShared      *bool            `json:"notes_shared"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON")
+	if !bindJSON(c, &b) {
 		return
 	}
 	rev, ok := revisionOf(c, b.Revision)
@@ -367,8 +393,11 @@ func bodyRevision(c *gin.Context) int64 {
 
 // fromRoster creates an encounter with one combatant per character of the roster in the path.
 func (h encounterHandlers) fromRoster(c *gin.Context) {
-	var b encounterRequest
-	if err := c.ShouldBindJSON(&b); err != nil || b.Name == nil {
+	var b encounterSettings
+	if !bindJSON(c, &b) {
+		return
+	}
+	if b.Name == nil {
 		badRequest(c, "request body must be a JSON encounter with a name")
 		return
 	}
@@ -377,7 +406,6 @@ func (h encounterHandlers) fromRoster(c *gin.Context) {
 	}
 	owner := authz.Viewer(c)
 	e := b.encounter()
-	e.Combatants = nil
 	enc, err := h.rosters.CreateEncounterFromRoster(c.Request.Context(), owner, owner, c.Param("id"), e)
 	if err != nil {
 		writeError(c, err, nil)
@@ -392,8 +420,7 @@ func (h encounterHandlers) saveAsRoster(c *gin.Context) {
 	var b struct {
 		Name string `json:"name"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil || b.Name == "" {
-		badRequest(c, "request body must be JSON with a roster name")
+	if c.Request.ContentLength != 0 && !bindJSON(c, &b) { // the name is optional: it defaults to the encounter's
 		return
 	}
 	if !requireRoom(c, h.ent, domain.KeySavedRosters, h.rosters.Count) {

@@ -163,7 +163,7 @@ func TestRosterListRejectsWhatTheSpecDoesNotAllow(t *testing.T) {
 		"/rosters?sort=owner_user_id":          422,
 		"/rosters?fields=owner_user_id,secret": 422,
 		"/rosters?filter[name][contains]=":     422,
-		"/rosters?filter[name][regex]=.*":      200, // not a filter key: ignored, never an operator
+		"/rosters?filter[name][regex]=.*":      400, // not a filter operator: refused, never passed on
 	} {
 		if w := callAs(r, "user-ok", "GET", path, ""); w.Code != want {
 			t.Errorf("GET %s = %d %s, want %d", path, w.Code, w.Body, want)

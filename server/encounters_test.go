@@ -67,13 +67,13 @@ func TestCreateAndFetchAnEncounterReturnsIDAndRevision(t *testing.T) {
 	}
 }
 
-func TestACallerSuppliedSessionIDIsIgnoredOnCreate(t *testing.T) {
+func TestACallerSuppliedSessionIDIsRefusedAsAnUnknownBodyField(t *testing.T) {
 	r, _ := encRouter(t, "5")
 
-	created := newEncounter(t, r, "user-ok", `{"name":"X","game_system_id":"`+data.DefaultSystemID+`","session_id":"`+foreignSession+`"}`)
+	w := callAs(r, "user-ok", "POST", "/encounters", `{"name":"X","game_system_id":"`+data.DefaultSystemID+`","session_id":"`+foreignSession+`"}`)
 
-	if _, has := created["session_id"]; has {
-		t.Fatalf("created encounter = %v, want a private encounter", created)
+	if b := decodeBody(t, w); w.Code != http.StatusUnprocessableEntity || b["code"] != "unknown_body_field" || b["key"] != "session_id" {
+		t.Fatalf("create with a session_id = %d %s, want 422 unknown_body_field naming it", w.Code, w.Body)
 	}
 }
 
@@ -253,8 +253,8 @@ func TestRosterTransfersReassignRandomCombatantIDsAndCountAgainstLimits(t *testi
 	if save.Code != 201 || over.Code != 403 || decodeBody(t, over)["key"] != "initiative.saved_rosters" {
 		t.Errorf("save-as-roster = %d, second = %d %s; want the second refused at the roster limit", save.Code, over.Code, over.Body)
 	}
-	if bad := callAs(r, "user-ok", "POST", "/rosters/"+rid+"/encounters", `{"name":"S","game_system_id":"`+data.DefaultSystemID+`","session_id":"`+foreignSession+`"}`); bad.Code != 201 || strings.Contains(bad.Body.String(), "session_id") {
-		t.Errorf("session_id in a from-roster body = %d %s, want it ignored", bad.Code, bad.Body)
+	if bad := callAs(r, "user-ok", "POST", "/rosters/"+rid+"/encounters", `{"name":"S","game_system_id":"`+data.DefaultSystemID+`","session_id":"`+foreignSession+`"}`); bad.Code != 422 {
+		t.Errorf("session_id in a from-roster body = %d %s, want 422", bad.Code, bad.Body)
 	}
 }
 

@@ -82,6 +82,18 @@ func (s *Rosters) Create(ctx context.Context, owner, actor, name string, favorit
 	return r, nil
 }
 
+// Load returns owner's roster; a miss is 403 when the roster belongs to another owner and 404
+// when there is none, decided after the owner-scoped read has already failed.
+func (s *Rosters) Load(ctx context.Context, owner, id string) (data.Roster, error) {
+	r, err := s.rosters.Get(ctx, owner, id)
+	if errors.Is(err, data.ErrNotFound) {
+		if cerr := s.rosters.Missing(ctx, owner, id); cerr != nil {
+			return data.Roster{}, cerr
+		}
+	}
+	return r, err
+}
+
 // Get returns owner's roster.
 func (s *Rosters) Get(ctx context.Context, owner, id string) (data.Roster, error) {
 	return s.rosters.Get(ctx, owner, id)
