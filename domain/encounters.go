@@ -2,6 +2,8 @@ package domain
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -10,8 +12,15 @@ import (
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/store"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
+
+// randomID is a combatant ID: 12 random bytes in hex. It is not an ObjectID, whose counter and
+// timestamp would let a player see gaps where hidden combatants were added between visible ones.
+func randomID() string {
+	b := make([]byte, 12)
+	_, _ = cryptorand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // ErrTransition is returned for a status change the encounter's current status does not allow.
 // It wraps data.ErrInvalid.
@@ -31,7 +40,7 @@ func NewEncounters(db store.Database) *Encounters {
 	return &Encounters{
 		repo:    data.NewEncounters(db),
 		systems: data.NewSystemRepo(db),
-		newID:   func() string { return primitive.NewObjectID().Hex() },
+		newID:   randomID,
 		perm:    rand.Perm,
 	}
 }
@@ -42,6 +51,11 @@ func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.E
 	enc.Name = strings.TrimSpace(enc.Name)
 	if enc.Name == "" {
 		return data.Encounter{}, invalid("encounter name is required")
+	}
+	// An encounter joins a session only through a path that authorizes the caller as that
+	// session's GM; until one exists, a caller-supplied session id is refused.
+	if enc.SessionID != "" {
+		return data.Encounter{}, invalid("an encounter cannot be created inside a session here")
 	}
 	_, err := s.systems.Get(ctx, enc.GameSystemID)
 	if errors.Is(err, data.ErrNotFound) {

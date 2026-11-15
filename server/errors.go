@@ -83,6 +83,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "entitlement_required", Message: "This needs an entitlement your account does not currently hold.", Key: domain.KeyGameSystemsExtra}, http.StatusForbidden
 	case errors.Is(err, data.ErrInactive):
 		return ErrorBody{Code: "item_inactive", Message: "This item is over your plan's limit. You can still view or delete it; choose which items stay active to use it again."}, http.StatusForbidden
+	case errors.Is(err, data.ErrNotMember):
+		return ErrorBody{Code: "forbidden", Message: "You are not a member of this session."}, http.StatusForbidden
 	case errors.Is(err, data.ErrForbidden):
 		return ErrorBody{Code: "forbidden", Message: "You do not own this record."}, http.StatusForbidden
 	case errors.Is(err, data.ErrRevisionConflict):

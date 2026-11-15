@@ -64,6 +64,7 @@ var (
 		StateFields:   []string{"status", "round", "current_combatant_id", "turn_queue", "combatants", "ref_keys"},
 		UnsetOnDelete: []string{"ref_keys"},
 		Indexes: []store.IndexSpec{
+			{Name: "session_position", Keys: asc("session_id", "position")},
 			{Name: "owner_position", Keys: asc("owner_user_id", "position")},
 			{Name: "owner_ref_keys", Keys: asc("owner_user_id", "ref_keys")},
 			{Name: "owner_name", Keys: asc("owner_user_id", "name")},
