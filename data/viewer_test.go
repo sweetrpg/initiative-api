@@ -89,3 +89,16 @@ func TestTheOwnerPathCannotReadOrChangeASessionEncounter(t *testing.T) {
 		t.Errorf("encounter count = %d, %v; want it untouched", after, err)
 	}
 }
+
+func TestEncounterCountAndLimitStatesCoverPrivateEncountersOnly(t *testing.T) {
+	r := newEncounters(t)
+	newEncounter(t, r, "u1")
+	sessionEncounter(t, r, "u1", otherSession, nil)
+
+	n, err := r.Count(ctx, "u1", nil)
+	states, serr := r.ItemStates(ctx, "u1")
+
+	if err != nil || n != 1 || serr != nil || len(states) != 1 {
+		t.Fatalf("count = %d, %v; item states = %d, %v; want 1: a session encounter counts against the session's limits", n, err, len(states), serr)
+	}
+}

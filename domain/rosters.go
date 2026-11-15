@@ -20,6 +20,7 @@ var kinds = data.Kinds
 
 // Rosters implements roster and character rules.
 type Rosters struct {
+	themes     *data.Owned[data.Theme, *data.Theme]
 	rosters    *data.Owned[data.Roster, *data.Roster]
 	encounters *data.Encounters
 	newID      func() string
@@ -28,6 +29,7 @@ type Rosters struct {
 // NewRosters builds the roster service on db.
 func NewRosters(db store.Database) *Rosters {
 	return &Rosters{
+		themes:     data.NewOwned[data.Theme](db, data.ThemeSpec),
 		rosters:    data.NewOwned[data.Roster](db, data.RosterSpec),
 		encounters: data.NewEncounters(db),
 		newID:      func() string { return primitive.NewObjectID().Hex() },
@@ -45,6 +47,10 @@ func normalize(c data.Character) (data.Character, error) {
 	if c.Name == "" {
 		return c, invalid("character name is required")
 	}
+	if err := errors.Join(data.CheckText("character name", c.Name, data.MaxNameLen), data.CheckText("character notes", c.Notes, data.MaxNotesLen),
+		data.CheckMaps("character", c.Health, c.ExternalRefs)); err != nil {
+		return c, err
+	}
 	if !slices.Contains(kinds, c.Kind) {
 		return c, invalid("character kind %q", c.Kind)
 	}
@@ -53,6 +59,9 @@ func normalize(c data.Character) (data.Character, error) {
 }
 
 func (s *Rosters) prepare(chars []data.Character) ([]data.Character, error) {
+	if len(chars) > data.MaxCharacters {
+		return nil, invalid("a roster holds at most %d characters", data.MaxCharacters)
+	}
 	out := make([]data.Character, 0, len(chars))
 	for _, c := range chars {
 		n, err := normalize(c)
@@ -68,8 +77,8 @@ func (s *Rosters) prepare(chars []data.Character) ([]data.Character, error) {
 // Create stores a new roster for owner. Character IDs are assigned here; any supplied are ignored.
 func (s *Rosters) Create(ctx context.Context, owner, actor, name string, favorite bool, chars []data.Character) (data.Roster, error) {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return data.Roster{}, invalid("roster name is required")
+	if err := data.CheckName("roster name", name); err != nil {
+		return data.Roster{}, err
 	}
 	prepared, err := s.prepare(chars)
 	if err != nil {
@@ -112,8 +121,8 @@ func (s *Rosters) Count(ctx context.Context, owner string) (int64, error) {
 // Rename sets the roster's name and favorite flag, compare-and-set on revision.
 func (s *Rosters) Rename(ctx context.Context, owner, actor, id string, rev int64, name string, favorite bool) (data.Roster, error) {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return data.Roster{}, invalid("roster name is required")
+	if err := data.CheckName("roster name", name); err != nil {
+		return data.Roster{}, err
 	}
 	return s.rosters.Update(ctx, owner, actor, id, rev, map[string]any{"name": name, "favorite": favorite})
 }
@@ -140,6 +149,9 @@ func (s *Rosters) editCharacters(ctx context.Context, owner, actor, id string, r
 	next, err := edit(slices.Clone(cur.Characters))
 	if err != nil {
 		return data.Roster{}, err
+	}
+	if len(next) > data.MaxCharacters {
+		return data.Roster{}, invalid("a roster holds at most %d characters", data.MaxCharacters)
 	}
 	return s.rosters.Update(ctx, owner, actor, id, rev, map[string]any{"characters": next})
 }

@@ -16,6 +16,12 @@ func (s *Rosters) CreateEncounterFromRoster(ctx context.Context, owner, actor, r
 	if enc.Name == "" {
 		return data.Encounter{}, invalid("encounter name is required")
 	}
+	if err := checkTheme(ctx, s.themes, owner, enc.ThemeID); err != nil {
+		return data.Encounter{}, err
+	}
+	if err := data.CheckName("encounter name", enc.Name); err != nil {
+		return data.Encounter{}, err
+	}
 	// An encounter joins a session only through a path that authorizes the caller as that session's GM.
 	if enc.SessionID != "" {
 		return data.Encounter{}, invalid("an encounter cannot be created inside a session here")

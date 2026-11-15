@@ -371,6 +371,11 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 			t.Errorf("route %s %s has no entry in this test: add one, and make sure its response is built by the view builder", route.Method, route.Path)
 		}
 	}
+	// A stale revision's 409 carries the current encounter, and that too is a built view.
+	stale := callAs(r, "user-ok", "PATCH", "/encounters/"+pid+"?revision=9999", `{"name":"late"}`)
+	if cur, _ := decodeBody(t, stale)["current"].(map[string]any); stale.Code != http.StatusConflict || cur["combatant_count"] == nil {
+		t.Errorf("stale PATCH = %d %s, want 409 whose current is a built view", stale.Code, stale.Body)
+	}
 	for _, name := range order {
 		c := calls[name]()
 		w := callAs(r, c.token, c.method, c.path, c.body)
@@ -392,6 +397,9 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 		}
 		for _, it := range items {
 			m, _ := it.(map[string]any)
+			if m != nil && m["turn_queue"] != nil && m["combatant_count"] == nil {
+				t.Errorf("%s returned a raw encounter (a turn_queue with no combatant_count): %v", name, m)
+			}
 			// combatant_count exists only in a built view; a serialized data.Encounter or Combatant lacks it.
 			if m == nil || (m["combatant_count"] == nil && m["combatants"] != nil) || (m["combatant_count"] == nil && m["kind"] == nil) {
 				t.Errorf("%s returned %v, which the view builder did not build", name, m)

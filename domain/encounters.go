@@ -30,6 +30,7 @@ var ErrTransition = fmt.Errorf("%w: status transition not allowed", data.ErrInva
 // ordering engine, not here: adding, restoring, or re-scoring a combatant leaves the queue to it.
 type Encounters struct {
 	repo    *data.Encounters
+	themes  *data.Owned[data.Theme, *data.Theme]
 	systems *data.SystemRepo
 	newID   func() string
 	perm    func(n int) []int
@@ -39,15 +40,34 @@ type Encounters struct {
 func NewEncounters(db store.Database) *Encounters {
 	return &Encounters{
 		repo:    data.NewEncounters(db),
+		themes:  data.NewOwned[data.Theme](db, data.ThemeSpec),
 		systems: data.NewSystemRepo(db),
 		newID:   randomID,
 		perm:    rand.Perm,
 	}
 }
 
+// checkTheme accepts no theme, a packaged theme, or a custom theme the owner has. Another user's
+// theme and a made-up ID are the same refusal, so a probe learns nothing about other accounts.
+func checkTheme(ctx context.Context, themes *data.Owned[data.Theme, *data.Theme], owner, id string) error {
+	if id == "" || strings.HasPrefix(id, PackagedPrefix) {
+		return nil
+	}
+	if _, err := themes.Get(ctx, owner, id); err != nil {
+		if errors.Is(err, data.ErrNotFound) {
+			return invalid("theme_id is not one of your themes")
+		}
+		return err
+	}
+	return nil
+}
+
 // Create stores enc as owner's new draft encounter. The name is required, the game system must
 // exist, and any combatants supplied get server-assigned IDs.
 func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.Encounter) (data.Encounter, error) {
+	if err := checkTheme(ctx, s.themes, owner, enc.ThemeID); err != nil {
+		return data.Encounter{}, err
+	}
 	enc.Name = strings.TrimSpace(enc.Name)
 	if enc.Name == "" {
 		return data.Encounter{}, invalid("encounter name is required")
@@ -101,6 +121,14 @@ func (s *Encounters) Count(ctx context.Context, owner string) (int64, error) {
 // display flags, theme_id, position). Combat state cannot be set here, but a new ordering, tie
 // breaker, or game system recomputes the turn queue in the same write.
 func (s *Encounters) UpdateSettings(ctx context.Context, owner, actor, id string, rev int64, set map[string]any) (data.Encounter, error) {
+	if name, ok := set["name"].(string); ok {
+		set["name"] = strings.TrimSpace(name)
+	}
+	if theme, ok := set["theme_id"].(string); ok {
+		if err := checkTheme(ctx, s.themes, owner, theme); err != nil {
+			return data.Encounter{}, err
+		}
+	}
 	if sysID, ok := set["game_system_id"].(string); ok {
 		if err := requireSystem(ctx, sysID); err != nil {
 			return data.Encounter{}, err

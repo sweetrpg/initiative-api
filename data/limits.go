@@ -23,7 +23,7 @@ func (r *Owned[T, P]) ItemStates(ctx context.Context, owner string) ([]ItemState
 	if err := checkUserID(owner); err != nil {
 		return nil, err
 	}
-	return r.itemStates(ctx, scope(owner))
+	return r.itemStates(ctx, r.scoped(owner))
 }
 
 func (r *Owned[T, P]) itemStates(ctx context.Context, filter bson.D) ([]ItemState, error) {
@@ -60,7 +60,7 @@ func (r *Owned[T, P]) SetInactive(ctx context.Context, owner, id string, inactiv
 		update = bson.D{{Key: "$unset", Value: bson.D{{Key: "inactive_at", Value: ""}}}}
 	}
 	var discard T
-	err := r.c.FindOneAndUpdate(ctx, scopeID(owner, id), update, &discard)
+	err := r.c.FindOneAndUpdate(ctx, r.scopedID(owner, id), update, &discard)
 	if errors.Is(err, store.ErrNotFound) {
 		return ErrNotFound
 	}
@@ -87,7 +87,7 @@ func (r *Owned[T, P]) SetKeepRanks(ctx context.Context, owner string, ids []stri
 			update = bson.D{{Key: "$set", Value: bson.D{{Key: "keep_rank", Value: n}}}}
 		}
 		var discard T
-		if err := r.c.FindOneAndUpdate(ctx, scopeID(owner, st.ID), update, &discard); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := r.c.FindOneAndUpdate(ctx, r.scopedID(owner, st.ID), update, &discard); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("set keep rank: %w", err)
 		}
 	}
