@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -18,6 +19,12 @@ type EntitlementRequiredError struct{ Key string }
 func (e *EntitlementRequiredError) Error() string {
 	return fmt.Sprintf("domain: entitlement %s is required", e.Key)
 }
+
+// ErrLimitsNotSynced is returned to an integration credential when the owner's entitlement value it
+// needs has not been recorded yet. A credential has no user bearer to read entitlements with, so the
+// owner must use Initiative once with their own sign-in (the app's usage and create calls record
+// the values). It fails closed.
+var ErrLimitsNotSynced = errors.New("domain: the owner's entitlement values have not been recorded yet")
 
 type checkerKey struct{}
 

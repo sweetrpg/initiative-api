@@ -63,6 +63,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "owner_entitlements_pending", Message: "The session owner has not connected yet. Try again after they do."}, http.StatusServiceUnavailable
 	case errors.Is(err, domain.ErrSyncPending):
 		return ErrorBody{Code: "membership_sync_pending", Message: "Your change was saved, but access is still being updated. Repeat the request in a moment."}, http.StatusServiceUnavailable
+	case errors.Is(err, domain.ErrLimitsNotSynced):
+		return ErrorBody{Code: "entitlements_unavailable", Message: "Your plan limits have not been synced yet. Open Initiative once with your own sign-in, then try again."}, http.StatusServiceUnavailable
 	case errors.Is(err, relations.ErrDenied):
 		return ErrorBody{Code: "forbidden", Message: "You may not do that."}, http.StatusForbidden
 	case errors.Is(err, relations.ErrRejected):
