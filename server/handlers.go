@@ -59,6 +59,9 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	if s.Encounters != nil && s.Sessions != nil {
 		setupEncounterViewHandlers(u, s.Encounters, s.Sessions)
 	}
+	if s.Encounters != nil {
+		setupEncounterHandlers(g, s.Encounters, s.Rosters, s.Entitlements)
+	}
 	if s.Rosters != nil {
 		setupRosterHandlers(g, s.Rosters, s.Entitlements)
 	}

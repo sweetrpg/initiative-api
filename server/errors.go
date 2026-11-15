@@ -44,7 +44,15 @@ func writeError(c *gin.Context, err error, current any) {
 func classifyError(err error) (ErrorBody, int) {
 	var ee *domain.EntitlementError
 	var er *domain.EntitlementRequiredError
+	var he *data.HealthError
 	switch {
+	case errors.As(err, &he):
+		// Typed validation failure (initiative-api-resources, "Typed error responses"): the code is
+		// stable and the key names the offending health field, so a client can mark it.
+		if he.Unknown {
+			return ErrorBody{Code: "unknown_field", Message: "That health field is not defined by the game system.", Key: he.Field}, http.StatusUnprocessableEntity
+		}
+		return ErrorBody{Code: "field_out_of_range", Message: "That health value is outside the allowed range for the game system.", Key: he.Field}, http.StatusUnprocessableEntity
 	case errors.As(err, &ee):
 		return ErrorBody{Code: "entitlement_limit_reached", Message: "Your plan's limit for this item has been reached.", Key: ee.Key, Limit: &ee.Limit}, http.StatusForbidden
 	case errors.Is(err, domain.ErrReadOnly):

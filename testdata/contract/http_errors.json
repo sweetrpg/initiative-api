@@ -256,6 +256,100 @@
         "correlation_id": "CORRELATION_ID",
         "message": "The deletion did not complete and may be partly done. Retry the same request."
       }
+    },
+    {
+      "scenario": "saved encounter limit reached",
+      "status": 403,
+      "body": {
+        "code": "entitlement_limit_reached",
+        "correlation_id": "CORRELATION_ID",
+        "key": "initiative.saved_encounters",
+        "limit": 1,
+        "message": "Your plan's limit for this item has been reached."
+      }
+    },
+    {
+      "scenario": "encounter write without a revision",
+      "status": 400,
+      "body": {
+        "code": "bad_request",
+        "correlation_id": "CORRELATION_ID",
+        "message": "the current revision is required: send If-Match, a revision query parameter, or a revision field"
+      }
+    },
+    {
+      "scenario": "health value out of range",
+      "status": 422,
+      "body": {
+        "code": "field_out_of_range",
+        "correlation_id": "CORRELATION_ID",
+        "key": "hp",
+        "message": "That health value is outside the allowed range for the game system."
+      }
+    },
+    {
+      "scenario": "health field not in the game system",
+      "status": 422,
+      "body": {
+        "code": "unknown_field",
+        "correlation_id": "CORRELATION_ID",
+        "key": "mana",
+        "message": "That health field is not defined by the game system."
+      }
+    },
+    {
+      "scenario": "encounter stale revision",
+      "status": 409,
+      "body": {
+        "code": "revision_conflict",
+        "correlation_id": "CORRELATION_ID",
+        "current": {
+          "colorblind": false,
+          "combatant_count": 1,
+          "combatants": [
+            {
+              "conditions": [],
+              "health": {
+                "hp": 3,
+                "max_hp": 10
+              },
+              "id": "GENERATED_ID",
+              "kind": "adversary",
+              "name": "Orc",
+              "notes": "",
+              "removed": false
+            }
+          ],
+          "created_at": "TIMESTAMP",
+          "created_by": "u-1",
+          "deleted_at": null,
+          "deleted_by": null,
+          "game_system_id": "none",
+          "id": "GENERATED_ID",
+          "labels": false,
+          "name": "A",
+          "ordering": "highToLow",
+          "owner_user_id": "u-1",
+          "position": 0,
+          "revision": 1,
+          "round": 0,
+          "status": "draft",
+          "tie_breaker": "random",
+          "turn_queue": [],
+          "updated_at": "TIMESTAMP",
+          "updated_by": "u-1"
+        },
+        "message": "The record changed since you loaded it."
+      }
+    },
+    {
+      "scenario": "another user's encounter",
+      "status": 403,
+      "body": {
+        "code": "forbidden",
+        "correlation_id": "CORRELATION_ID",
+        "message": "You do not own this record."
+      }
     }
   ]
 }

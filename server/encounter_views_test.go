@@ -50,8 +50,14 @@ func roleChecks(w http.ResponseWriter, r *http.Request) {
 // observer (u-3), plus one stored encounter holding a hidden adversary that is the current turn.
 func viewTable(t *testing.T) (r http.Handler, db *fake.DB, sessionID string) {
 	t.Helper()
+	return viewTableLimit(t, "3")
+}
+
+// viewTableLimit is viewTable with every entitlement limit set to limit.
+func viewTableLimit(t *testing.T, limit string) (r http.Handler, db *fake.DB, sessionID string) {
+	t.Helper()
 	db = fake.NewDB()
-	router, _ := credRouterRel(t, "3", db, roleChecks)
+	router, _ := credRouterRel(t, limit, db, roleChecks)
 	w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", w.Code, w.Body)
