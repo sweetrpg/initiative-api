@@ -52,7 +52,7 @@ var combatantRules = map[string]data.ViewLevel{
 }
 
 // computedCombatant fields depend on the viewer and the combatant's visibility settings.
-var computedCombatant = map[string]bool{"health": true, "notes": true}
+var computedCombatant = map[string]bool{"health": true, "notes": true, "conditions": true}
 
 // conditionRules is the same table for data.Condition.
 var conditionRules = map[string]data.ViewLevel{"name": data.ViewObserver, "rounds_remaining": data.ViewObserver}
@@ -175,6 +175,12 @@ func combatantView(c data.Combatant, def []data.TrackerField, v data.Viewer) map
 			if gm || c.NotesShared {
 				return c.Notes, true
 			}
+		case "conditions":
+			conds := make([]map[string]any, 0, len(c.Conditions))
+			for _, cond := range c.Conditions {
+				conds = append(conds, projectStruct(reflect.ValueOf(cond), conditionRules, v.Level(), nil, nil))
+			}
+			return conds, true
 		}
 		return nil, false
 	}, computedCombatant)
@@ -186,11 +192,6 @@ func combatantView(c data.Combatant, def []data.TrackerField, v data.Viewer) map
 	if v.Level() == data.ViewPlayer {
 		out[fieldMine] = own
 	}
-	conds := make([]map[string]any, 0, len(c.Conditions))
-	for _, cond := range c.Conditions {
-		conds = append(conds, projectStruct(reflect.ValueOf(cond), conditionRules, v.Level(), nil, nil))
-	}
-	out["conditions"] = conds
 	return out
 }
 
@@ -206,27 +207,53 @@ func healthStatus(def []data.TrackerField, health map[string]int) (string, bool)
 		if first == nil {
 			first = &def[i]
 		}
-		bound, ok := boundOf(f, health)
-		if !ok {
+		if f.Max == nil && f.MaxRef == "" {
 			continue
 		}
-		return statusOf(health[f.Key], minOf(f), bound), true
+		bound, ok := boundOf(def, f, health)
+		if !ok {
+			return "", false // a bound that cannot be resolved shows no status rather than a guessed one
+		}
+		cur, ok := valueOf(def, health, f.Key)
+		if !ok {
+			return "", false
+		}
+		return statusOf(cur, minOf(f), bound), true
 	}
 	if first == nil {
 		return "", false
 	}
-	if health[first.Key] <= minOf(*first) {
+	cur, ok := valueOf(def, health, first.Key)
+	if !ok {
+		return "", false
+	}
+	if cur <= minOf(*first) {
 		return StatusDown, true
 	}
 	return StatusHealthy, true
 }
 
-func boundOf(f data.TrackerField, health map[string]int) (int, bool) {
+// valueOf is the stored value of a health key, or the definition's default when none is stored. A
+// key the definition does not know and the combatant does not hold has no value, so no status is
+// shown rather than a guessed one.
+func valueOf(def []data.TrackerField, health map[string]int, key string) (int, bool) {
+	if v, ok := health[key]; ok {
+		return v, true
+	}
+	for _, f := range def {
+		if f.Key == key {
+			return f.Def, true
+		}
+	}
+	return 0, false
+}
+
+func boundOf(def []data.TrackerField, f data.TrackerField, health map[string]int) (int, bool) {
 	switch {
 	case f.Max != nil:
 		return *f.Max, true
 	case f.MaxRef != "":
-		return health[f.MaxRef], true
+		return valueOf(def, health, f.MaxRef)
 	}
 	return 0, false
 }

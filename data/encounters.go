@@ -306,7 +306,7 @@ type RefMatch struct {
 	Combatant   Combatant `json:"combatant"`
 }
 
-// FindByExternalRef returns owner's live combatants whose external_refs map key to value. The
+// FindByExternalRef returns owner's live combatants in private encounters whose external_refs map key to value. The
 // database matches on the derived RefKey; the stored values are then compared exactly, so a hash
 // collision cannot return a wrong combatant.
 func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value string) ([]RefMatch, error) {
@@ -316,7 +316,9 @@ func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value st
 	if key == "" || value == "" || len(key) > maxRefLen || len(value) > maxRefLen {
 		return nil, invalid("ref_key and ref_value are required, at most %d bytes", maxRefLen)
 	}
-	filter := append(scope(owner), bson.E{Key: "ref_keys", Value: RefKey(key, value)})
+	// Private encounters only: a session encounter is read through the session's role-aware view,
+	// so an owner who has left or been demoted cannot reach hidden combatants or GM-only notes here.
+	filter := append(scope(owner), bson.E{Key: "ref_keys", Value: RefKey(key, value)}, bson.E{Key: "session_id", Value: nil})
 	var encs []Encounter
 	if err := r.c.Find(ctx, filter, store.FindOptions{Limit: maxRefMatches}, &encs); err != nil {
 		return nil, err

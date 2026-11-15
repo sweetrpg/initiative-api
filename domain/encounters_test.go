@@ -376,3 +376,14 @@ func vanishedSystemEncounter(t *testing.T, s *Encounters, cs ...data.Combatant) 
 	}
 	return e
 }
+
+func TestCreateRefusesACallerSuppliedSessionID(t *testing.T) {
+	s := newEncService(t)
+
+	_, err := s.Create(ctx, "u1", "u1", data.Encounter{Name: "X", GameSystemID: "test", SessionID: "5f0000000000000000000001",
+		Ordering: data.OrderHighToLow, TieBreaker: data.TieRandom})
+
+	if !errors.Is(err, data.ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid: joining a session needs the session's GM authorization", err)
+	}
+}

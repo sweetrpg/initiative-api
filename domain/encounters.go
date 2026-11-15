@@ -52,6 +52,11 @@ func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.E
 	if enc.Name == "" {
 		return data.Encounter{}, invalid("encounter name is required")
 	}
+	// An encounter joins a session only through a path that authorizes the caller as that
+	// session's GM; until one exists, a caller-supplied session id is refused.
+	if enc.SessionID != "" {
+		return data.Encounter{}, invalid("an encounter cannot be created inside a session here")
+	}
 	_, err := s.systems.Get(ctx, enc.GameSystemID)
 	if errors.Is(err, data.ErrNotFound) {
 		return data.Encounter{}, invalid("the encounter's game system is not defined")

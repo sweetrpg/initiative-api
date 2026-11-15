@@ -438,3 +438,66 @@ func TestAuthorizeViewMapsEachRoleToItsLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestHealthStatusUsesDefinitionDefaultsForMissingKeysAndOmitsWhenUnknown(t *testing.T) {
+	def := []data.TrackerField{
+		{Key: "current", Kind: data.FieldCounter, Def: 10, Min: two(0), MaxRef: "maximum"},
+		{Key: "maximum", Kind: data.FieldCounter, Def: 10, Min: two(1)},
+	}
+
+	full, okFull := healthStatus(def, nil)                          // nothing stored: both defaults, 10/10
+	hurt, okHurt := healthStatus(def, map[string]int{"current": 4}) // maximum missing: default 10
+	_, okUnknown := healthStatus([]data.TrackerField{{Key: "current", Kind: data.FieldCounter, MaxRef: "ghost"}}, map[string]int{"current": 3})
+
+	if !okFull || full != StatusHealthy || !okHurt || hurt != StatusHurt {
+		t.Errorf("defaults: %q/%v and %q/%v, want healthy and hurt", full, okFull, hurt, okHurt)
+	}
+	if okUnknown {
+		t.Error("a bound that names no known field produced a status; it must be omitted, not read as zero")
+	}
+}
+
+func TestNoNonGMRuleCopiesANestedValueRaw(t *testing.T) {
+	for _, tc := range []struct {
+		typ      reflect.Type
+		rules    map[string]data.ViewLevel
+		computed map[string]bool
+	}{
+		{reflect.TypeOf(data.Encounter{}), encounterRules, computedEncounter},
+		{reflect.TypeOf(data.Combatant{}), combatantRules, computedCombatant},
+		{reflect.TypeOf(data.Condition{}), conditionRules, nil},
+	} {
+		var walk func(t reflect.Type)
+		walk = func(rt reflect.Type) {
+			for i := 0; i < rt.NumField(); i++ {
+				f := rt.Field(i)
+				if f.Anonymous && f.Type.Kind() == reflect.Struct {
+					walk(f.Type)
+					continue
+				}
+				name, _, ok := jsonName(f)
+				if !ok || tc.rules[name] >= data.ViewGM || tc.computed[name] {
+					continue
+				}
+				if nested(f.Type) {
+					t.Errorf("%s.%s is visible below GM level and holds a nested value (%s) that projectStruct would copy raw: make it computed", tc.typ.Name(), name, f.Type)
+				}
+			}
+		}
+		walk(tc.typ)
+	}
+}
+
+// nested reports whether copying a value of type t whole could carry fields of its own: a struct,
+// or a pointer, slice, array or map of one (directly or inside).
+func nested(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Struct, reflect.Interface:
+		return true
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return nested(t.Elem())
+	case reflect.Map:
+		return nested(t.Elem()) || nested(t.Key())
+	}
+	return false
+}

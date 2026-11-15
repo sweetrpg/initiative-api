@@ -49,12 +49,15 @@ func ownerViewer(owner string) Viewer { return Viewer{actor: owner, level: ViewG
 // relations.ErrUnauthorized, so session data fails closed.
 func (r *Sessions) AuthorizeView(ctx context.Context, actor, sessionID string) (Viewer, error) {
 	d, err := Authorize(ctx, actor, sessionID, relView)
+	if errors.Is(err, ErrForbidden) {
+		return Viewer{}, ErrNotMember
+	}
 	if err != nil {
 		return Viewer{}, err
 	}
 	m, err := r.Member(ctx, d, actor)
 	if errors.Is(err, ErrNotFound) {
-		return Viewer{}, ErrForbidden
+		return Viewer{}, ErrNotMember
 	}
 	if err != nil {
 		return Viewer{}, err
@@ -69,9 +72,11 @@ func (r *Sessions) AuthorizeView(ctx context.Context, actor, sessionID string) (
 	case RoleObserver:
 		relation, level = RoleObserver, ViewObserver
 	default:
-		return Viewer{}, ErrForbidden
+		return Viewer{}, ErrNotMember
 	}
-	if _, err := Authorize(ctx, actor, sessionID, relation); err != nil {
+	if _, err := Authorize(ctx, actor, sessionID, relation); errors.Is(err, ErrForbidden) {
+		return Viewer{}, ErrNotMember
+	} else if err != nil {
 		return Viewer{}, err
 	}
 	return Viewer{actor: d.actor, session: d.session, level: level}, nil

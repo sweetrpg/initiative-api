@@ -200,8 +200,9 @@ func TestNonMembersGet403BeforeAnythingIsLookedUp(t *testing.T) {
 
 	for _, path := range []string{"/sessions/" + foreignSession + "/encounters", encPath(foreignSession, "5f00000000000000000000e2"),
 		encPath(foreignSession, "5f00000000000000000000e2") + "/combatants/pc", encPath(foreignSession, "5f0000000000000000000099")} {
-		if w := callAs(r, "user-two", "GET", path, ""); w.Code != http.StatusForbidden {
-			t.Errorf("GET %s = %d %s, want 403 whether or not the encounter exists", path, w.Code, w.Body)
+		w := callAs(r, "user-two", "GET", path, "")
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "not a member of this session") || strings.Contains(w.Body.String(), "own this record") {
+			t.Errorf("GET %s = %d %s, want 403 saying the caller is not a member, whether or not the encounter exists", path, w.Code, w.Body)
 		}
 	}
 }
