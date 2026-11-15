@@ -399,3 +399,46 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 		}
 	}
 }
+
+func TestIntegrationCredentialsFollowScopeByMethodAndNeverReachSessionRoutes(t *testing.T) {
+	r, _, sid := viewTableLimit(t, "50")
+	_, readOnly := issue(t, r, "user-ok", `["read"]`)
+	_, writeOnly := issue(t, r, "user-ok", `["write"]`)
+	_, both := issue(t, r, "user-ok", `["read","write"]`)
+	sub := strings.NewReplacer(":id", sid, ":eid", "5f00000000000000000000e1", ":cid", "x", ":invite", "x", ":request", "x", ":user", "u-2")
+
+	checked, session := 0, 0
+	for _, route := range r.(*gin.Engine).Routes() {
+		if strings.HasPrefix(route.Path, "/admin") || strings.HasPrefix(route.Path, "/status") || route.Path == "/probe" {
+			continue
+		}
+		path := sub.Replace(route.Path)
+		read := route.Method == http.MethodGet || route.Method == http.MethodHead
+		isSession := strings.HasPrefix(route.Path, "/sessions")
+		checked++
+		for name, token := range map[string]string{"read-only": readOnly, "write-only": writeOnly, "read+write": both} {
+			w := callAs(r, token, route.Method, path, `{}`)
+			code := decodeBody(t, w)["code"]
+			switch {
+			case isSession || strings.HasPrefix(route.Path, "/credentials") || strings.HasPrefix(route.Path, "/entitlements") || strings.HasPrefix(route.Path, "/themes"):
+				session++
+				// A credential without the method's scope is stopped by the scope check first; one with
+				// it (read+write) by userOnly. Either way the route is closed to credentials.
+				if w.Code != http.StatusForbidden || (name == "read+write" && code != "user_token_required") {
+					t.Errorf("%s credential %s %s = %d %v, want 403 (account and session routes need the user's own token)", name, route.Method, route.Path, w.Code, code)
+				}
+			case (read && name == "write-only") || (!read && name == "read-only"):
+				if w.Code != http.StatusForbidden || code != "scope_missing" {
+					t.Errorf("%s credential %s %s = %d %v, want 403 scope_missing (scope follows the method)", name, route.Method, route.Path, w.Code, code)
+				}
+			default:
+				if code == "scope_missing" || code == "user_token_required" {
+					t.Errorf("%s credential %s %s was refused for scope: %d %v", name, route.Method, route.Path, w.Code, code)
+				}
+			}
+		}
+	}
+	if checked < 30 || session < 10 {
+		t.Fatalf("walked %d routes, %d of them account or session routes; the walk is not covering the router", checked, session)
+	}
+}
