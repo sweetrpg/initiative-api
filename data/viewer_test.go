@@ -66,3 +66,26 @@ func TestNotMemberIsAForbidden(t *testing.T) {
 		t.Fatal("ErrNotMember must satisfy errors.Is(ErrForbidden) so existing 403 handling still applies")
 	}
 }
+
+func TestTheOwnerPathCannotReadOrChangeASessionEncounter(t *testing.T) {
+	r := newEncounters(t)
+	e := sessionEncounter(t, r, "u1", otherSession, nil)
+
+	_, errGet := r.Get(ctx, "u1", e.ID)
+	_, errLoad := r.Load(ctx, "u1", e.ID)
+	_, errUpdate := r.Update(ctx, "u1", "u1", e.ID, 1, map[string]any{"name": "hijack"})
+	errDelete := r.SoftDelete(ctx, "u1", "u1", e.ID, 1)
+	page, _ := r.List(ctx, "u1", Query{})
+
+	for name, err := range map[string]error{"get": errGet, "load": errLoad, "update": errUpdate, "delete": errDelete} {
+		if err == nil || errors.Is(err, ErrRevisionConflict) {
+			t.Errorf("owner %s of a session encounter err = %v, want a refusal that does not return the document", name, err)
+		}
+	}
+	if len(page.Items) != 0 {
+		t.Errorf("owner List returned %d session encounters", len(page.Items))
+	}
+	if after, err := r.c.CountDocuments(ctx, scopeID("u1", e.ID)); err != nil || after != 1 {
+		t.Errorf("encounter count = %d, %v; want it untouched", after, err)
+	}
+}

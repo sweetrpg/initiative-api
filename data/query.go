@@ -342,7 +342,7 @@ func (r *Owned[T, P]) List(ctx context.Context, ownerUserID string, q Query) (Pa
 	if err := checkUserID(ownerUserID); err != nil {
 		return Page[T]{}, err
 	}
-	return runQuery[T](ctx, r.c, r.spec, scope(ownerUserID), q)
+	return runQuery[T](ctx, r.c, r.spec, r.scoped(ownerUserID), q)
 }
 
 // Count returns how many of owner's live records match filters, counted by the database.

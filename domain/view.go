@@ -406,3 +406,13 @@ func (s *Encounters) ViewsOwned(ctx context.Context, owner string, q data.Query)
 	}
 	return out, nil
 }
+
+// ViewWritten renders an encounter the owner has just written, so a write's response is built by
+// the same function as a read. It refuses an encounter that is not the owner's private one.
+func (s *Encounters) ViewWritten(ctx context.Context, owner string, enc data.Encounter) (EncounterView, error) {
+	v, err := s.repo.OwnedViewer(owner, enc)
+	if err != nil {
+		return nil, err
+	}
+	return s.render(ctx, enc, v)
+}

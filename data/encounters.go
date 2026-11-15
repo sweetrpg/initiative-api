@@ -29,7 +29,10 @@ type Encounters struct {
 
 // NewEncounters builds the encounter repository for db.
 func NewEncounters(db store.Database) *Encounters {
-	return &Encounters{Owned: NewOwned[Encounter](db, EncounterSpec), systems: NewSystemRepo(db)}
+	o := NewOwned[Encounter](db, EncounterSpec)
+	o.extra = bson.D{{Key: "session_id", Value: nil}}
+	o.exclude = func(e *Encounter) bool { return e.SessionID != "" }
+	return &Encounters{Owned: o, systems: NewSystemRepo(db)}
 }
 
 // ValidateEncounter checks a whole encounter document: ordering, tie breaker, and status come

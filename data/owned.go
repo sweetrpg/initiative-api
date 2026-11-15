@@ -29,6 +29,13 @@ type Owned[T any, P Doc[T]] struct {
 	spec  Spec
 	now   func() time.Time
 	newID func() string
+	// extra narrows every owner-scoped read and write beyond ownership, and exclude says which
+	// stored documents that narrowing hides, so a miss is classified 403 instead of reading as a
+	// revision conflict that would return the hidden document. Encounters use them to keep the
+	// owner path to private encounters: a session encounter is reached only through its session
+	// (PADR-0035), so an owner who left or was demoted cannot read or change it here.
+	extra   bson.D
+	exclude func(*T) bool
 }
 
 // NewOwned builds the repository for spec's collection in db.
@@ -49,6 +56,16 @@ func scope(owner string) bson.D {
 // scopeID is the owner-scoped filter for one record. id must already have passed cleanID.
 func scopeID(owner, id string) bson.D {
 	return append(bson.D{{Key: "_id", Value: id}}, scope(owner)...)
+}
+
+// scoped is scope plus the repository's extra narrowing.
+func (r *Owned[T, P]) scoped(owner string) bson.D {
+	return append(scope(owner), r.extra...)
+}
+
+// scopedID is scopeID plus the repository's extra narrowing.
+func (r *Owned[T, P]) scopedID(owner, id string) bson.D {
+	return append(bson.D{{Key: "_id", Value: id}}, r.scoped(owner)...)
 }
 
 // cleanID returns the canonical form of a client-supplied record ID, or false when it is not a
@@ -112,7 +129,7 @@ func (r *Owned[T, P]) Get(ctx context.Context, ownerUserID, id string) (T, error
 	if !ok {
 		return out, ErrNotFound
 	}
-	err := r.c.FindOne(ctx, scopeID(ownerUserID, id), &out)
+	err := r.c.FindOne(ctx, r.scopedID(ownerUserID, id), &out)
 	if errors.Is(err, store.ErrNotFound) {
 		return out, ErrNotFound
 	}
@@ -222,7 +239,7 @@ func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id s
 	if !ok {
 		return out, ErrNotFound
 	}
-	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision}, bson.E{Key: "inactive_at", Value: nil}, bson.E{Key: "locked_at", Value: nil})
+	filter := append(r.scopedID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision}, bson.E{Key: "inactive_at", Value: nil}, bson.E{Key: "locked_at", Value: nil})
 	update := bson.D{
 		{Key: "$set", Value: setDoc(set,
 			bson.E{Key: "updated_at", Value: r.now()}, bson.E{Key: "updated_by", Value: actingUserID})},
@@ -271,7 +288,7 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 		return ErrNotFound
 	}
 	var discard T
-	filter := append(scopeID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
+	filter := append(r.scopedID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
 	if errors.Is(err, store.ErrNotFound) {
 		_, err = r.classify(ctx, ownerUserID, id)
@@ -309,6 +326,9 @@ func (r *Owned[T, P]) classify(ctx context.Context, owner, id string) (T, error)
 	}
 	m := P(&cur).GetMeta()
 	switch {
+	case m.DeletedAt == nil && m.OwnerUserID == owner && r.exclude != nil && r.exclude(&cur):
+		var zero T
+		return zero, ErrForbidden
 	case m.DeletedAt != nil:
 		var zero T
 		return zero, ErrNotFound

@@ -22,6 +22,8 @@ type CombatantPatch struct {
 	Hidden           *bool
 	HealthVisibility *string
 	NotesShared      *bool
+	// Conditions replaces the combatant's conditions when non-nil; the data layer validates each.
+	Conditions *[]data.Condition
 }
 
 func newCombatant(c data.Combatant, id string) (data.Combatant, error) {
@@ -92,6 +94,12 @@ func applyPatch(c *data.Combatant, p CombatantPatch) error {
 	}
 	if p.Notes != nil {
 		c.Notes = *p.Notes
+	}
+	if p.Conditions != nil {
+		c.Conditions = slices.Clone(*p.Conditions)
+		if c.Conditions == nil {
+			c.Conditions = []data.Condition{}
+		}
 	}
 	if p.Hidden != nil {
 		c.Hidden = *p.Hidden
