@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,11 +14,6 @@ import (
 	"github.com/sweetrpg/initiative-api/store/fake"
 	"go.mongodb.org/mongo-driver/bson"
 )
-
-func sessionRevision(t *testing.T, r http.Handler, sid string) string {
-	t.Helper()
-	return strconv.Itoa(int(decodeBody(t, callAs(r, "user-ok", "GET", "/sessions/"+sid, ""))["revision"].(float64)))
-}
 
 func deleteSession(r http.Handler, token, sid, rev string) *httptest.ResponseRecorder {
 	return callAs(r, token, "DELETE", "/sessions/"+sid+"?revision="+rev, "")
