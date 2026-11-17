@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -115,7 +116,10 @@ type Sessions struct {
 	// OwnerRecordMaxAge is how old the GM's recorded entitlements may be when a co-GM acts on
 	// them (the configured OWNER_ENTITLEMENTS_MAX_AGE). Zero means seven days.
 	OwnerRecordMaxAge time.Duration
-	now               func() time.Time
+	// MaxMembers is the configured maximum of the member limit (SESSION_MEMBERS_MAX): an entitled
+	// value above it has no effect. Zero means 20.
+	MaxMembers int
+	now        func() time.Time
 }
 
 // NewSessions builds the service on db.
@@ -464,7 +468,7 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 	if !slices.Contains(assignable, role) {
 		return data.Member{}, invalid("role must be one of %s", strings.Join(assignable, ", "))
 	}
-	_, am, d, err := s.as(ctx, actor, id, ActDecideRequest)
+	sess, am, d, err := s.as(ctx, actor, id, ActDecideRequest)
 	if err != nil {
 		return data.Member{}, err
 	}
@@ -478,6 +482,11 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 	// any other lookup error fails closed rather than admit with stale ids intact.
 	switch pending, perr := s.repo.PendingUser(ctx, d, requestID); {
 	case perr == nil:
+		// A request still pending would add a member: the roster must have room, so a full one
+		// leaves the request pending for later. A retried approval (not pending) is not an add.
+		if err := s.checkRoomForMember(ctx, d, sess, am.Role); err != nil {
+			return data.Member{}, err
+		}
 		if err := s.enc.ScrubController(ctx, d, pending); err != nil {
 			return data.Member{}, err
 		}
@@ -502,6 +511,45 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 		return data.Member{}, err
 	}
 	return m, s.syncGrant(ctx, am.Role, d.SessionID(), m.UserID, role)
+}
+
+// defaultMaxMembers is the service-configured maximum of the member limit when Sessions.MaxMembers
+// is not set; it matches the entitlements catalog's maximum for the key.
+const defaultMaxMembers = 20
+
+// memberLimit is the session's member limit: the owner's recorded members_per_session value,
+// clamped to the configured maximum. It fails closed with ErrOwnerLimitsUnknown when nothing is
+// recorded, or (for a co-GM, who cannot read the GM's entitlements) when the record is older than
+// the configured maximum age. The GM's own request refreshed the record in as().
+func (s *Sessions) memberLimit(sess data.Session, actorRole string) (int, error) {
+	if actorRole != data.RoleGM && (sess.OwnerLimitsAt == nil || s.now().Sub(*sess.OwnerLimitsAt) > s.ownerRecordMaxAge()) {
+		return 0, ErrOwnerLimitsUnknown
+	}
+	limit, err := OwnerLimit(sess, KeyMembersPerSession)
+	if err != nil {
+		return 0, err
+	}
+	return min(limit, cmp.Or(s.MaxMembers, defaultMaxMembers)), nil
+}
+
+// checkRoomForMember rejects adding a member to a roster that already holds the limit of non-GM
+// members, with the typed entitlement error carrying the key and the (clamped) limit. Nothing is
+// removed when the limit later falls; this only stops additions. The count and the add are two
+// steps, so concurrent approvals can overrun a full roster by the number in flight; approvals are
+// a GM and co-GM action, which keeps that to one or two.
+func (s *Sessions) checkRoomForMember(ctx context.Context, d data.Decision, sess data.Session, actorRole string) error {
+	limit, err := s.memberLimit(sess, actorRole)
+	if err != nil {
+		return err
+	}
+	n, err := s.repo.CountMembers(ctx, d)
+	if err != nil {
+		return err
+	}
+	if n >= int64(limit) {
+		return &EntitlementError{Key: KeyMembersPerSession, Limit: limit}
+	}
+	return nil
 }
 
 // finishApproval is the retry of an approval that settled but whose tuple write failed: the member
