@@ -107,6 +107,10 @@ func (r *ChangeRequests) Create(ctx context.Context, v Viewer, req ChangeRequest
 // List returns one page of the encounter's change requests, oldest first. A GM or co-GM sees all
 // of them; a player only their own; an observer none.
 func (r *ChangeRequests) List(ctx context.Context, v Viewer, encounterID, status string, q Query) (Page[ChangeRequest], error) {
+	encounterID, ok := cleanID(encounterID)
+	if !ok {
+		return Page[ChangeRequest]{}, ErrNotFound
+	}
 	base := bson.D{{Key: "session_id", Value: v.session}, {Key: "encounter_id", Value: encounterID}}
 	switch v.level {
 	case ViewGM:
@@ -136,7 +140,8 @@ func (r *ChangeRequests) Load(ctx context.Context, d Decision, encounterID, id s
 		return req, err
 	}
 	id, ok := cleanID(id)
-	if !ok {
+	encounterID, eok := cleanID(encounterID)
+	if !ok || !eok {
 		return req, ErrNotFound
 	}
 	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "encounter_id", Value: encounterID}}, &req)
@@ -183,7 +188,8 @@ func (r *ChangeRequests) Unclaim(ctx context.Context, d Decision, encounterID, i
 		return err
 	}
 	id, ok := cleanID(id)
-	if !ok {
+	encounterID, eok := cleanID(encounterID)
+	if !ok || !eok {
 		return ErrNotFound
 	}
 	var discard ChangeRequest
@@ -206,7 +212,8 @@ func (r *ChangeRequests) settle(ctx context.Context, d Decision, encounterID, id
 		return req, err
 	}
 	id, ok := cleanID(id)
-	if !ok {
+	encounterID, eok := cleanID(encounterID)
+	if !ok || !eok {
 		return req, ErrNotFound
 	}
 	filter := bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "encounter_id", Value: encounterID}}
