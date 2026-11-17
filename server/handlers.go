@@ -25,6 +25,7 @@ type Services struct {
 	Rosters     *domain.Rosters
 	Encounters  *domain.Encounters
 	Sessions    *domain.Sessions
+	Systems     *data.SystemRepo
 	// Relations answers session authorization checks (PADR-0035). Without it every session
 	// request fails closed with 503.
 	Relations *relations.Client
@@ -67,6 +68,9 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	}
 	if s.Rosters != nil {
 		setupRosterHandlers(g, s.Rosters, s.Entitlements)
+	}
+	if s.Systems != nil {
+		setupGameSystemHandlers(g, s.Systems, s.Entitlements)
 	}
 	setupRefHandlers(g, s.Encounters)
 	if s.Credentials != nil {

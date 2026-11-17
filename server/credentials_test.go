@@ -78,7 +78,7 @@ func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.Handler
 		Authz:        authz.NewClient(fakeAuthAPI(t).URL, fakeUsersAPI(t).URL),
 		Entitlements: entitlements.New(ent.URL),
 		Themes:       themes, Credentials: creds,
-		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
+		Systems: data.NewSystemRepo(db), Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
 		Relations: relations.New(relAPI.URL), OwnerLimits: data.NewOwnerEntitlements(db, time.Hour),
 	}
 	r := gin.New()

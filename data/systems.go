@@ -65,10 +65,21 @@ func (s *SystemRepo) GetOrDefault(ctx context.Context, idOrAlias string) (GameSy
 	return sys, err
 }
 
-// List returns one page of systems; filtering (for example gated=false for users without the
-// entitlement) goes through q.
+// List returns one page of every system, gated or not. It is for the loader and tools; an API
+// caller's list goes through ListAvailable.
 func (s *SystemRepo) List(ctx context.Context, q Query) (Page[GameSystem], error) {
 	return runQuery[GameSystem](ctx, s.c, SystemSpec, nil, q)
+}
+
+// ListAvailable returns one page of the systems a caller may use: every system when entitled,
+// otherwise only the ungated ones (No System). The restriction is part of the query itself and is
+// ANDed with the client's filters, so a filter can never widen it.
+func (s *SystemRepo) ListAvailable(ctx context.Context, q Query, entitled bool) (Page[GameSystem], error) {
+	var base bson.D
+	if !entitled {
+		base = bson.D{{Key: "gated", Value: bson.D{{Key: "$ne", Value: true}}}}
+	}
+	return runQuery[GameSystem](ctx, s.c, SystemSpec, base, q)
 }
 
 // Upsert creates or updates sys by ID. A definition identical to the stored one (same content
