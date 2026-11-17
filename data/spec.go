@@ -142,6 +142,16 @@ var (
 			Partial: bson.D{{Key: "live", Value: bson.D{{Key: "$exists", Value: true}}}}}},
 	}
 
+	// ChangeRequestSpec: a session encounter's player-submitted changes, listed oldest first and
+	// filtered by status.
+	ChangeRequestSpec = Spec{
+		Name: CollectionChangeRequests, Sortable: []string{"created_at"}, Filterable: []string{"status", "combatant_id"},
+		Indexes: []store.IndexSpec{
+			{Name: "session_encounter_created", Keys: asc("session_id", "encounter_id", "created_at")},
+			{Name: "session_requester_status", Keys: asc("session_id", "requested_by", "status")},
+		},
+	}
+
 	// SystemSpec: aliases (including Foundry system IDs) are unique across systems.
 	// SystemSpec has no Updatable fields: definitions change only through SystemRepo.Upsert.
 	SystemSpec = Spec{
@@ -159,7 +169,7 @@ var (
 // AllSpecs lists every collection the service owns.
 func AllSpecs() []Spec {
 	return []Spec{RosterSpec, EncounterSpec, ThemeSpec, CredentialSpec, SystemSpec,
-		SessionSpec, SessionMemberSpec, SessionInviteSpec, SessionRequestSpec, SessionBlockSpec}
+		SessionSpec, SessionMemberSpec, SessionInviteSpec, SessionRequestSpec, SessionBlockSpec, ChangeRequestSpec}
 }
 
 // EnsureIndexes creates every collection's indexes. Safe to run at each startup.

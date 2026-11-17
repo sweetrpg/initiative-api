@@ -21,6 +21,7 @@ const (
 	CollectionSessionInvites      = "session_invites"
 	CollectionSessionRequests     = "session_requests"
 	CollectionSessionBlocks       = "session_blocks"
+	CollectionChangeRequests      = "change_requests"
 )
 
 // Character kinds.

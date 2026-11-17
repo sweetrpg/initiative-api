@@ -302,6 +302,16 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 	pid, cid := priv["id"].(string), priv["combatants"].([]any)[0].(map[string]any)["id"].(string)
 	roster := newRoster(t, r, "user-ok", `{"name":"R","characters":[{"name":"C","kind":"pc"}]}`)["id"].(string)
 	sess := "/sessions/" + sid + "/encounters/5f00000000000000000000e1"
+	// The change-request routes validate the whole combatant against the game system, so the
+	// session fixture's pc gets health the default system defines.
+	replaceEncounter(t, db, "5f00000000000000000000e1", sid, func(e *data.Encounter) {
+		e.GameSystemID = data.DefaultSystemID
+		e.Combatants[0].Health = map[string]int{"hp": 9, "max_hp": 10}
+	})
+	newRequest := func() string {
+		w := callAs(r, "user-two", "POST", sess+"/combatants/pc/change-requests", `{"health":{"hp":4}}`)
+		return decodeBody(t, w)["id"].(string)
+	}
 	rev := func() string {
 		return strconv.Itoa(int(decodeBody(t, callAs(r, "user-ok", "GET", "/encounters/"+pid, ""))["revision"].(float64)))
 	}
@@ -356,6 +366,16 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 		"GET /sessions/:id/encounters":                      func() call { return call{"GET", "/sessions/" + sid + "/encounters", "", "user-two", true} },
 		"GET /sessions/:id/encounters/:eid":                 func() call { return call{"GET", sess, "", "user-two", true} },
 		"GET /sessions/:id/encounters/:eid/combatants/:cid": func() call { return call{"GET", sess + "/combatants/pc", "", "user-two", true} },
+		"POST /sessions/:id/encounters/:eid/combatants/:cid/change-requests": func() call {
+			return call{"POST", sess + "/combatants/pc/change-requests", `{"conditions":{"add":[{"name":"prone"}]}}`, "user-two", false}
+		},
+		"GET /sessions/:id/encounters/:eid/change-requests": func() call { return call{"GET", sess + "/change-requests", "", "user-ok", false} },
+		"POST /sessions/:id/encounters/:eid/change-requests/:rid/approve": func() call {
+			return call{"POST", sess + "/change-requests/" + newRequest() + "/approve", "", "user-ok", false}
+		},
+		"POST /sessions/:id/encounters/:eid/change-requests/:rid/reject": func() call {
+			return call{"POST", sess + "/change-requests/" + newRequest() + "/reject", `{"reason":"no"}`, "user-ok", false}
+		},
 		"PUT /sessions/:id/encounters/:eid/combatants/:cid/controllers": func() call {
 			return call{"PUT", sess + "/combatants/orc/controllers", `{"controller_user_ids":["u-2"],"revision":3}`, "user-ok", true}
 		},
@@ -364,7 +384,9 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 		"PATCH /encounters/:id/combatants/:cid", "DELETE /encounters/:id/combatants/:cid", "POST /encounters/:id/combatants/:cid/restore",
 		"POST /encounters/:id/start", "POST /encounters/:id/advance", "POST /encounters/:id/back", "POST /encounters/:id/end", "POST /encounters/:id/reset",
 		"POST /rosters/:id/encounters", "POST /encounters/:id/save-as-roster", "GET /sessions/:id/encounters", "GET /sessions/:id/encounters/:eid",
-		"GET /sessions/:id/encounters/:eid/combatants/:cid", "PUT /sessions/:id/encounters/:eid/combatants/:cid/controllers", "DELETE /encounters/:id"}
+		"GET /sessions/:id/encounters/:eid/combatants/:cid", "PUT /sessions/:id/encounters/:eid/combatants/:cid/controllers",
+		"POST /sessions/:id/encounters/:eid/combatants/:cid/change-requests", "GET /sessions/:id/encounters/:eid/change-requests",
+		"POST /sessions/:id/encounters/:eid/change-requests/:rid/approve", "POST /sessions/:id/encounters/:eid/change-requests/:rid/reject", "DELETE /encounters/:id"}
 
 	for _, route := range r.(*gin.Engine).Routes() {
 		if !strings.Contains(route.Path, "encounters") {

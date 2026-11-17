@@ -166,3 +166,32 @@ func withoutController(cs []Combatant, userID string) ([]Combatant, bool) {
 	}
 	return out, changed
 }
+
+// ValidateCombatantChange checks after, a combatant as it would be once an edit applies to before
+// (the combatant as stored), against the rules a write enforces: its own fields, and the health
+// keys the edit changed against the game system's definition (the default system when the
+// encounter's has none). A stored value that a later definition change made invalid, in a key the
+// edit does not touch, does not block the edit; an edit that leaves health alone checks none.
+func (r *Encounters) ValidateCombatantChange(ctx context.Context, gameSystemID string, before, after Combatant) error {
+	if err := validateCombatant(after); err != nil {
+		return err
+	}
+	var changed []string
+	for k, v := range after.Health {
+		if old, ok := before.Health[k]; !ok || old != v {
+			changed = append(changed, k)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	sys, err := r.systems.GetOrDefault(ctx, gameSystemID)
+	if errors.Is(err, ErrNotFound) {
+		return invalid("the encounter's game system has no definition and no default system is defined")
+	}
+	if err != nil {
+		return err
+	}
+	slices.Sort(changed)
+	return checkHealthKeys(sys, after.Health, changed)
+}
