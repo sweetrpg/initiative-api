@@ -8,10 +8,20 @@ import (
 	"github.com/sweetrpg/initiative-api/entitlements"
 )
 
+// defaultOwnerRecordMaxAge is the default OWNER_ENTITLEMENTS_MAX_AGE, used when
+// Sessions.OwnerRecordMaxAge is not set.
+const defaultOwnerRecordMaxAge = 7 * 24 * time.Hour
+
 // ownerRecordMaxAge bounds how old the GM's entitlements recorded on a session may be when a
-// co-GM acts on them; it matches the default OWNER_ENTITLEMENTS_MAX_AGE. Past it, or with nothing
-// recorded, a co-GM's create fails closed until the GM next uses the session.
-const ownerRecordMaxAge = 7 * 24 * time.Hour
+// co-GM acts on them: Sessions.OwnerRecordMaxAge (the configured OWNER_ENTITLEMENTS_MAX_AGE), or
+// seven days when unset. Past it, or with nothing recorded, a co-GM's create fails closed until
+// the GM next uses the session.
+func (s *Sessions) ownerRecordMaxAge() time.Duration {
+	if s.OwnerRecordMaxAge > 0 {
+		return s.OwnerRecordMaxAge
+	}
+	return defaultOwnerRecordMaxAge
+}
 
 // EncounterGrant is the outcome of authorizing one encounter creation in a session: who may
 // create, the owner it belongs to (the GM), the saved-encounters limit, how to see the result, and
@@ -32,7 +42,7 @@ type EncounterGrant struct {
 // off takes effect at once. The GM's saved-encounters limit applies with private and session
 // encounters counted together. The GM is checked live with their own entitlements; a co-GM is
 // checked against the GM's entitlements recorded on the session, failing closed when none are
-// recorded or the record is older than ownerRecordMaxAge. That covers the limit and the
+// recorded or the record is older than the configured maximum age. That covers the limit and the
 // game-systems flag, so a co-GM can neither use a system the GM lacks nor be refused one the GM has.
 func (s *Sessions) AuthorizeEncounterCreate(ctx context.Context, actor, id string) (EncounterGrant, error) {
 	sess, m, d, err := s.as(ctx, actor, id, ActCreateEncounter)
@@ -69,7 +79,7 @@ func (s *Sessions) ownerEntitlements(ctx context.Context, sess data.Session, rol
 		res, err := chk.Check(ctx, KeySavedEncounters, entitlements.FailClosed)
 		return res.Limit, requireSystem, err
 	}
-	if sess.OwnerLimitsAt == nil || s.now().Sub(*sess.OwnerLimitsAt) > ownerRecordMaxAge {
+	if sess.OwnerLimitsAt == nil || s.now().Sub(*sess.OwnerLimitsAt) > s.ownerRecordMaxAge() {
 		return 0, nil, ErrOwnerLimitsUnknown
 	}
 	limit, err := OwnerLimit(sess, KeySavedEncounters)

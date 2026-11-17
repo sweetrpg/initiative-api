@@ -91,8 +91,12 @@ func (s *Encounters) CreateInSession(ctx context.Context, g EncounterGrant, enc 
 		err = &EntitlementError{Key: KeySavedEncounters, Limit: g.limit}
 	}
 	if err != nil {
+		// The encounter must not stay live over the limit while the caller is told it failed: a
+		// retry would add another, and the limit reconciler never lists session encounters. If it
+		// cannot be retracted, report that (a server error) instead of the limit.
 		if rerr := s.repo.RetractNew(ctx, g.decision, created.ID); rerr != nil {
 			slog.ErrorContext(ctx, "retracting an over-limit session encounter failed", "encounter", created.ID, "error", rerr)
+			return nil, fmt.Errorf("could not undo a session encounter created over the limit: %w", rerr)
 		}
 		return nil, err
 	}

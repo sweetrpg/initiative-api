@@ -112,7 +112,10 @@ type Sessions struct {
 	repo    *data.Sessions
 	enc     *data.Encounters
 	changes *data.ChangeRequests
-	now     func() time.Time
+	// OwnerRecordMaxAge is how old the GM's recorded entitlements may be when a co-GM acts on
+	// them (the configured OWNER_ENTITLEMENTS_MAX_AGE). Zero means seven days.
+	OwnerRecordMaxAge time.Duration
+	now               func() time.Time
 }
 
 // NewSessions builds the service on db.

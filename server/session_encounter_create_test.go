@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sweetrpg/initiative-api/domain"
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 
 	"github.com/sweetrpg/initiative-api/data"
@@ -201,6 +204,13 @@ func TestPatchingASessionValidatesAfterAuthorizingAndNeedsAChange(t *testing.T) 
 // a co-GM allowed to create.
 func gatedTable(t *testing.T, gmHas, coHas bool, limit int) (r http.Handler, db *fake.DB, sid string) {
 	t.Helper()
+	return gatedTableOn(t, gmHas, coHas, limit, func(d *fake.DB) store.Database { return d })
+}
+
+// gatedTableOn is gatedTable with the router's database wrapped by wrap; the returned db is the
+// underlying fake.
+func gatedTableOn(t *testing.T, gmHas, coHas bool, limit int, wrap func(*fake.DB) store.Database) (r http.Handler, db *fake.DB, sid string) {
+	t.Helper()
 	db = fake.NewDB()
 	seedSystem(t, db)
 	gated := data.GameSystem{ID: "dnd5e", Name: "D&D 5e", Family: "d20", Gated: true,
@@ -219,7 +229,7 @@ func gatedTable(t *testing.T, gmHas, coHas bool, limit int) (r http.Handler, db 
 	withLimits := func(svc *Services) {
 		svc.Limits = domain.NewLimits(domain.Kind{Name: "encounters", Key: domain.KeySavedEncounters, Repo: svc.Encounters.Items()})
 	}
-	r, _ = credRouterEnt(t, db, roleChecks, ent, withLimits)
+	r, _ = credRouterEnt(t, wrap(db), roleChecks, ent, withLimits)
 	w := callAs(r, "user-ok", "POST", "/sessions", `{"name":"Friday","allow_co_gm_create_encounter":true}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create session = %d %s", w.Code, w.Body)
@@ -270,7 +280,11 @@ func TestACoGMCannotCreateOnAnOwnerRecordOlderThanTheBound(t *testing.T) {
 
 func TestConcurrentCreatesNeverLeaveTheGMOverTheLimit(t *testing.T) {
 	r, db, sid := gatedTable(t, true, true, 3)
+	if w := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/encounters", newSessionEncounter); w.Code != http.StatusCreated {
+		t.Fatalf("the first, sequential create = %d %s, want 201 (the test must not pass with no creates at all)", w.Code, w.Body)
+	}
 	var created atomic.Int64
+	created.Add(1) // the sequential create above
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -290,4 +304,79 @@ func TestConcurrentCreatesNeverLeaveTheGMOverTheLimit(t *testing.T) {
 	if created.Load() < live {
 		t.Errorf("%d creates answered 201 but %d encounters are live", created.Load(), live)
 	}
+}
+
+// overCountAfterCreate answers the post-create recount of the encounters collection with a number
+// over any limit, as if concurrent creates had pushed the owner past it.
+type overCountDB struct {
+	store.Database
+	armed *atomic.Int64
+}
+
+func (d overCountDB) Collection(name string) store.Collection {
+	c := d.Database.Collection(name)
+	if name == data.CollectionEncounters {
+		return overCount{c, d.armed}
+	}
+	return c
+}
+
+type overCount struct {
+	store.Collection
+	armed *atomic.Int64
+}
+
+func (c overCount) CountDocuments(ctx context.Context, f bson.D) (int64, error) {
+	if n := c.armed.Load(); n > 0 && c.armed.Add(1) > 2 { // the second count of an armed request
+		return 99, nil
+	}
+	return c.Collection.CountDocuments(ctx, f)
+}
+
+func TestAnOverLimitCreateThatCannotBeRetractedIsAServerErrorNotALimitError(t *testing.T) {
+	var armed atomic.Int64
+	var failRetract atomic.Bool
+	r, db, sid := gatedTableOn(t, true, true, 3, func(d *fake.DB) store.Database {
+		return failingUpdates{overCountDB{d, &armed}, data.CollectionEncounters, func(u bson.D) error {
+			if failRetract.Load() && setsKey(u, "deleted_at") {
+				return errors.New("store down")
+			}
+			return nil
+		}}
+	})
+
+	armed.Store(1)
+	failRetract.Store(true)
+	failed := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/encounters", newSessionEncounter)
+	armed.Store(0)
+	failRetract.Store(false)
+
+	if failed.Code < 500 {
+		t.Fatalf("an over-limit create whose retract failed = %d %s, want a server error: the encounter is still live", failed.Code, failed.Body)
+	}
+	live, _ := db.Fake(data.CollectionEncounters).CountDocuments(t.Context(), bson.D{{Key: "deleted_at", Value: nil}})
+	if live != 1 {
+		t.Fatalf("%d live encounters, want the 1 the failed retract left behind", live)
+	}
+
+	armed.Store(1)
+	retracted := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/encounters", newSessionEncounter)
+	armed.Store(0)
+	live, _ = db.Fake(data.CollectionEncounters).CountDocuments(t.Context(), bson.D{{Key: "deleted_at", Value: nil}})
+	if retracted.Code != http.StatusForbidden || live != 1 {
+		t.Fatalf("an over-limit create that retracts cleanly = %d %s with %d live; want 403 and the earlier one only", retracted.Code, retracted.Body, live)
+	}
+}
+
+func setsKey(u bson.D, key string) bool {
+	for _, op := range u {
+		if set, ok := op.Value.(bson.D); ok && op.Key == "$set" {
+			for _, e := range set {
+				if e.Key == key {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
