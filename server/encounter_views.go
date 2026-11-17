@@ -23,6 +23,7 @@ type encounterViewHandlers struct {
 func setupEncounterViewHandlers(g *gin.RouterGroup, svc *domain.Encounters, sessions *domain.Sessions) {
 	h := encounterViewHandlers{svc, sessions}
 	g.GET("/sessions/:id/encounters", h.list)
+	g.POST("/sessions/:id/encounters", h.create)
 	g.GET("/sessions/:id/encounters/:eid", h.get)
 	g.GET("/sessions/:id/encounters/:eid/combatants/:cid", h.combatant)
 	g.PUT("/sessions/:id/encounters/:eid/combatants/:cid/controllers", h.setControllers)
@@ -37,6 +38,45 @@ func (h encounterViewHandlers) viewer(c *gin.Context) (data.Viewer, bool) {
 		return data.Viewer{}, false
 	}
 	return v, true
+}
+
+// create makes an encounter in the session, owned by its GM. The session decides who may and
+// whether the GM's saved-encounters limit has room; the encounter service then runs the same
+// validation as for a private encounter, and the response is built for the caller's role.
+func (h encounterViewHandlers) create(c *gin.Context) {
+	var b encounterCreate
+	if !bindJSON(c, &b) {
+		return
+	}
+	if b.Name == nil {
+		badRequest(c, "request body must be a JSON encounter with a name")
+		return
+	}
+	ctx, actor, sessionID := c.Request.Context(), authz.Viewer(c), c.Param("id")
+	owner, err := h.sessions.AuthorizeEncounterCreate(ctx, actor, sessionID)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	e := b.encounter()
+	for _, cb := range b.Combatants {
+		e.Combatants = append(e.Combatants, cb.combatant())
+	}
+	enc, err := h.svc.CreateInSession(ctx, owner, actor, sessionID, e)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	v, ok := h.viewer(c)
+	if !ok {
+		return
+	}
+	view, err := h.svc.ViewForSession(ctx, v, enc.ID)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	writeView(c, http.StatusCreated, view, nil)
 }
 
 func (h encounterViewHandlers) list(c *gin.Context) {

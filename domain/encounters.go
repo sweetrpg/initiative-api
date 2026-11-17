@@ -65,17 +65,28 @@ func checkTheme(ctx context.Context, themes *data.Owned[data.Theme, *data.Theme]
 // Create stores enc as owner's new draft encounter. The name is required, the game system must
 // exist, and any combatants supplied get server-assigned IDs.
 func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.Encounter) (data.Encounter, error) {
+	// An encounter joins a session only through CreateInSession, which the session's own rules
+	// authorize; a caller-supplied session id here is refused.
+	if enc.SessionID != "" {
+		return data.Encounter{}, invalid("an encounter cannot be created inside a session here")
+	}
+	return s.create(ctx, owner, actor, enc)
+}
+
+// CreateInSession stores enc as a new draft encounter of the session, owned by owner (the GM).
+// The caller has already authorized actor and the limit (Sessions.AuthorizeEncounterCreate).
+func (s *Encounters) CreateInSession(ctx context.Context, owner, actor, sessionID string, enc data.Encounter) (data.Encounter, error) {
+	enc.SessionID = sessionID
+	return s.create(ctx, owner, actor, enc)
+}
+
+func (s *Encounters) create(ctx context.Context, owner, actor string, enc data.Encounter) (data.Encounter, error) {
 	if err := checkTheme(ctx, s.themes, owner, enc.ThemeID); err != nil {
 		return data.Encounter{}, err
 	}
 	enc.Name = strings.TrimSpace(enc.Name)
 	if enc.Name == "" {
 		return data.Encounter{}, invalid("encounter name is required")
-	}
-	// An encounter joins a session only through a path that authorizes the caller as that
-	// session's GM; until one exists, a caller-supplied session id is refused.
-	if enc.SessionID != "" {
-		return data.Encounter{}, invalid("an encounter cannot be created inside a session here")
 	}
 	_, err := s.systems.Get(ctx, enc.GameSystemID)
 	if errors.Is(err, data.ErrNotFound) {

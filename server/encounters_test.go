@@ -362,8 +362,11 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 		"POST /encounters/:id/save-as-roster": func() call {
 			return call{"POST", "/encounters/" + pid + "/save-as-roster", `{"name":"S"}`, "user-ok", false}
 		},
-		"DELETE /encounters/:id":                            func() call { return call{"DELETE", "/encounters/" + pid + "?revision=" + rev(), "", "user-ok", false} },
-		"GET /sessions/:id/encounters":                      func() call { return call{"GET", "/sessions/" + sid + "/encounters", "", "user-two", true} },
+		"DELETE /encounters/:id":       func() call { return call{"DELETE", "/encounters/" + pid + "?revision=" + rev(), "", "user-ok", false} },
+		"GET /sessions/:id/encounters": func() call { return call{"GET", "/sessions/" + sid + "/encounters", "", "user-two", true} },
+		"POST /sessions/:id/encounters": func() call {
+			return call{"POST", "/sessions/" + sid + "/encounters", `{"name":"S","game_system_id":"` + data.DefaultSystemID + `"}`, "user-ok", true}
+		},
 		"GET /sessions/:id/encounters/:eid":                 func() call { return call{"GET", sess, "", "user-two", true} },
 		"GET /sessions/:id/encounters/:eid/combatants/:cid": func() call { return call{"GET", sess + "/combatants/pc", "", "user-two", true} },
 		"POST /sessions/:id/encounters/:eid/combatants/:cid/change-requests": func() call {
@@ -383,7 +386,7 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 	order := []string{"GET /encounters", "POST /encounters", "GET /encounters/:id", "PATCH /encounters/:id", "POST /encounters/:id/combatants",
 		"PATCH /encounters/:id/combatants/:cid", "DELETE /encounters/:id/combatants/:cid", "POST /encounters/:id/combatants/:cid/restore",
 		"POST /encounters/:id/start", "POST /encounters/:id/advance", "POST /encounters/:id/back", "POST /encounters/:id/end", "POST /encounters/:id/reset",
-		"POST /rosters/:id/encounters", "POST /encounters/:id/save-as-roster", "GET /sessions/:id/encounters", "GET /sessions/:id/encounters/:eid",
+		"POST /rosters/:id/encounters", "POST /encounters/:id/save-as-roster", "GET /sessions/:id/encounters", "POST /sessions/:id/encounters", "GET /sessions/:id/encounters/:eid",
 		"GET /sessions/:id/encounters/:eid/combatants/:cid", "PUT /sessions/:id/encounters/:eid/combatants/:cid/controllers",
 		"POST /sessions/:id/encounters/:eid/combatants/:cid/change-requests", "GET /sessions/:id/encounters/:eid/change-requests",
 		"POST /sessions/:id/encounters/:eid/change-requests/:rid/approve", "POST /sessions/:id/encounters/:eid/change-requests/:rid/reject", "DELETE /encounters/:id"}

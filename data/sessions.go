@@ -35,6 +35,9 @@ type Session struct {
 	// token cannot read the owner's entitlements (initiative-entitlement-gating).
 	OwnerLimits   map[string]int `bson:"owner_limits,omitempty" json:"-"`
 	OwnerLimitsAt *time.Time     `bson:"owner_limits_at,omitempty" json:"-"`
+	// AllowCoGMCreateEncounter lets a co-GM create encounters in the session. Only the GM changes
+	// it. It is never serialized from here: SessionView shows it to the GM and co-GMs only.
+	AllowCoGMCreateEncounter bool `bson:"allow_co_gm_create_encounter" json:"-"`
 }
 
 // Member is one user's place in a session. This collection is the source of truth for who holds
@@ -199,6 +202,14 @@ func (r *Sessions) SoftDelete(ctx context.Context, d Decision, expectedRevision 
 		return err
 	}
 	return r.owned.SoftDelete(ctx, d.actor, d.actor, d.session, expectedRevision)
+}
+
+// Update changes the session's settings at expectedRevision and returns it. Only the GM may.
+func (r *Sessions) Update(ctx context.Context, d Decision, expectedRevision int64, set map[string]any) (Session, error) {
+	if err := d.require(relGM); err != nil {
+		return Session{}, err
+	}
+	return r.owned.Update(ctx, d.actor, d.actor, d.session, expectedRevision, set)
 }
 
 // ResumeDeletion returns the Decision to finish deleting a session this user already deleted: the
