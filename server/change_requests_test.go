@@ -915,3 +915,20 @@ func TestACancelledRequesterCancelsAnApprovingRequestToo(t *testing.T) {
 		t.Errorf("pending = %v, want none", got)
 	}
 }
+
+func TestAnApprovingRequestShowsNoClaimant(t *testing.T) {
+	r, db, sid := changeTable(t)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+	var discard data.ChangeRequest
+	err := db.Fake(data.CollectionChangeRequests).FindOneAndUpdate(context.Background(), bson.D{{Key: "_id", Value: idOf(req)}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: data.ChangeApproving}, {Key: "decided_by", Value: "u-1"}, {Key: "claimed_at", Value: time.Now()}}}}, &discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := requests(t, r, "user-two", sid, "")
+
+	if len(got) != 1 || got[0]["status"] != "pending" || got[0]["decided_by"] != nil {
+		t.Fatalf("an approving request as the player sees it = %v, want pending with no decided_by", got)
+	}
+}
