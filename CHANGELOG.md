@@ -1,4 +1,16 @@
 
+## 0.8.0 - 2026-11-17
+
+### Added
+- Create an encounter in a session, with a GM-controlled co-GM setting
+
+
+### Fixed
+- Gate co-GM encounter creation on the GM's recorded entitlements
+- Report a failed retract of an over-limit session encounter
+
+
+
 ## 0.7.0 - 2026-11-17
 
 ### Added
