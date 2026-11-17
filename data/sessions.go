@@ -201,6 +201,31 @@ func (r *Sessions) SoftDelete(ctx context.Context, d Decision, expectedRevision 
 	return r.owned.SoftDelete(ctx, d.actor, d.actor, d.session, expectedRevision)
 }
 
+// ResumeDeletion returns the Decision to finish deleting a session this user already deleted: the
+// session document is soft-deleted and owned by actor, who deleted it. A deleted session has no
+// OpenFGA tuples left to ask (and its record is gone from Live), so Mongo is the proof here, and
+// the Decision is the GM's; it only exists so that cleanup steps interrupted after the soft delete
+// can be run again. Anyone else, or a session that is not deleted, is ErrNotFound.
+func (r *Sessions) ResumeDeletion(ctx context.Context, actor, sessionID string) (Decision, error) {
+	if err := checkUserID(actor); err != nil {
+		return Decision{}, err
+	}
+	id, ok := cleanID(sessionID)
+	if !ok {
+		return Decision{}, ErrNotFound
+	}
+	var s Session
+	err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "owner_user_id", Value: actor}, {Key: "deleted_by", Value: actor},
+		{Key: "deleted_at", Value: bson.D{{Key: "$ne", Value: nil}}}}, &s)
+	if errors.Is(err, store.ErrNotFound) {
+		return Decision{}, ErrNotFound
+	}
+	if err != nil {
+		return Decision{}, err
+	}
+	return Decision{actor: actor, session: id, relation: relGM}, nil
+}
+
 // LimitItems is the part of the owner-scoped repository the limit reconciler needs: which sessions
 // an owner has and which are inactive. It reads no session content.
 type LimitItems struct{ o *Owned[Session, *Session] }

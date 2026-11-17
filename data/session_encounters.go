@@ -167,6 +167,71 @@ func withoutController(cs []Combatant, userID string) ([]Combatant, bool) {
 	return out, changed
 }
 
+// ReleaseSession turns every encounter of the session into a private encounter of its GM (the
+// session's owner, d.actor): session_id and every combatant's controller_user_ids are cleared,
+// the revision advances, and owner_user_id becomes the GM (initiative-sessions, "Session
+// deletion"). d must be the GM's. It reads a page at a time by _id until none is left, and an
+// encounter that changed under it is re-read, so no encounter is skipped; running it again after a
+// partial failure finishes the rest (a released encounter no longer matches). Position and ref_keys
+// are kept. The GM's saved-encounter limit reconciles afterwards like any other count change.
+func (r *Encounters) ReleaseSession(ctx context.Context, d Decision) error {
+	if err := d.require(relGM); err != nil {
+		return err
+	}
+	var errs []error
+	after := ""
+	for page := 0; ; page++ {
+		if page == maxScrubPages {
+			return errors.Join(append(errs, fmt.Errorf("%w: more than %d encounters in one session", ErrInvalid, maxScrubPages*scrubPageSize))...)
+		}
+		filter := bson.D{{Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}}
+		if after != "" {
+			filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$gt", Value: after}}})
+		}
+		var encs []Encounter
+		if err := r.c.Find(ctx, filter, store.FindOptions{Sort: bson.D{{Key: "_id", Value: 1}}, Limit: scrubPageSize}, &encs); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		for _, e := range encs {
+			if err := r.releaseOne(ctx, d, e); err != nil {
+				errs = append(errs, err)
+			}
+			after = e.ID
+		}
+		if len(encs) < scrubPageSize {
+			return errors.Join(errs...)
+		}
+	}
+}
+
+func (r *Encounters) releaseOne(ctx context.Context, d Decision, e Encounter) error {
+	for range maxScrubRetries {
+		cs := slices.Clone(e.Combatants)
+		for i := range cs {
+			cs[i].ControllerUserIDs = nil
+		}
+		filter := bson.D{{Key: "_id", Value: e.ID}, {Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}, {Key: "revision", Value: e.Revision}}
+		update := bson.D{
+			{Key: "$set", Value: bson.D{{Key: "combatants", Value: nonNilC(cs)}, {Key: "owner_user_id", Value: d.actor},
+				{Key: "updated_at", Value: r.now()}, {Key: "updated_by", Value: d.actor}}},
+			{Key: "$unset", Value: bson.D{{Key: "session_id", Value: ""}}},
+			{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}},
+		}
+		var discard Encounter
+		err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
+		if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: e.ID}, {Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}}, &e); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+	}
+	return fmt.Errorf("encounter %s kept changing while its session was being deleted", e.ID)
+}
+
 // ValidateCombatantChange checks after, a combatant as it would be once an edit applies to before
 // (the combatant as stored), against the rules a write enforces: its own fields, and the health
 // keys the edit changed against the game system's definition (the default system when the
