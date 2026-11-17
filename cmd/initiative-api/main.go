@@ -91,6 +91,7 @@ func main() {
 		Entitlements: entitlements.New(cfg.EntitlementsAPIURL),
 		OwnerLimits:  data.NewOwnerEntitlements(db, cfg.OwnerEntitlementsMaxAge),
 		Themes:       themes,
+		Systems:      data.NewSystemRepo(db),
 		Credentials:  creds,
 		Rosters:      rosters,
 		Encounters:   encounters,
