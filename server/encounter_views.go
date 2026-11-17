@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -24,6 +25,7 @@ func setupEncounterViewHandlers(g *gin.RouterGroup, svc *domain.Encounters, sess
 	g.GET("/sessions/:id/encounters", h.list)
 	g.GET("/sessions/:id/encounters/:eid", h.get)
 	g.GET("/sessions/:id/encounters/:eid/combatants/:cid", h.combatant)
+	g.PUT("/sessions/:id/encounters/:eid/combatants/:cid/controllers", h.setControllers)
 }
 
 // viewer authorizes the caller on the session in the path. A caller who is not a member gets 403
@@ -92,4 +94,42 @@ func writeView(c *gin.Context, status int, view domain.EncounterView, fields []s
 		c.Header("ETag", `"r`+strconv.FormatInt(rev, 10)+`"`)
 	}
 	c.JSON(status, projected(view, fields))
+}
+
+type controllersBody struct {
+	ControllerUserIDs []string `json:"controller_user_ids"`
+	Revision          int64    `json:"revision"`
+}
+
+// setControllers assigns a combatant's controllers. Only the session's GM and co-GMs may; every
+// listed user must be a session member who can control (not an observer). The revision comes from
+// If-Match, the query, or the body, and a stale one is a 409 carrying the current view.
+func (h encounterViewHandlers) setControllers(c *gin.Context) {
+	var b controllersBody
+	if !bindJSON(c, &b) {
+		return
+	}
+	if b.ControllerUserIDs == nil {
+		badRequest(c, "controller_user_ids is required (an empty list clears the controllers)")
+		return
+	}
+	rev, ok := revisionOf(c, b.Revision)
+	if !ok {
+		return
+	}
+	actor := authz.Viewer(c)
+	view, err := h.svc.AssignControllers(c.Request.Context(), h.sessions, actor, c.Param("id"), c.Param("eid"), c.Param("cid"), b.ControllerUserIDs, rev)
+	if err != nil {
+		var current any
+		if errors.Is(err, data.ErrRevisionConflict) {
+			if v, viewerr := h.sessions.Viewer(c.Request.Context(), actor, c.Param("id")); viewerr == nil {
+				if cur, cerr := h.svc.ViewForSession(c.Request.Context(), v, c.Param("eid")); cerr == nil {
+					current = cur
+				}
+			}
+		}
+		writeError(c, err, current)
+		return
+	}
+	writeView(c, http.StatusOK, view, nil)
 }

@@ -24,11 +24,17 @@ func (e *HealthError) Unwrap() error { return ErrInvalid }
 // for MaxRef, the value of the referenced field in h when present). Keys are checked in sorted
 // order so the reported field is stable.
 func CheckHealth(sys GameSystem, h map[string]int) error {
+	return checkHealthKeys(sys, h, slices.Sorted(maps.Keys(h)))
+}
+
+// checkHealthKeys is CheckHealth for only the named keys of h; the other keys of h are read only as
+// the MaxRef values the named keys are bounded by.
+func checkHealthKeys(sys GameSystem, h map[string]int, keys []string) error {
 	fields := make(map[string]TrackerField, len(sys.Fields))
 	for _, f := range sys.Fields {
 		fields[f.Key] = f
 	}
-	for _, k := range slices.Sorted(maps.Keys(h)) {
+	for _, k := range keys {
 		v := h[k]
 		f, ok := fields[k]
 		if !ok {

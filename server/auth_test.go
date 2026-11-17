@@ -26,6 +26,7 @@ func fakeAuthAPI(t *testing.T) *httptest.Server {
 		"user-ok":    {Allowed: true, Roles: []string{authz.RoleUser}, Sub: "auth0|1"},
 		"user-two":   {Allowed: true, Roles: []string{authz.RoleUser}, Sub: "auth0|5"},
 		"user-three": {Allowed: true, Roles: []string{authz.RoleUser}, Sub: "auth0|6"},
+		"user-four":  {Allowed: true, Roles: []string{authz.RoleUser}, Sub: "auth0|7"},
 		"no-role":    {Allowed: true, Roles: []string{}, Sub: "auth0|2"},
 		"admin-ok":   {Allowed: true, Roles: []string{authz.RoleAdmin}, Sub: "auth0|3"},
 		"denied":     {Allowed: false, Reason: "denied", Sub: "auth0|4"},
@@ -52,6 +53,8 @@ func fakeUsersAPI(t *testing.T) *httptest.Server {
 			id = "u-2"
 		case "Bearer user-three":
 			id = "u-3"
+		case "Bearer user-four":
+			id = "u-4"
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"user_id": id})
 	}))

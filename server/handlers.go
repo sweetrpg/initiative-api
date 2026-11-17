@@ -25,7 +25,9 @@ type Services struct {
 	Rosters     *domain.Rosters
 	Encounters  *domain.Encounters
 	Sessions    *domain.Sessions
-	Systems     *data.SystemRepo
+	// ChangeRequests handles player-submitted combatant changes; it needs Encounters and Sessions.
+	ChangeRequests *domain.ChangeRequests
+	Systems        *data.SystemRepo
 	// Relations answers session authorization checks (PADR-0035). Without it every session
 	// request fails closed with 503.
 	Relations *relations.Client
@@ -62,6 +64,9 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	}
 	if s.Encounters != nil && s.Sessions != nil {
 		setupEncounterViewHandlers(u, s.Encounters, s.Sessions)
+	}
+	if s.ChangeRequests != nil {
+		setupChangeRequestHandlers(u, s.ChangeRequests)
 	}
 	if s.Encounters != nil {
 		setupEncounterHandlers(g, s.Encounters, s.Rosters, s.Entitlements)

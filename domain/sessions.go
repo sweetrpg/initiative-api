@@ -16,6 +16,7 @@ import (
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/store"
 )
 
@@ -89,13 +90,15 @@ type SessionView struct {
 
 // Sessions implements session membership and its rules.
 type Sessions struct {
-	repo *data.Sessions
-	now  func() time.Time
+	repo    *data.Sessions
+	enc     *data.Encounters
+	changes *data.ChangeRequests
+	now     func() time.Time
 }
 
 // NewSessions builds the service on db.
 func NewSessions(db store.Database) *Sessions {
-	return &Sessions{repo: data.NewSessions(db), now: func() time.Time { return time.Now().UTC() }}
+	return &Sessions{repo: data.NewSessions(db), enc: data.NewEncounters(db), changes: data.NewChangeRequests(db), now: func() time.Time { return time.Now().UTC() }}
 }
 
 // Viewer returns how actor may see the session's encounters; see data.Sessions.AuthorizeView.
@@ -136,7 +139,10 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 	}
 	sess := data.Session{Name: name}
 	if err := s.repo.Open(ctx, actor, id, &sess); err != nil {
-		s.endSession(ctx, id) // frees the mint slot; garbage collection covers a failure here
+		// Frees the mint slot; garbage collection covers a failure here.
+		if eerr := s.endSession(ctx, id); eerr != nil {
+			slog.WarnContext(ctx, "ending a session whose creation failed did not work; garbage collection will close it", "session", id, "error", eerr)
+		}
 		return SessionView{}, err
 	}
 	return SessionView{Session: sess, Role: data.RoleGM}, nil
@@ -246,21 +252,46 @@ func (s *Sessions) List(ctx context.Context, actor string, q data.Query) (data.P
 	return out, nil
 }
 
-// Delete soft-deletes the session and ends every membership. Only the GM may; the owner-scoped
-// delete enforces it a second time.
+// Delete soft-deletes the session, ends it at auth-api (every tuple and the mint), ends every
+// membership, and turns the session's encounters into private encounters of the GM
+// (initiative-sessions, "Session deletion"): session_id and controllers are cleared and the GM
+// becomes the owner, including of encounters a co-GM authored. Only the GM may; the owner-scoped
+// delete enforces it a second time. The soft delete is the commit point. Every later step is
+// idempotent and is attempted even if an earlier one fails, and the errors are returned together;
+// calling Delete again (the GM, same id) then finishes what is left, without the revision, because
+// a deleted session can no longer be authorized through OpenFGA. On such a retry auth-api may
+// already have dropped the GM's own tuple, so a denial when ending the session counts as ended.
 func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) error {
 	_, _, d, err := s.as(ctx, actor, id, ActDelete)
-	if err != nil {
-		return err
-	}
-	if err := s.repo.SoftDelete(ctx, d, rev); err != nil {
+	resumed := false
+	switch {
+	case err == nil:
+		if err := s.repo.SoftDelete(ctx, d, rev); err != nil {
+			return err
+		}
+	case errors.Is(err, data.ErrForbidden) || errors.Is(err, data.ErrNotFound):
+		// Perhaps a deletion this GM started and did not finish. Anyone else, and a session that
+		// was never deleted, gets the original answer.
+		rd, rerr := s.repo.ResumeDeletion(ctx, actor, id)
+		if rerr != nil {
+			return err
+		}
+		d, resumed = rd, true
+	default:
 		return err
 	}
 	// End the session at auth-api before dropping the member records: once the session record is
-	// soft-deleted a retry 404s at Live(), so a skipped end would leak the mint and tuples until
-	// garbage collection.
-	s.endSession(ctx, d.SessionID())
-	return s.repo.DropSession(ctx, d)
+	// soft-deleted a retry cannot authorize the call through OpenFGA, so it runs first.
+	endErr := s.endSession(ctx, d.SessionID())
+	if resumed && errors.Is(endErr, relations.ErrDenied) {
+		endErr = nil
+	}
+	return errors.Join(
+		endErr,
+		s.repo.DropSession(ctx, d),
+		s.changes.CancelSession(ctx, d),
+		s.enc.ReleaseSession(ctx, d),
+	)
 }
 
 func hashCode(code string) string {
@@ -364,6 +395,19 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 	if !canManageRole(am.Role, role) {
 		return data.Member{}, data.ErrForbidden
 	}
+	// Before the request settles, and failing closed: a stale controller id must not revive on
+	// admission. The user is not a member yet, so this cannot race a legitimate assignment, and a
+	// failure leaves the request pending to retry rather than approved with no member.
+	// Only a request that is not pending (a retried approval, or no such request) skips the scrub;
+	// any other lookup error fails closed rather than admit with stale ids intact.
+	switch pending, perr := s.repo.PendingUser(ctx, d, requestID); {
+	case perr == nil:
+		if err := s.enc.ScrubController(ctx, d, pending); err != nil {
+			return data.Member{}, err
+		}
+	case !errors.Is(perr, data.ErrNotFound):
+		return data.Member{}, perr
+	}
 	jr, err := s.repo.Decide(ctx, d, requestID, data.RequestApproved, role, "")
 	if errors.Is(err, data.ErrConflict) && jr.Status == data.RequestApproved && jr.Role == role {
 		return s.finishApproval(ctx, d, am.Role, jr)
@@ -444,9 +488,18 @@ func (s *Sessions) SetRole(ctx context.Context, actor, id, user, role string) (d
 	if !canManageRole(am.Role, role) || !canManageRole(am.Role, t.Role) {
 		return data.Member{}, data.ErrForbidden
 	}
+	if t.Role == data.RoleObserver {
+		// An observer being promoted starts with no control; failing closed, so a stale id cannot revive.
+		if err := s.enc.ScrubController(ctx, d, user); err != nil {
+			return data.Member{}, err
+		}
+	}
 	m, err := s.repo.SetRole(ctx, d, user, role)
 	if err != nil {
 		return data.Member{}, err
+	}
+	if role == data.RoleObserver {
+		s.scrubControllers(ctx, d, user)
 	}
 	return m, s.syncGrant(ctx, am.Role, d.SessionID(), user, role)
 }
@@ -467,6 +520,7 @@ func (s *Sessions) Remove(ctx context.Context, actor, id, user string) error {
 	if err := s.repo.RemoveMember(ctx, d, user); err != nil {
 		return err
 	}
+	s.scrubControllers(ctx, d, user)
 	s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	return nil
 }
@@ -483,6 +537,7 @@ func (s *Sessions) Leave(ctx context.Context, actor, id string) error {
 	if err := s.repo.RemoveMember(ctx, d, actor); err != nil {
 		return err
 	}
+	s.scrubControllers(ctx, d, actor)
 	s.syncRevoke(ctx, m.Role, d.SessionID(), actor, m.Role)
 	return nil
 }
@@ -511,6 +566,7 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	}
 	switch err := s.repo.RemoveMember(ctx, d, user); {
 	case err == nil:
+		s.scrubControllers(ctx, d, user)
 		s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	case !errors.Is(err, data.ErrNotFound):
 		return err
@@ -534,4 +590,19 @@ func (s *Sessions) Blocks(ctx context.Context, actor, id string, q data.Query) (
 		return data.Page[data.Block]{}, err
 	}
 	return s.repo.Blocks(ctx, d, q)
+}
+
+// scrubControllers removes user from every combatant's controllers in the session's encounters,
+// so a removed, blocked, or demoted member cannot regain control by rejoining or being promoted.
+// It runs after the membership write and again before admission; it is idempotent and best
+// effort, because the live Viewer already denies a non-player any control (domain.controls).
+func (s *Sessions) scrubControllers(ctx context.Context, d data.Decision, user string) {
+	if err := s.enc.ScrubController(ctx, d, user); err != nil {
+		slog.WarnContext(ctx, "scrubbing a member's combatant controls failed; admission scrubs again", "session", d.SessionID(), "user", user, "error", err)
+	}
+	// Their pending change requests can no longer be approved (approval needs a current player
+	// controller), so close them instead of leaving them in the GM's queue.
+	if err := s.changes.CancelPending(ctx, d, user); err != nil {
+		slog.WarnContext(ctx, "cancelling a member's pending change requests failed", "session", d.SessionID(), "user", user, "error", err)
+	}
 }

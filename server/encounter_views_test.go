@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/domain"
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -30,7 +32,7 @@ func roleChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	var b struct{ Object, Relation string }
 	_ = json.NewDecoder(r.Body).Decode(&b)
-	role := map[string]string{"Bearer user-ok": "gm", "Bearer user-two": "player", "Bearer user-three": "observer"}[r.Header.Get("Authorization")]
+	role := map[string]string{"Bearer user-ok": "gm", "Bearer user-two": "player", "Bearer user-three": "observer", "Bearer user-four": "co_gm"}[r.Header.Get("Authorization")]
 	if strings.HasSuffix(b.Object, foreignSession) {
 		role = ""
 	}
@@ -39,7 +41,7 @@ func roleChecks(w http.ResponseWriter, r *http.Request) {
 	case "can_view":
 		allowed = role != ""
 	case "can_edit", "can_approve":
-		allowed = role == "gm"
+		allowed = role == "gm" || role == "co_gm"
 	default:
 		allowed = role == b.Relation
 	}
@@ -56,8 +58,24 @@ func viewTable(t *testing.T) (r http.Handler, db *fake.DB, sessionID string) {
 // viewTableLimit is viewTable with every entitlement limit set to limit.
 func viewTableLimit(t *testing.T, limit string) (r http.Handler, db *fake.DB, sessionID string) {
 	t.Helper()
+	return viewTableOn(t, limit, func(d *fake.DB) store.Database { return d })
+}
+
+// viewTableOn is viewTableLimit with the router's database wrapped by wrap; the returned db is the
+// underlying fake, for seeding and inspection.
+func viewTableOn(t *testing.T, limit string, wrap func(*fake.DB) store.Database) (r http.Handler, db *fake.DB, sessionID string) {
+	t.Helper()
+	return viewTableRel(t, limit, wrap, roleChecks)
+}
+
+// viewTableRel is viewTableOn with a caller-supplied auth-api (roleChecks, possibly wrapped).
+func viewTableRel(t *testing.T, limit string, wrap func(*fake.DB) store.Database, rel http.HandlerFunc) (r http.Handler, db *fake.DB, sessionID string) {
+	t.Helper()
 	db = fake.NewDB()
-	router, _ := credRouterRel(t, limit, db, roleChecks)
+	withLimits := func(svc *Services) {
+		svc.Limits = domain.NewLimits(domain.Kind{Name: "encounters", Key: domain.KeySavedEncounters, Repo: svc.Encounters.Items()})
+	}
+	router, _ := credRouterRel(t, limit, wrap(db), rel, withLimits)
 	w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", w.Code, w.Body)

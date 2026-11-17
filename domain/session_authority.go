@@ -111,16 +111,15 @@ func (s *Sessions) syncRevoke(ctx context.Context, actorRole, sessionID, user, r
 	}
 }
 
-// endSession tells auth-api to drop every tuple on the session and close its mint. The Mongo
-// records are already gone, so a failure is logged and left to garbage collection.
-func (s *Sessions) endSession(ctx context.Context, sessionID string) {
+// endSession tells auth-api to drop every tuple on the session and close its mint, and returns
+// the failure. Deleting a session reports it (a retry ends the session again); rolling back a
+// failed create only logs it, since garbage collection closes the mint.
+func (s *Sessions) endSession(ctx context.Context, sessionID string) error {
 	a, err := authorityOf(ctx)
 	if err == nil {
 		err = a.svc.EndSession(ctx, a.token, sessionID)
 	}
-	if err != nil {
-		slog.WarnContext(ctx, "ending the session at auth-api failed; garbage collection will close it", "session", sessionID, "error", err)
-	}
+	return err
 }
 
 // canManageRole reports whether actorRole may assign or remove role. Only the GM changes a co_gm
