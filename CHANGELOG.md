@@ -1,4 +1,25 @@
 
+## 0.6.0 - 2026-11-17
+
+### Added
+- Role-aware encounter views and read routes (7.6, REST half of 7.14)
+- REST routes for rosters and characters with list conventions and limits
+- Keep the owner path to private encounters; typed health errors
+- REST routes for encounters, combatants, turn actions, reset and roster transfers
+- Record owner limits so integration credentials enforce them without a user bearer
+- Strict body decoding, body cap, rendered projection, strict filters
+- Bound sizes and names, check themes, exclude session encounters from counts, harden route tests
+- Read-only game-systems resource
+- Serve and test the game-systems resource
+
+
+### Fixed
+- Keep session encounters out of the ref lookup and refuse caller-set session ids
+- Expire recorded owner limits and write each key atomically
+- Fail closed on a gated get and cover the credential path
+
+
+
 ## 0.5.0 - 2026-11-15
 
 ### Added
