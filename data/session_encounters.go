@@ -13,8 +13,11 @@ import (
 // maxScrubRetries bounds how often a scrub re-reads an encounter that changed under it.
 const maxScrubRetries = 3
 
-// sessionEncounterLimit bounds how many of a session's encounters one scrub reads.
-const sessionEncounterLimit = 500
+// A scrub reads scrubPageSize encounters at a time and gives up after maxScrubPages pages.
+const (
+	scrubPageSize = 100
+	maxScrubPages = 1000
+)
 
 // UpdateInSession writes set to the session's encounter id if its revision is still
 // expectedRevision, bumping the revision and stamping updated_*. d must grant can_edit (a GM or
@@ -82,9 +85,11 @@ func (r *Encounters) classifyInSession(ctx context.Context, d Decision, id strin
 // ScrubController removes userID from every combatant's controller_user_ids in the session's
 // encounters. It keeps a user who left, was removed, blocked, or demoted from regaining control
 // of a combatant by rejoining or being promoted, and keeps the GM's view free of stale ids. d
-// grants can_edit, or can_view when the user is scrubbing their own leave. Each changed encounter
-// is written under its revision (the revision advances, so clients re-read); an encounter that
-// changed under the scrub is re-read, up to maxScrubRetries times. Idempotent.
+// grants can_edit, or can_view when the user is scrubbing their own leave. Only encounters that
+// list the user are read, a page at a time by _id until none is left, so no encounter is skipped;
+// if the session has more than maxScrubPages pages the scrub fails rather than stop silently.
+// Each changed encounter is written under its revision (the revision advances, so clients
+// re-read) and re-read up to maxScrubRetries times if it changed under the scrub. Idempotent.
 func (r *Encounters) ScrubController(ctx context.Context, d Decision, userID string) error {
 	need := relEdit
 	if userID == d.actor {
@@ -93,18 +98,31 @@ func (r *Encounters) ScrubController(ctx context.Context, d Decision, userID str
 	if err := pairOK(d, need, userID); err != nil {
 		return err
 	}
-	var encs []Encounter
-	if err := r.c.Find(ctx, bson.D{{Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}},
-		store.FindOptions{Limit: sessionEncounterLimit}, &encs); err != nil {
-		return err
-	}
 	var errs []error
-	for _, e := range encs {
-		if err := r.scrubOne(ctx, d, e, userID); err != nil {
-			errs = append(errs, err)
+	after := ""
+	for page := 0; ; page++ {
+		if page == maxScrubPages {
+			return errors.Join(append(errs, fmt.Errorf("%w: more than %d encounters list this controller", ErrInvalid, maxScrubPages*scrubPageSize))...)
+		}
+		filter := bson.D{{Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil},
+			{Key: "combatants.controller_user_ids", Value: userID}}
+		if after != "" {
+			filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$gt", Value: after}}})
+		}
+		var encs []Encounter
+		if err := r.c.Find(ctx, filter, store.FindOptions{Sort: bson.D{{Key: "_id", Value: 1}}, Limit: scrubPageSize}, &encs); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		for _, e := range encs {
+			if err := r.scrubOne(ctx, d, e, userID); err != nil {
+				errs = append(errs, err)
+			}
+			after = e.ID
+		}
+		if len(encs) < scrubPageSize {
+			return errors.Join(errs...)
 		}
 	}
-	return errors.Join(errs...)
 }
 
 func (r *Encounters) scrubOne(ctx context.Context, d Decision, e Encounter, userID string) error {

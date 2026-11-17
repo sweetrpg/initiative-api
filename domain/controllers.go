@@ -27,6 +27,9 @@ func (s *Encounters) AssignControllers(ctx context.Context, sessions *Sessions, 
 	if err != nil {
 		return nil, err
 	}
+	if len(userIDs) > data.MaxCombatants {
+		return nil, invalid("at most %d controllers", data.MaxCombatants)
+	}
 	ids, err := sessions.controllersOf(ctx, d, userIDs)
 	if err != nil {
 		return nil, err
@@ -34,6 +37,9 @@ func (s *Encounters) AssignControllers(ctx context.Context, sessions *Sessions, 
 	enc, err := s.repo.LoadForViewer(ctx, viewer, encounterID)
 	if err != nil {
 		return nil, err
+	}
+	if enc.Revision != rev {
+		return nil, data.ErrRevisionConflict
 	}
 	cs := slices.Clone(enc.Combatants)
 	i := slices.IndexFunc(cs, func(c data.Combatant) bool { return c.ID == combatantID && !c.Removed })
@@ -45,7 +51,27 @@ func (s *Encounters) AssignControllers(ctx context.Context, sessions *Sessions, 
 	if err != nil {
 		return nil, err
 	}
+	// A listed user may have left between the membership check and the write. If so, scrub them
+	// and report a conflict so the GM reassigns against the new membership.
+	if gone := sessions.notControllers(ctx, d, ids); len(gone) > 0 {
+		for _, u := range gone {
+			sessions.scrubControllers(ctx, d, u)
+		}
+		return nil, data.ErrConflict
+	}
 	return s.render(ctx, updated, viewer)
+}
+
+// notControllers returns the users in ids who no longer hold a controlling membership.
+func (s *Sessions) notControllers(ctx context.Context, d data.Decision, ids []string) []string {
+	var gone []string
+	for _, u := range ids {
+		m, err := s.repo.Member(ctx, d, u)
+		if err != nil || !slices.Contains(controllerRoles, m.Role) {
+			gone = append(gone, u)
+		}
+	}
+	return gone
 }
 
 // controllersOf validates userIDs against the session's live member records and returns them

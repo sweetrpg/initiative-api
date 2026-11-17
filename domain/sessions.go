@@ -365,6 +365,14 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 	if !canManageRole(am.Role, role) {
 		return data.Member{}, data.ErrForbidden
 	}
+	// Before the request settles, and failing closed: a stale controller id must not revive on
+	// admission. The user is not a member yet, so this cannot race a legitimate assignment, and a
+	// failure leaves the request pending to retry rather than approved with no member.
+	if pending, perr := s.repo.PendingUser(ctx, d, requestID); perr == nil {
+		if err := s.enc.ScrubController(ctx, d, pending); err != nil {
+			return data.Member{}, err
+		}
+	}
 	jr, err := s.repo.Decide(ctx, d, requestID, data.RequestApproved, role, "")
 	if errors.Is(err, data.ErrConflict) && jr.Status == data.RequestApproved && jr.Role == role {
 		return s.finishApproval(ctx, d, am.Role, jr)
@@ -378,7 +386,6 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 		}
 		return data.Member{}, err
 	}
-	s.scrubControllers(ctx, d, jr.UserID)
 	m, err := s.repo.AddMember(ctx, d, jr.UserID, role)
 	if err != nil {
 		return data.Member{}, err
@@ -447,7 +454,10 @@ func (s *Sessions) SetRole(ctx context.Context, actor, id, user, role string) (d
 		return data.Member{}, data.ErrForbidden
 	}
 	if t.Role == data.RoleObserver {
-		s.scrubControllers(ctx, d, user) // an observer being promoted starts with no control
+		// An observer being promoted starts with no control; failing closed, so a stale id cannot revive.
+		if err := s.enc.ScrubController(ctx, d, user); err != nil {
+			return data.Member{}, err
+		}
 	}
 	m, err := s.repo.SetRole(ctx, d, user, role)
 	if err != nil {

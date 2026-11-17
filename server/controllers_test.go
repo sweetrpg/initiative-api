@@ -1,12 +1,20 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/store"
+	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 const encE1 = "5f00000000000000000000e1"
@@ -210,7 +218,7 @@ func TestAMemberWhoLeavesAndRejoinsDoesNotRegainControl(t *testing.T) {
 		t.Fatalf("leave = %d %s", w.Code, w.Body)
 	}
 	// A scrub that failed would have left the id behind: put it back by hand.
-	replaceEncounter(t, db, encE1, sid, func(e *data.Encounter) {})
+	replaceEncounter(t, db, encE1, sid, func(e *data.Encounter) { e.Combatants[0].ControllerUserIDs = []string{"u-2"} })
 
 	joinAs(t, r, sid, "user-two", "player")
 
@@ -232,7 +240,7 @@ func TestAStaleControllerIDGrantsNothingToANonMemberOrObserver(t *testing.T) {
 }
 
 func TestDemotingAPlayerToObserverScrubsAndPromotingBackStartsClean(t *testing.T) {
-	r, _, sid := viewTable(t)
+	r, db, sid := viewTable(t)
 
 	if w := callAs(r, "user-ok", "PATCH", "/sessions/"+sid+"/members/u-2", `{"role":"observer"}`); w.Code != 200 {
 		t.Fatalf("demote = %d %s", w.Code, w.Body)
@@ -240,10 +248,140 @@ func TestDemotingAPlayerToObserverScrubsAndPromotingBackStartsClean(t *testing.T
 	if got := controllersOf(t, r, sid, "pc"); len(got) != 0 {
 		t.Errorf("pc controllers after demotion = %v, want none", got)
 	}
+	// A scrub that failed would have left the id behind: put it back by hand.
+	replaceEncounter(t, db, encE1, sid, func(e *data.Encounter) { e.Combatants[0].ControllerUserIDs = []string{"u-2"} })
 	if w := callAs(r, "user-ok", "PATCH", "/sessions/"+sid+"/members/u-2", `{"role":"player"}`); w.Code != 200 {
 		t.Fatalf("promote = %d %s", w.Code, w.Body)
 	}
 	if mineFor(t, r, "user-two", sid, "pc") {
 		t.Error("promoted back to player, u-2 controls the pc again")
+	}
+}
+
+// failingEncounters makes Find on the encounters collection fail while fail is set, as a store
+// outage would.
+type failingEncounters struct {
+	store.Database
+	fail *atomic.Bool
+}
+
+func (d failingEncounters) Collection(name string) store.Collection {
+	c := d.Database.Collection(name)
+	if name == data.CollectionEncounters {
+		return failingFind{c, d.fail}
+	}
+	return c
+}
+
+type failingFind struct {
+	store.Collection
+	fail *atomic.Bool
+}
+
+func (c failingFind) Find(ctx context.Context, f bson.D, o store.FindOptions, out any) error {
+	if c.fail.Load() {
+		return errors.New("store down")
+	}
+	return c.Collection.Find(ctx, f, o, out)
+}
+
+func roleOf(t *testing.T, r http.Handler, token, sid string) string {
+	t.Helper()
+	w := callAs(r, token, "GET", "/sessions/"+sid, "")
+	if w.Code != 200 {
+		return ""
+	}
+	role, _ := decodeBody(t, w)["role"].(string)
+	return role
+}
+
+func TestAFailedPreAdmissionScrubRefusesAdmissionAndLeavesTheRequestPending(t *testing.T) {
+	var fail atomic.Bool
+	r, db, sid := viewTableOn(t, "3", func(d *fake.DB) store.Database { return failingEncounters{d, &fail} })
+	if w := callAs(r, "user-two", "POST", "/sessions/"+sid+"/leave", ""); w.Code >= 300 {
+		t.Fatalf("leave = %d %s", w.Code, w.Body)
+	}
+	replaceEncounter(t, db, encE1, sid, func(e *data.Encounter) { e.Combatants[0].ControllerUserIDs = []string{"u-2"} })
+	code := inviteCode(t, r, "user-ok", sid)
+	jw := callAs(r, "user-two", "POST", "/sessions/join", `{"code":"`+code+`"}`)
+	reqID := decodeBody(t, jw)["id"].(string)
+
+	fail.Store(true)
+	w := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/requests/"+reqID+"/approve", `{"role":"player"}`)
+
+	if w.Code < 500 || roleOf(t, r, "user-two", sid) != "" {
+		t.Fatalf("approve with the scrub failing = %d %s, role %q; want a server error and no membership", w.Code, w.Body, roleOf(t, r, "user-two", sid))
+	}
+	fail.Store(false)
+	if w := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/requests/"+reqID+"/approve", `{"role":"player"}`); w.Code != 200 {
+		t.Fatalf("approve retry = %d %s: the request should still have been pending", w.Code, w.Body)
+	}
+	if mineFor(t, r, "user-two", sid, "pc") {
+		t.Error("u-2 controls the pc after the retried admission")
+	}
+}
+
+func TestAFailedPreAdmissionScrubRefusesPromotionFromObserver(t *testing.T) {
+	var fail atomic.Bool
+	r, _, sid := viewTableOn(t, "3", func(d *fake.DB) store.Database { return failingEncounters{d, &fail} })
+	if w := callAs(r, "user-ok", "PATCH", "/sessions/"+sid+"/members/u-2", `{"role":"observer"}`); w.Code != 200 {
+		t.Fatalf("demote = %d %s", w.Code, w.Body)
+	}
+
+	fail.Store(true)
+	w := callAs(r, "user-ok", "PATCH", "/sessions/"+sid+"/members/u-2", `{"role":"player"}`)
+
+	if w.Code < 500 || roleOf(t, r, "user-two", sid) != "observer" {
+		t.Fatalf("promote with the scrub failing = %d %s, role %q; want a server error and still observer", w.Code, w.Body, roleOf(t, r, "user-two", sid))
+	}
+}
+
+func TestACoGMAssignsAndCanBeAssigned(t *testing.T) {
+	r, _, sid := viewTable(t)
+	joinAs(t, r, sid, "user-four", "co_gm")
+
+	byCoGM := callAs(r, "user-four", "PUT", controllersPath(sid, "orc"), `{"controller_user_ids":["u-2"],"revision":3}`)
+	asController := callAs(r, "user-ok", "PUT", controllersPath(sid, "pc"), `{"controller_user_ids":["u-4"],"revision":4}`)
+
+	if byCoGM.Code != 200 || asController.Code != 200 || !slices.Equal(controllersOf(t, r, sid, "pc"), []string{"u-4"}) {
+		t.Fatalf("co-GM assigns = %d %s; co-GM assigned = %d %s", byCoGM.Code, byCoGM.Body, asController.Code, asController.Body)
+	}
+}
+
+func TestAMemberWhoLeftIsRejectedAsAController(t *testing.T) {
+	r, _, sid := viewTable(t)
+	if w := callAs(r, "user-two", "POST", "/sessions/"+sid+"/leave", ""); w.Code >= 300 {
+		t.Fatalf("leave = %d %s", w.Code, w.Body)
+	}
+
+	w := callAs(r, "user-ok", "PUT", controllersPath(sid, "orc"), `{"controller_user_ids":["u-2"],"revision":`+strconv.Itoa(int(gmRevision(t, r, sid)))+`}`)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("assigning a member who left = %d %s, want 422", w.Code, w.Body)
+	}
+}
+
+func TestDuplicateControllersAreStoredOnce(t *testing.T) {
+	r, _, sid := viewTable(t)
+
+	w := callAs(r, "user-ok", "PUT", controllersPath(sid, "orc"), `{"controller_user_ids":["u-2","u-2","u-2"],"revision":3}`)
+
+	if w.Code != 200 || !slices.Equal(controllersOf(t, r, sid, "orc"), []string{"u-2"}) {
+		t.Fatalf("duplicates = %d %s, controllers %v, want one u-2", w.Code, w.Body, controllersOf(t, r, sid, "orc"))
+	}
+}
+
+func TestAnOversizedControllerListIs422(t *testing.T) {
+	r, _, sid := viewTable(t)
+	ids := make([]string, data.MaxCombatants+1)
+	for i := range ids {
+		ids[i] = "u-" + strconv.Itoa(i+100)
+	}
+	body, _ := json.Marshal(map[string]any{"controller_user_ids": ids, "revision": 3})
+
+	w := callAs(r, "user-ok", "PUT", controllersPath(sid, "orc"), string(body))
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("%d controllers = %d %s, want 422", len(ids), w.Code, w.Body)
 	}
 }

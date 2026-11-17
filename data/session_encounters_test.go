@@ -1,10 +1,14 @@
 package data
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/sweetrpg/initiative-api/store"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
@@ -127,5 +131,46 @@ func TestScrubControllerAuthority(t *testing.T) {
 
 	if own != nil || !errors.Is(others, ErrForbidden) {
 		t.Fatalf("own = %v, others = %v; want nil and ErrForbidden", own, others)
+	}
+}
+
+// conflictingUpdates makes every compare-and-set miss, as if another writer always got there first.
+type conflictingUpdates struct{ store.Collection }
+
+func (conflictingUpdates) FindOneAndUpdate(context.Context, bson.D, bson.D, any) error {
+	return store.ErrNotFound
+}
+
+func TestScrubControllerReadsEveryAffectedEncounterPastOnePage(t *testing.T) {
+	r := newEncounters(t)
+	n := 2*scrubPageSize + 50
+	for i := range n {
+		e := Encounter{Meta: Meta{ID: fmt.Sprintf("%024x", i+1), OwnerUserID: "u-1", Revision: 1}, Name: "E", SessionID: gmDecision.session,
+			Status: StatusDraft, Ordering: OrderHighToLow, TieBreaker: TieRandom,
+			Combatants: []Combatant{{ID: "a", Name: "A", Kind: KindPC, ControllerUserIDs: []string{"u-2"}}}}
+		if err := r.c.InsertOne(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := r.ScrubController(ctx, gmDecision, "u-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	left, err := r.c.CountDocuments(ctx, bson.D{{Key: "combatants.controller_user_ids", Value: "u-2"}})
+	if err != nil || left != 0 {
+		t.Fatalf("%d of %d encounters still list the user (err %v)", left, n, err)
+	}
+}
+
+func TestScrubControllerReportsAnEncounterThatKeepsChanging(t *testing.T) {
+	r := newEncounters(t)
+	seedSessionEncounter(t, r, gmDecision.session, []string{"u-2"})
+	r.c = conflictingUpdates{r.c}
+
+	err := r.ScrubController(ctx, gmDecision, "u-2")
+
+	if err == nil || !strings.Contains(err.Error(), "kept changing") {
+		t.Fatalf("err = %v, want the retry exhaustion reported, not swallowed", err)
 	}
 }
