@@ -16,6 +16,7 @@ import (
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/store"
 )
 
@@ -138,7 +139,10 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 	}
 	sess := data.Session{Name: name}
 	if err := s.repo.Open(ctx, actor, id, &sess); err != nil {
-		s.endSession(ctx, id) // frees the mint slot; garbage collection covers a failure here
+		// Frees the mint slot; garbage collection covers a failure here.
+		if eerr := s.endSession(ctx, id); eerr != nil {
+			slog.WarnContext(ctx, "ending a session whose creation failed did not work; garbage collection will close it", "session", id, "error", eerr)
+		}
 		return SessionView{}, err
 	}
 	return SessionView{Session: sess, Role: data.RoleGM}, nil
@@ -248,14 +252,18 @@ func (s *Sessions) List(ctx context.Context, actor string, q data.Query) (data.P
 	return out, nil
 }
 
-// Delete soft-deletes the session, ends every membership, and turns the session's encounters into
-// private encounters of the GM (initiative-sessions, "Session deletion"). Only the GM may; the
-// owner-scoped delete enforces it a second time. The soft delete is the commit point. Every later
-// step is idempotent and is attempted even if an earlier one fails, and the first error is
-// returned; calling Delete again (the GM, same id) then finishes what is left, without the
-// revision, because a deleted session can no longer be authorized through OpenFGA.
+// Delete soft-deletes the session, ends it at auth-api (every tuple and the mint), ends every
+// membership, and turns the session's encounters into private encounters of the GM
+// (initiative-sessions, "Session deletion"): session_id and controllers are cleared and the GM
+// becomes the owner, including of encounters a co-GM authored. Only the GM may; the owner-scoped
+// delete enforces it a second time. The soft delete is the commit point. Every later step is
+// idempotent and is attempted even if an earlier one fails, and the errors are returned together;
+// calling Delete again (the GM, same id) then finishes what is left, without the revision, because
+// a deleted session can no longer be authorized through OpenFGA. On such a retry auth-api may
+// already have dropped the GM's own tuple, so a denial when ending the session counts as ended.
 func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) error {
 	_, _, d, err := s.as(ctx, actor, id, ActDelete)
+	resumed := false
 	switch {
 	case err == nil:
 		if err := s.repo.SoftDelete(ctx, d, rev); err != nil {
@@ -264,19 +272,22 @@ func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) erro
 	case errors.Is(err, data.ErrForbidden) || errors.Is(err, data.ErrNotFound):
 		// Perhaps a deletion this GM started and did not finish. Anyone else, and a session that
 		// was never deleted, gets the original answer.
-		resumed, rerr := s.repo.ResumeDeletion(ctx, actor, id)
+		rd, rerr := s.repo.ResumeDeletion(ctx, actor, id)
 		if rerr != nil {
 			return err
 		}
-		d = resumed
+		d, resumed = rd, true
 	default:
 		return err
 	}
 	// End the session at auth-api before dropping the member records: once the session record is
-	// soft-deleted a retry 404s at Live(), so a skipped end would leak the mint and tuples until
-	// garbage collection.
-	s.endSession(ctx, d.SessionID())
+	// soft-deleted a retry cannot authorize the call through OpenFGA, so it runs first.
+	endErr := s.endSession(ctx, d.SessionID())
+	if resumed && errors.Is(endErr, relations.ErrDenied) {
+		endErr = nil
+	}
 	return errors.Join(
+		endErr,
 		s.repo.DropSession(ctx, d),
 		s.changes.CancelSession(ctx, d),
 		s.enc.ReleaseSession(ctx, d),

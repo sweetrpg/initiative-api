@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,7 +107,7 @@ func TestOnlyTheGMCanDeleteAndNobodyElseCanResumeADeletion(t *testing.T) {
 	}
 
 	// A different session's encounter, and the first session's once it is deleted, stay out of reach.
-	other := buildEncounterAt("5f00000000000000000000e7", foreignSession)
+	other := buildEncounter("5f00000000000000000000e7", foreignSession)
 	if err := db.Fake(data.CollectionEncounters).InsertOne(context.Background(), other); err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +121,6 @@ func TestOnlyTheGMCanDeleteAndNobodyElseCanResumeADeletion(t *testing.T) {
 		t.Errorf("another session's encounter was released: %q", e.SessionID)
 	}
 }
-
-func buildEncounterAt(id, session string) data.Encounter { return buildEncounter(id, session) }
 
 func TestAStaleRevisionDoesNotReleaseAnything(t *testing.T) {
 	r, db, sid := changeTable(t)
@@ -192,3 +191,75 @@ func TestDeletionLeavesSoftDeletedAndOtherUsersEncountersAlone(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// endSessionRel is roleChecks, except that DELETE /authz/sessions/{id} answers statuses in turn
+// (the last one repeats) and counts its calls.
+func endSessionRel(calls *atomic.Int64, statuses ...int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/authz/sessions/") {
+			n := int(calls.Add(1))
+			w.WriteHeader(statuses[min(n, len(statuses))-1])
+			return
+		}
+		roleChecks(w, r)
+	}
+}
+
+func TestADeletionThatCannotEndTheSessionAtAuthAPIFailsAndTheNextOneEndsItAgain(t *testing.T) {
+	var ends atomic.Int64
+	r, db, sid := viewTableRel(t, "3", func(d *fake.DB) store.Database { return d }, endSessionRel(&ends, http.StatusServiceUnavailable, http.StatusNoContent))
+
+	first := deleteSession(r, "user-ok", sid, "1")
+	retry := deleteSession(r, "user-ok", sid, "1")
+
+	if first.Code < 500 {
+		t.Fatalf("delete while auth-api cannot end the session = %d %s, want an error: the mint and tuples are still there", first.Code, first.Body)
+	}
+	if retry.Code != http.StatusNoContent || ends.Load() != 2 {
+		t.Fatalf("retry = %d %s after %d end calls; want 204 after ending the session a second time", retry.Code, retry.Body, ends.Load())
+	}
+	if storedEncounter(t, db, encE1).SessionID != "" {
+		t.Error("the encounter was not released by the retry")
+	}
+}
+
+func TestARetryAfterTheSessionWasEndedTreatsADenialAsAlreadyEnded(t *testing.T) {
+	var ends atomic.Int64
+	var failEncounters atomic.Bool
+	r, db, sid := viewTableRel(t, "3", func(d *fake.DB) store.Database { return failingEncounters{d, &failEncounters} },
+		endSessionRel(&ends, http.StatusNoContent, http.StatusForbidden)) // the second call finds the GM tuple gone
+
+	failEncounters.Store(true)
+	first := deleteSession(r, "user-ok", sid, "1")
+	failEncounters.Store(false)
+	retry := deleteSession(r, "user-ok", sid, "1")
+
+	if first.Code < 500 || retry.Code != http.StatusNoContent {
+		t.Fatalf("first = %d, retry = %d %s; want an error then 204", first.Code, retry.Code, retry.Body)
+	}
+	if storedEncounter(t, db, encE1).SessionID != "" {
+		t.Error("the encounter was not released by the retry")
+	}
+}
+
+func TestReleasedEncountersCannotLeaveTheGMOverTheSavedEncounterLimit(t *testing.T) {
+	r, _, sid := changeTable(t) // every entitlement limit is 3
+	for i := 0; i < 3; i++ {
+		newEncounter(t, r, "user-ok", `{"name":"P","game_system_id":"`+data.DefaultSystemID+`"}`)
+	}
+
+	w := deleteSession(r, "user-ok", sid, "1")
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", w.Code, w.Body)
+	}
+	inactive := 0
+	for _, it := range decodeBody(t, callAs(r, "user-ok", "GET", "/encounters", ""))["items"].([]any) {
+		if _, off := it.(map[string]any)["inactive_at"]; off {
+			inactive++
+		}
+	}
+	if inactive != 1 {
+		t.Fatalf("%d inactive encounters of 4 (limit 3), want exactly 1: the release must reconcile the GM's limit", inactive)
+	}
+}

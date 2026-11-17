@@ -33,8 +33,10 @@ const ClaimTimeout = 60 * time.Second
 // grow the collection without limit while the GM is away.
 const MaxPendingChangeRequests = 50
 
-// maxCancelSweeps bounds how many requests one session deletion cancels in a pass.
-const maxCancelSweeps = 100000
+// maxCancelSweeps bounds how many requests one session deletion cancels in a pass: far more
+// members than a session may have (20 plus the GM) times each one's pending cap. A session over
+// it fails the deletion, which a retry continues.
+const maxCancelSweeps = 100 * MaxPendingChangeRequests
 
 // ChangeRequest is a player's proposed change to one combatant's health values or conditions
 // (initiative-player-access). It changes nothing until a GM or co-GM approves it. Health holds the
@@ -250,7 +252,7 @@ func (r *ChangeRequests) CancelSession(ctx context.Context, d Decision) error {
 			return err
 		}
 	}
-	return fmt.Errorf("%w: more than %d change requests waiting in one session", ErrInvalid, maxCancelSweeps)
+	return fmt.Errorf("%w: more than %d change requests waiting in one session; retry delete", ErrInvalid, maxCancelSweeps)
 }
 
 // CancelPending cancels userID's pending and approving requests in the session, for a member who left, was

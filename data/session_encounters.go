@@ -168,7 +168,7 @@ func withoutController(cs []Combatant, userID string) ([]Combatant, bool) {
 }
 
 // ReleaseSession turns every encounter of the session into a private encounter of its GM (the
-// session's owner, d.actor): session_id and every combatant's controller_user_ids are cleared,
+// session's owner, d.actor, including encounters a co-GM created): session_id and every combatant's controller_user_ids are cleared,
 // the revision advances, and owner_user_id becomes the GM (initiative-sessions, "Session
 // deletion"). d must be the GM's. It reads a page at a time by _id until none is left, and an
 // encounter that changed under it is re-read, so no encounter is skipped; running it again after a
@@ -182,7 +182,7 @@ func (r *Encounters) ReleaseSession(ctx context.Context, d Decision) error {
 	after := ""
 	for page := 0; ; page++ {
 		if page == maxScrubPages {
-			return errors.Join(append(errs, fmt.Errorf("%w: more than %d encounters in one session", ErrInvalid, maxScrubPages*scrubPageSize))...)
+			return errors.Join(append(errs, fmt.Errorf("%w: more than %d encounters in one session; retry delete", ErrInvalid, maxScrubPages*scrubPageSize))...)
 		}
 		filter := bson.D{{Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}}
 		if after != "" {
@@ -229,7 +229,7 @@ func (r *Encounters) releaseOne(ctx context.Context, d Decision, e Encounter) er
 			return err
 		}
 	}
-	return fmt.Errorf("encounter %s kept changing while its session was being deleted", e.ID)
+	return fmt.Errorf("encounter %s kept changing while its session was being deleted; retry delete", e.ID)
 }
 
 // ValidateCombatantChange checks after, a combatant as it would be once an edit applies to before

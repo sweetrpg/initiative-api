@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 	"go.mongodb.org/mongo-driver/bson"
@@ -64,8 +65,17 @@ func viewTableLimit(t *testing.T, limit string) (r http.Handler, db *fake.DB, se
 // underlying fake, for seeding and inspection.
 func viewTableOn(t *testing.T, limit string, wrap func(*fake.DB) store.Database) (r http.Handler, db *fake.DB, sessionID string) {
 	t.Helper()
+	return viewTableRel(t, limit, wrap, roleChecks)
+}
+
+// viewTableRel is viewTableOn with a caller-supplied auth-api (roleChecks, possibly wrapped).
+func viewTableRel(t *testing.T, limit string, wrap func(*fake.DB) store.Database, rel http.HandlerFunc) (r http.Handler, db *fake.DB, sessionID string) {
+	t.Helper()
 	db = fake.NewDB()
-	router, _ := credRouterRel(t, limit, wrap(db), roleChecks)
+	withLimits := func(svc *Services) {
+		svc.Limits = domain.NewLimits(domain.Kind{Name: "encounters", Key: domain.KeySavedEncounters, Repo: svc.Encounters.Items()})
+	}
+	router, _ := credRouterRel(t, limit, wrap(db), rel, withLimits)
 	w := callAs(router, "user-ok", "POST", "/sessions", `{"name":"Friday"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", w.Code, w.Body)
