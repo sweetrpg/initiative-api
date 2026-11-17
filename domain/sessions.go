@@ -668,6 +668,10 @@ func (s *Sessions) Blocks(ctx context.Context, actor, id string, q data.Query) (
 	return s.repo.Blocks(ctx, d, q)
 }
 
+// SetSink installs the sink told of the encounter changes sessions make: controller scrubs and the
+// release of a deleted session's encounters.
+func (s *Sessions) SetSink(k data.Sink) { s.enc.SetSink(k) }
+
 // scrubControllers removes user from every combatant's controllers in the session's encounters,
 // so a removed, blocked, or demoted member cannot regain control by rejoining or being promoted.
 // It runs after the membership write and again before admission; it is idempotent and best

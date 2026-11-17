@@ -340,6 +340,12 @@ func viewTag(view map[string]any) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// Render renders enc for v through the view builder, for the event hub, which already holds the
+// committed document and decides per subscriber what it may be told.
+func (s *Encounters) Render(ctx context.Context, enc data.Encounter, v data.Viewer) (EncounterView, error) {
+	return s.render(ctx, enc, v)
+}
+
 // ViewOwned renders the owner's private encounter. An encounter that belongs to a session is
 // reached through ViewForSession.
 func (s *Encounters) ViewOwned(ctx context.Context, owner, id string) (EncounterView, error) {

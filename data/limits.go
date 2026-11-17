@@ -64,6 +64,9 @@ func (r *Owned[T, P]) SetInactive(ctx context.Context, owner, id string, inactiv
 	if errors.Is(err, store.ErrNotFound) {
 		return ErrNotFound
 	}
+	if err == nil {
+		r.committed(ctx, commitFlag, &discard)
+	}
 	return err
 }
 

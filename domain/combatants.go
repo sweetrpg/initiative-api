@@ -57,6 +57,7 @@ func (s *Encounters) AddCombatant(ctx context.Context, owner, actor, id string, 
 	if err != nil {
 		return data.Encounter{}, err
 	}
+	ctx = data.WithOp(ctx, data.EventCombatantAd, n.ID)
 	return s.editQueue(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		st.Combatants = append(st.Combatants, n)
 		return nil
@@ -65,6 +66,7 @@ func (s *Encounters) AddCombatant(ctx context.Context, owner, actor, id string, 
 
 // UpdateCombatant applies patch to the combatant with ID combatantID.
 func (s *Encounters) UpdateCombatant(ctx context.Context, owner, actor, id string, rev int64, combatantID string, patch CombatantPatch) (data.Encounter, error) {
+	ctx = data.WithOp(ctx, data.EventCombatantUp, combatantID)
 	return s.editQueue(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		c, err := findCombatant(st, combatantID)
 		if err != nil {
@@ -127,6 +129,7 @@ func applyPatch(c *data.Combatant, p CombatantPatch) error {
 // RemoveCombatant marks the combatant removed. It stays in the record and leaves the turn queue;
 // if it was current, the turn passes to the combatant that takes its place in the queue.
 func (s *Encounters) RemoveCombatant(ctx context.Context, owner, actor, id string, rev int64, combatantID string) (data.Encounter, error) {
+	ctx = data.WithOp(ctx, data.EventCombatantRm, combatantID)
 	return s.editQueue(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		c, err := findCombatant(st, combatantID)
 		if err != nil {
@@ -139,6 +142,7 @@ func (s *Encounters) RemoveCombatant(ctx context.Context, owner, actor, id strin
 
 // RestoreCombatant clears the removed mark and puts the combatant back in the turn queue.
 func (s *Encounters) RestoreCombatant(ctx context.Context, owner, actor, id string, rev int64, combatantID string) (data.Encounter, error) {
+	ctx = data.WithOp(ctx, data.EventCombatantRs, combatantID)
 	return s.editQueue(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		c, err := findCombatant(st, combatantID)
 		if err != nil {

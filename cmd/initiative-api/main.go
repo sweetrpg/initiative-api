@@ -28,6 +28,7 @@ import (
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
 	"github.com/sweetrpg/initiative-api/events"
+	"github.com/sweetrpg/initiative-api/events/stream"
 	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/server"
 	"github.com/sweetrpg/initiative-api/store"
@@ -78,6 +79,11 @@ func main() {
 	}
 	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
+	hub := stream.New(encounters)
+	defer hub.Close()
+	encounters.SetSink(hub)
+	sessions.SetSink(hub)
+	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	svc := server.Services{
 		Locks: encounters.Locks(),

@@ -47,7 +47,7 @@ func (s *Encounters) AssignControllers(ctx context.Context, sessions *Sessions, 
 		return nil, data.ErrNotFound
 	}
 	cs[i].ControllerUserIDs = ids
-	updated, err := s.repo.UpdateInSession(ctx, d, encounterID, rev, map[string]any{"combatants": cs})
+	updated, err := s.repo.UpdateInSession(data.WithOp(ctx, data.EventControllers, combatantID), d, encounterID, rev, map[string]any{"combatants": cs})
 	if err != nil {
 		return nil, err
 	}

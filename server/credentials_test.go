@@ -61,6 +61,10 @@ func credRouterRel(t *testing.T, limit string, db store.Database, rel http.Handl
 	return credRouterEnt(t, db, rel, ent, opts...)
 }
 
+// routerHook, when set by a test, adjusts the services of every router credRouterEnt builds. Tests
+// using it do not run in parallel and restore it with t.Cleanup.
+var routerHook func(*Services)
+
 // credRouterEnt is credRouterRel with a caller-supplied entitlements-api. opts adjust the services before the router is built.
 func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.HandlerFunc, opts ...func(*Services)) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
@@ -81,6 +85,9 @@ func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.Handler
 		Themes:       themes, Credentials: creds,
 		Systems: data.NewSystemRepo(db), Rosters: domain.NewRosters(db), Encounters: encounters, Sessions: sessions, ChangeRequests: domain.NewChangeRequests(db, encounters, sessions),
 		Relations: relations.New(relAPI.URL), OwnerLimits: data.NewOwnerEntitlements(db, time.Hour),
+	}
+	if routerHook != nil {
+		routerHook(&svc)
 	}
 	for _, o := range opts {
 		o(&svc)

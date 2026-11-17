@@ -36,6 +36,15 @@ type Owned[T any, P Doc[T]] struct {
 	// (PADR-0035), so an owner who left or was demoted cannot read or change it here.
 	extra   bson.D
 	exclude func(*T) bool
+	// commit, when set, is told about every successful create, write, soft delete and flag change
+	// with the stored document, so one place can announce them (see Encounters.SetSink).
+	commit func(ctx context.Context, kind commitKind, after any)
+}
+
+func (r *Owned[T, P]) committed(ctx context.Context, kind commitKind, after *T) {
+	if r.commit != nil {
+		r.commit(ctx, kind, after)
+	}
 }
 
 // NewOwned builds the repository for spec's collection in db.
@@ -107,7 +116,11 @@ func (r *Owned[T, P]) createWithID(ctx context.Context, ownerUserID, actingUserI
 	m.Revision = 1
 	m.DeletedAt, m.DeletedBy = nil, nil
 	models.StampCreate(&m.Auditable, actingUserID, r.now())
-	return r.mapDuplicate(r.c.InsertOne(ctx, doc))
+	if err := r.mapDuplicate(r.c.InsertOne(ctx, doc)); err != nil {
+		return err
+	}
+	r.committed(ctx, commitCreate, (*T)(doc))
+	return nil
 }
 
 // mapDuplicate turns a unique-index rejection into ErrConflict for specs that opt in.
@@ -263,7 +276,10 @@ func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id s
 		}
 		return cur, cerr
 	}
-	return out, r.mapDuplicate(err)
+	if err = r.mapDuplicate(err); err == nil {
+		r.committed(ctx, commitWrite, &out)
+	}
+	return out, err
 }
 
 // SoftDelete tombstones owner's record if its revision is still expectedRevision (deleted_at/
@@ -296,6 +312,9 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
 	if errors.Is(err, store.ErrNotFound) {
 		_, err = r.classify(ctx, ownerUserID, id)
+	}
+	if err == nil {
+		r.committed(ctx, commitDelete, &discard)
 	}
 	return err
 }

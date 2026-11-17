@@ -60,6 +60,9 @@ func (r *Encounters) UpdateInSession(ctx context.Context, d Decision, id string,
 	if errors.Is(err, store.ErrNotFound) {
 		return r.classifyInSession(ctx, d, id)
 	}
+	if err == nil {
+		r.emitCommit(ctx, commitWrite, out)
+	}
 	return out, err
 }
 
@@ -136,8 +139,11 @@ func (r *Encounters) scrubOne(ctx context.Context, d Decision, e Encounter, user
 			{Key: "$set", Value: bson.D{{Key: "combatants", Value: cs}, {Key: "updated_at", Value: r.now()}, {Key: "updated_by", Value: d.actor}}},
 			{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}},
 		}
-		var discard Encounter
-		err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
+		var after Encounter
+		err := r.c.FindOneAndUpdate(ctx, filter, update, &after)
+		if err == nil {
+			r.emit(ctx, Change{Type: EventControllers, After: after, SessionID: after.SessionID, OwnerID: after.OwnerUserID, CombatantID: controllerIDsChanged(e.Combatants, cs)})
+		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -217,8 +223,12 @@ func (r *Encounters) releaseOne(ctx context.Context, d Decision, e Encounter) er
 			{Key: "$unset", Value: bson.D{{Key: "session_id", Value: ""}}},
 			{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}},
 		}
-		var discard Encounter
-		err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
+		var after Encounter
+		err := r.c.FindOneAndUpdate(ctx, filter, update, &after)
+		if err == nil {
+			// The audience is the session the encounter belonged to before this write.
+			r.emit(ctx, Change{Type: EventReleased, After: after, SessionID: d.session, OwnerID: after.OwnerUserID})
+		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -274,12 +284,27 @@ func (r *Encounters) RetractNew(ctx context.Context, d Decision, id string) erro
 		return ErrNotFound
 	}
 	now := r.now()
-	var discard Encounter
+	var after Encounter
 	err := r.c.FindOneAndUpdate(ctx, bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "deleted_at", Value: now}, {Key: "deleted_by", Value: d.actor}, {Key: "updated_at", Value: now}, {Key: "updated_by", Value: d.actor}}},
-			{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}}}, &discard)
+			{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}}}, &after)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
+	if err == nil {
+		r.emit(ctx, Change{Type: EventDeleted, After: after, SessionID: d.session, OwnerID: after.OwnerUserID})
+	}
 	return err
+}
+
+// controllerIDsChanged returns the ids of combatants whose controllers differ between before and
+// after (same order and length).
+func controllerIDsChanged(before, after []Combatant) []string {
+	var ids []string
+	for i := range after {
+		if i < len(before) && !slices.Equal(before[i].ControllerUserIDs, after[i].ControllerUserIDs) {
+			ids = append(ids, after[i].ID)
+		}
+	}
+	return ids
 }

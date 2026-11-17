@@ -239,5 +239,8 @@ func (s *Encounters) FindByExternalRef(ctx context.Context, owner, key, value st
 	return s.repo.FindByExternalRef(ctx, owner, key, value)
 }
 
+// SetSink installs the sink told of every committed encounter change made through this service.
+func (s *Encounters) SetSink(k data.Sink) { s.repo.SetSink(k) }
+
 // Items is the encounter repository as limit enforcement sees it.
 func (s *Encounters) Items() Limited { return s.repo }
