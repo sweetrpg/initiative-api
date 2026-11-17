@@ -52,8 +52,8 @@ func (h encounterViewHandlers) create(c *gin.Context) {
 		badRequest(c, "request body must be a JSON encounter with a name")
 		return
 	}
-	ctx, actor, sessionID := c.Request.Context(), authz.Viewer(c), c.Param("id")
-	owner, err := h.sessions.AuthorizeEncounterCreate(ctx, actor, sessionID)
+	ctx := c.Request.Context()
+	grant, err := h.sessions.AuthorizeEncounterCreate(ctx, authz.Viewer(c), c.Param("id"))
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -62,16 +62,7 @@ func (h encounterViewHandlers) create(c *gin.Context) {
 	for _, cb := range b.Combatants {
 		e.Combatants = append(e.Combatants, cb.combatant())
 	}
-	enc, err := h.svc.CreateInSession(ctx, owner, actor, sessionID, e)
-	if err != nil {
-		writeError(c, err, nil)
-		return
-	}
-	v, ok := h.viewer(c)
-	if !ok {
-		return
-	}
-	view, err := h.svc.ViewForSession(ctx, v, enc.ID)
+	view, err := h.svc.CreateInSession(ctx, grant, e)
 	if err != nil {
 		writeError(c, err, nil)
 		return

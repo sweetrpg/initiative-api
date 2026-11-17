@@ -4,7 +4,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/sweetrpg/initiative-api/domain"
+	"github.com/sweetrpg/initiative-api/store/fake"
 
 	"github.com/sweetrpg/initiative-api/data"
 	"go.mongodb.org/mongo-driver/bson"
@@ -162,10 +168,126 @@ func TestCreatingInAnotherSessionOrWithACredentialIsRefused(t *testing.T) {
 	if foreign.Code != http.StatusForbidden {
 		t.Errorf("a session the caller does not belong to = %d, want 403", foreign.Code)
 	}
-	if cred.Code != http.StatusForbidden && cred.Code != http.StatusUnauthorized {
-		t.Errorf("integration credential = %d, want it refused", cred.Code)
+	patch := callAs(r, secret, "PATCH", "/sessions/"+sid, `{"name":"x","revision":1}`)
+	if cred.Code != http.StatusForbidden || patch.Code != http.StatusForbidden {
+		t.Errorf("integration credential create = %d, patch = %d, want 403 both", cred.Code, patch.Code)
 	}
 	if n, _ := db.Fake(data.CollectionEncounters).CountDocuments(t.Context(), nil); n != 1 {
 		t.Errorf("%d encounters stored, want only the fixture's", n)
+	}
+}
+
+func TestPatchingASessionValidatesAfterAuthorizingAndNeedsAChange(t *testing.T) {
+	r, _, sid := viewTable(t)
+	rev := sessionRevision(t, r, sid)
+
+	empty := callAs(r, "user-ok", "PATCH", "/sessions/"+sid, `{"revision":`+rev+`}`)
+	stale := callAs(r, "user-ok", "PATCH", "/sessions/"+sid, `{"name":"x","revision":99}`)
+	outsider := callAs(r, "user-ok", "PATCH", "/sessions/"+foreignSession, `{"name":"","revision":1}`)
+
+	if empty.Code != http.StatusUnprocessableEntity || decodeBody(t, empty)["message"] != "nothing to update" {
+		t.Errorf("empty patch = %d %s, want 422 nothing to update", empty.Code, empty.Body)
+	}
+	if stale.Code != http.StatusConflict {
+		t.Errorf("stale revision = %d, want 409", stale.Code)
+	}
+	if outsider.Code != http.StatusForbidden {
+		t.Errorf("a session the caller does not belong to, with a bad name = %d, want 403 before validation", outsider.Code)
+	}
+}
+
+// gatedTable is a session over an entitlements-api that answers the game-systems flag per bearer
+// (gmHas for user-ok, coHas for user-four) and every limit as limit, with a gated system seeded and
+// a co-GM allowed to create.
+func gatedTable(t *testing.T, gmHas, coHas bool, limit int) (r http.Handler, db *fake.DB, sid string) {
+	t.Helper()
+	db = fake.NewDB()
+	seedSystem(t, db)
+	gated := data.GameSystem{ID: "dnd5e", Name: "D&D 5e", Family: "d20", Gated: true,
+		Fields: []data.TrackerField{{Key: "hp", Label: "HP", Kind: data.FieldCounter, Def: 10}}}
+	if _, err := data.NewSystemRepo(db).Upsert(t.Context(), gated); err != nil {
+		t.Fatal(err)
+	}
+	ent := func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Query().Get("key") == domain.KeyGameSystemsExtra {
+			has := map[string]bool{"Bearer user-ok": gmHas, "Bearer user-four": coHas}[req.Header.Get("Authorization")]
+			_, _ = w.Write([]byte(`{"key":"` + domain.KeyGameSystemsExtra + `","type":"flag","value":` + strconv.FormatBool(has) + `,"ttl_seconds":0}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"key":"` + req.URL.Query().Get("key") + `","type":"limit","value":` + strconv.Itoa(limit) + `,"ttl_seconds":0}`))
+	}
+	withLimits := func(svc *Services) {
+		svc.Limits = domain.NewLimits(domain.Kind{Name: "encounters", Key: domain.KeySavedEncounters, Repo: svc.Encounters.Items()})
+	}
+	r, _ = credRouterEnt(t, db, roleChecks, ent, withLimits)
+	w := callAs(r, "user-ok", "POST", "/sessions", `{"name":"Friday","allow_co_gm_create_encounter":true}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create session = %d %s", w.Code, w.Body)
+	}
+	sid = decodeBody(t, w)["id"].(string)
+	joinAs(t, r, sid, "user-four", "co_gm")
+	return r, db, sid
+}
+
+func gated(r http.Handler, token, sid string) *httptest.ResponseRecorder {
+	return callAs(r, token, "POST", "/sessions/"+sid+"/encounters", `{"name":"G","game_system_id":"dnd5e"}`)
+}
+
+func TestACoGMsGatedSystemUseFollowsTheGMsFlagNotTheirOwn(t *testing.T) {
+	cases := map[string]struct {
+		gmHas, coHas bool
+		want         int
+	}{
+		"co-GM holds the flag, the GM does not":     {false, true, http.StatusForbidden},
+		"the GM holds the flag, the co-GM does not": {true, false, http.StatusCreated},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			r, _, sid := gatedTable(t, c.gmHas, c.coHas, 5)
+
+			if w := gated(r, "user-four", sid); w.Code != c.want {
+				t.Errorf("co-GM gated create = %d %s, want %d", w.Code, w.Body, c.want)
+			}
+		})
+	}
+}
+
+func TestACoGMCannotCreateOnAnOwnerRecordOlderThanTheBound(t *testing.T) {
+	r, db, sid := gatedTable(t, true, true, 5)
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	var sess data.Session
+	if err := db.Fake(data.CollectionSessions).FindOneAndUpdate(t.Context(), bson.D{{Key: "_id", Value: sid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "owner_limits_at", Value: old}}}}, &sess); err != nil {
+		t.Fatal(err)
+	}
+
+	w := callAs(r, "user-four", "POST", "/sessions/"+sid+"/encounters", newSessionEncounter)
+
+	if w.Code != http.StatusServiceUnavailable || decodeBody(t, w)["code"] != "owner_entitlements_pending" {
+		t.Errorf("co-GM on a stale record = %d %s, want 503 owner_entitlements_pending", w.Code, w.Body)
+	}
+}
+
+func TestConcurrentCreatesNeverLeaveTheGMOverTheLimit(t *testing.T) {
+	r, db, sid := gatedTable(t, true, true, 3)
+	var created atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if w := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/encounters", newSessionEncounter); w.Code == http.StatusCreated {
+				created.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	live, _ := db.Fake(data.CollectionEncounters).CountDocuments(t.Context(), bson.D{{Key: "deleted_at", Value: nil}})
+	if live > 3 {
+		t.Errorf("%d live encounters, want at most the limit of 3", live)
+	}
+	if created.Load() < live {
+		t.Errorf("%d creates answered 201 but %d encounters are live", created.Load(), live)
 	}
 }

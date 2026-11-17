@@ -260,3 +260,25 @@ func (r *Encounters) ValidateCombatantChange(ctx context.Context, gameSystemID s
 	slices.Sort(changed)
 	return checkHealthKeys(sys, after.Health, changed)
 }
+
+// RetractNew soft-deletes an encounter just created in the session at revision 1, for a create
+// that turned out to be over the owner's limit. d must grant can_edit; only a live, untouched
+// encounter of that session matches.
+func (r *Encounters) RetractNew(ctx context.Context, d Decision, id string) error {
+	if err := d.require(relEdit); err != nil {
+		return err
+	}
+	id, ok := cleanID(id)
+	if !ok {
+		return ErrNotFound
+	}
+	now := r.now()
+	var discard Encounter
+	err := r.c.FindOneAndUpdate(ctx, bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}, {Key: "revision", Value: int64(1)}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "deleted_at", Value: now}, {Key: "deleted_by", Value: d.actor}, {Key: "updated_at", Value: now}, {Key: "updated_by", Value: d.actor}}},
+			{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}}}, &discard)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrNotFound
+	}
+	return err
+}

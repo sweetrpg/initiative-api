@@ -77,6 +77,9 @@ const ownerLimitsRefreshEvery = time.Minute
 // sessionKeys are the owner entitlements recorded on a session.
 var sessionKeys = []string{KeyMembersPerSession, KeySavedEncounters}
 
+// sessionFlags are the owner flags recorded on a session beside the limits.
+var sessionFlags = []string{KeyGameSystemsExtra}
+
 // OwnerLimit returns the owner's recorded value for key, or ErrOwnerLimitsUnknown if none yet.
 func OwnerLimit(sess data.Session, key string) (int, error) {
 	v, ok := sess.OwnerLimits[key]
@@ -187,6 +190,10 @@ type SessionChanges struct {
 // gm and the write is scoped to the session's owner, so a co-GM cannot change the setting that
 // grants co-GMs a power.
 func (s *Sessions) Update(ctx context.Context, actor, id string, rev int64, ch SessionChanges) (SessionView, error) {
+	_, m, d, err := s.as(ctx, actor, id, ActUpdate)
+	if err != nil {
+		return SessionView{}, err
+	}
 	set := map[string]any{}
 	if ch.Name != nil {
 		name, err := cleanSessionName(*ch.Name)
@@ -198,55 +205,14 @@ func (s *Sessions) Update(ctx context.Context, actor, id string, rev int64, ch S
 	if ch.AllowCoGMEncounters != nil {
 		set["allow_co_gm_create_encounter"] = *ch.AllowCoGMEncounters
 	}
-	_, m, d, err := s.as(ctx, actor, id, ActUpdate)
-	if err != nil {
-		return SessionView{}, err
+	if len(set) == 0 {
+		return SessionView{}, invalid("nothing to update")
 	}
 	sess, err := s.repo.Update(ctx, d, rev, set)
 	if err != nil {
 		return SessionView{}, err
 	}
 	return viewOf(sess, m.Role), nil
-}
-
-// AuthorizeEncounterCreate decides whether actor may create an encounter in the session and
-// returns the owner it belongs to, the GM. The GM always may; a co-GM only while the GM has the
-// setting on, read fresh on every call so turning it off takes effect at once. The GM's saved
-// encounters limit applies with private and session encounters counted together: the GM's own
-// entitlements for the GM, the GM's recorded ones for a co-GM (failing closed when none are
-// recorded).
-func (s *Sessions) AuthorizeEncounterCreate(ctx context.Context, actor, id string) (owner string, err error) {
-	sess, m, _, err := s.as(ctx, actor, id, ActCreateEncounter)
-	if err != nil {
-		return "", err
-	}
-	if m.Role == data.RoleCoGM && !sess.AllowCoGMCreateEncounter {
-		return "", data.ErrForbidden
-	}
-	limit, err := s.encounterLimit(ctx, sess, m.Role)
-	if err != nil {
-		return "", err
-	}
-	n, err := s.enc.CountAll(ctx, sess.OwnerUserID)
-	if err != nil {
-		return "", err
-	}
-	if n >= int64(limit) {
-		return "", &EntitlementError{Key: KeySavedEncounters, Limit: limit}
-	}
-	return sess.OwnerUserID, nil
-}
-
-func (s *Sessions) encounterLimit(ctx context.Context, sess data.Session, role string) (int, error) {
-	if role != data.RoleGM {
-		return OwnerLimit(sess, KeySavedEncounters)
-	}
-	chk, ok := ctx.Value(checkerKey{}).(Checker)
-	if !ok {
-		return 0, entitlements.ErrUnavailable
-	}
-	res, err := chk.Check(ctx, KeySavedEncounters, entitlements.FailClosed)
-	return res.Limit, err
 }
 
 // actionRelation is the OpenFGA relation on the session each action needs. The role rules in
@@ -296,25 +262,29 @@ func (s *Sessions) refreshOwnerLimits(ctx context.Context, d data.Decision, sess
 	if !ok {
 		return sess
 	}
-	limits := make(map[string]int, len(sessionKeys))
-	for _, key := range sessionKeys {
+	limits, flags := make(map[string]int, len(sessionKeys)), make(map[string]bool, len(sessionFlags))
+	for _, key := range append(slices.Clone(sessionKeys), sessionFlags...) {
 		res, err := chk.Check(ctx, key, entitlements.FailOpen)
 		if err != nil || res.Degraded || res.Stale {
 			slog.WarnContext(ctx, "session owner entitlements not refreshed", "session", sess.ID, "key", key, "error", err)
 			return sess
 		}
-		limits[key] = res.Limit
+		if slices.Contains(sessionFlags, key) {
+			flags[key] = res.Flag
+		} else {
+			limits[key] = res.Limit
+		}
 	}
 	fresh := sess.OwnerLimitsAt != nil && s.now().Sub(*sess.OwnerLimitsAt) < ownerLimitsRefreshEvery
-	if fresh && maps.Equal(limits, sess.OwnerLimits) {
+	if fresh && maps.Equal(limits, sess.OwnerLimits) && maps.Equal(flags, sess.OwnerFlags) {
 		return sess
 	}
-	if err := s.repo.RecordOwnerLimits(ctx, d, limits); err != nil {
+	if err := s.repo.RecordOwnerLimits(ctx, d, limits, flags); err != nil {
 		slog.WarnContext(ctx, "session owner entitlements not recorded", "session", sess.ID, "error", err)
 		return sess
 	}
 	now := s.now()
-	sess.OwnerLimits, sess.OwnerLimitsAt = limits, &now
+	sess.OwnerLimits, sess.OwnerFlags, sess.OwnerLimitsAt = limits, flags, &now
 	return sess
 }
 
