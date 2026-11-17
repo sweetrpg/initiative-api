@@ -63,6 +63,11 @@ func (m mongoCollection) FindOneAndUpdate(ctx context.Context, filter, update bs
 	return mapErr(m.c.FindOneAndUpdate(ctx, filter, update, opts).Decode(out))
 }
 
+func (m mongoCollection) UpsertOne(ctx context.Context, filter, update bson.D) error {
+	_, err := m.c.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
+	return mapErr(err)
+}
+
 func (m mongoCollection) DeleteOne(ctx context.Context, filter bson.D) error {
 	res, err := m.c.DeleteOne(ctx, filter)
 	if err != nil {

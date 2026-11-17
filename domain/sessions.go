@@ -98,6 +98,11 @@ func NewSessions(db store.Database) *Sessions {
 	return &Sessions{repo: data.NewSessions(db), now: func() time.Time { return time.Now().UTC() }}
 }
 
+// Viewer returns how actor may see the session's encounters; see data.Sessions.AuthorizeView.
+func (s *Sessions) Viewer(ctx context.Context, actor, sessionID string) (data.Viewer, error) {
+	return s.repo.AuthorizeView(ctx, actor, sessionID)
+}
+
 // Create makes actor the GM of a new session.
 // Sessions beyond the GM's entitled count are refused with *EntitlementError; inactive sessions
 // count, so a GM over a reduced limit cannot create.

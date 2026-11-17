@@ -30,6 +30,9 @@ func TestOwnerScopedIndexesLeadWithOwner(t *testing.T) {
 			if ix.Name == "secret_hash" { // global lookup by presented secret
 				continue
 			}
+			if ix.Name == "session_position" { // members read a session's encounters by session_id after a relation check
+				continue
+			}
 			t.Run(s.Name+"/"+ix.Name, func(t *testing.T) {
 				if ix.Keys[0].Key != "owner_user_id" {
 					t.Fatalf("first key = %q, want owner_user_id", ix.Keys[0].Key)

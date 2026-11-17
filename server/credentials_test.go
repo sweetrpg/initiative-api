@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
@@ -54,12 +55,19 @@ func allowRelations(w http.ResponseWriter, r *http.Request) {
 // credRouterRel is credRouterDB with a caller-supplied check-relation handler.
 func credRouterRel(t *testing.T, limit string, db store.Database, rel http.HandlerFunc) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
+	ent := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"key":"initiative.integration_credentials","type":"limit","value":` + limit + `,"ttl_seconds":0}`))
+	}
+	return credRouterEnt(t, db, rel, ent)
+}
+
+// credRouterEnt is credRouterRel with a caller-supplied entitlements-api.
+func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.HandlerFunc) (*gin.Engine, *domain.Credentials) {
+	t.Helper()
 	relAPI := httptest.NewServer(rel)
 	t.Cleanup(relAPI.Close)
 	gin.SetMode(gin.TestMode)
-	ent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"key":"initiative.integration_credentials","type":"limit","value":` + limit + `,"ttl_seconds":0}`))
-	}))
+	ent := httptest.NewServer(entHandler)
 	t.Cleanup(ent.Close)
 	themes, _ := domain.NewThemes(db)
 	creds := domain.NewCredentials(db)
@@ -70,8 +78,8 @@ func credRouterRel(t *testing.T, limit string, db store.Database, rel http.Handl
 		Authz:        authz.NewClient(fakeAuthAPI(t).URL, fakeUsersAPI(t).URL),
 		Entitlements: entitlements.New(ent.URL),
 		Themes:       themes, Credentials: creds,
-		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
-		Relations: relations.New(relAPI.URL),
+		Systems: data.NewSystemRepo(db), Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
+		Relations: relations.New(relAPI.URL), OwnerLimits: data.NewOwnerEntitlements(db, time.Hour),
 	}
 	r := gin.New()
 	r.Use(Correlation())

@@ -10,6 +10,8 @@ import (
 type HealthError struct {
 	Field  string
 	Reason string
+	// Unknown is set when the game system defines no such field, as opposed to a value out of bounds.
+	Unknown bool
 }
 
 func (e *HealthError) Error() string { return fmt.Sprintf("health field %q: %s", e.Field, e.Reason) }
@@ -30,19 +32,19 @@ func CheckHealth(sys GameSystem, h map[string]int) error {
 		v := h[k]
 		f, ok := fields[k]
 		if !ok {
-			return &HealthError{k, "not defined by the game system"}
+			return &HealthError{Field: k, Reason: "not defined by the game system", Unknown: true}
 		}
 		if f.Kind == FieldFlag && v != 0 && v != 1 {
-			return &HealthError{k, fmt.Sprintf("%d is not 0 or 1", v)}
+			return &HealthError{Field: k, Reason: fmt.Sprintf("%d is not 0 or 1", v)}
 		}
 		if f.Min != nil && v < *f.Min {
-			return &HealthError{k, fmt.Sprintf("%d is below the minimum %d", v, *f.Min)}
+			return &HealthError{Field: k, Reason: fmt.Sprintf("%d is below the minimum %d", v, *f.Min)}
 		}
 		if f.Max != nil && v > *f.Max {
-			return &HealthError{k, fmt.Sprintf("%d is above the maximum %d", v, *f.Max)}
+			return &HealthError{Field: k, Reason: fmt.Sprintf("%d is above the maximum %d", v, *f.Max)}
 		}
 		if ref, ok := h[f.MaxRef]; f.MaxRef != "" && ok && v > ref {
-			return &HealthError{k, fmt.Sprintf("%d is above %s (%d)", v, f.MaxRef, ref)}
+			return &HealthError{Field: k, Reason: fmt.Sprintf("%d is above %s (%d)", v, f.MaxRef, ref)}
 		}
 	}
 	return nil

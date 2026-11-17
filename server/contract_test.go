@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/store/fake"
 )
 
@@ -112,6 +113,17 @@ func contractCases(t *testing.T) []contractCase {
 	broken, _ := credRouterDB(t, "3", failingDelete{fake.NewDB()})
 	brokenID, _ := issue(t, broken, "user-two", `["read"]`)
 	add("admin delete did not complete", callAs(broken, "admin-ok", "DELETE", "/admin/credentials/"+brokenID, `{"reason":"x"}`))
+
+	enc, _ := encRouter(t, "1")
+	first2 := callAs(enc, "user-ok", "POST", "/encounters", `{"name":"A","game_system_id":"`+data.DefaultSystemID+`","combatants":[{"name":"Orc","kind":"adversary","health":{"hp":3,"max_hp":10}}]}`)
+	encID := decodeBody(t, first2)["id"].(string)
+	cid := decodeBody(t, first2)["combatants"].([]any)[0].(map[string]any)["id"].(string)
+	add("saved encounter limit reached", callAs(enc, "user-ok", "POST", "/encounters", `{"name":"B","game_system_id":"`+data.DefaultSystemID+`"}`))
+	add("encounter write without a revision", callAs(enc, "user-ok", "PATCH", "/encounters/"+encID, `{"name":"x"}`))
+	add("health value out of range", callAs(enc, "user-ok", "PATCH", "/encounters/"+encID+"/combatants/"+cid, `{"revision":1,"health":{"hp":99}}`))
+	add("health field not in the game system", callAs(enc, "user-ok", "PATCH", "/encounters/"+encID+"/combatants/"+cid, `{"revision":1,"health":{"mana":1}}`))
+	add("encounter stale revision", callAs(enc, "user-ok", "PATCH", "/encounters/"+encID, `{"revision":9,"name":"x"}`))
+	add("another user's encounter", callAs(enc, "user-two", "GET", "/encounters/"+encID, ""))
 	return out
 }
 

@@ -101,24 +101,43 @@ type Combatant struct {
 	Removed           bool              `bson:"removed" json:"removed"`
 	SourceCharacterID string            `bson:"source_character_id,omitempty" json:"source_character_id,omitempty"`
 	ExternalRefs      map[string]string `bson:"external_refs,omitempty" json:"external_refs,omitempty"`
+	// ControllerUserIDs are the session members who control this combatant (initiative-player-access).
+	ControllerUserIDs []string `bson:"controller_user_ids,omitempty" json:"controller_user_ids,omitempty"`
+	// Hidden keeps the combatant out of every non-GM view.
+	Hidden bool `bson:"hidden,omitempty" json:"hidden,omitempty"`
+	// HealthVisibility is how non-GM members see health: full, status, or hidden. Empty means
+	// hidden, so a combatant is never exposed by omission.
+	HealthVisibility string `bson:"health_visibility,omitempty" json:"health_visibility,omitempty"`
+	// NotesShared lets non-GM members read Notes. Empty and false mean GM-only.
+	NotesShared bool `bson:"notes_shared,omitempty" json:"notes_shared,omitempty"`
 }
+
+// Health visibility values for a combatant.
+const (
+	HealthFull   = "full"
+	HealthStatus = "status"
+	HealthHidden = "hidden"
+)
 
 // Encounter is one revisioned document holding settings, live combat state, and its combatants
 // (PADR-0033): no separate combat-state record, so every change is one atomic write. TurnQueue
 // holds combatant IDs in turn order and is computed by the server. Position is the owner's
 // launcher display order. Soft-deleted (PADR-0027: user-owned domain data).
 //
-// Session membership (session_id, controllers, hidden combatants) is not modeled: it needs the
-// OpenFGA-backed access path of PADR-0035, so every encounter here is private to its owner.
+// An encounter with a SessionID is read by members only through the role-aware view builder
+// (domain.EncounterView) with a data.Viewer from the PADR-0035 access path; the document itself
+// is never serialized to a non-owner.
 type Encounter struct {
-	Meta               `bson:",inline"`
-	Name               string      `bson:"name" json:"name"`
-	GameSystemID       string      `bson:"game_system_id" json:"game_system_id"`
-	Ordering           string      `bson:"ordering" json:"ordering"`
-	TieBreaker         string      `bson:"tie_breaker" json:"tie_breaker"`
-	Labels             bool        `bson:"labels" json:"labels"`
-	Colorblind         bool        `bson:"colorblind" json:"colorblind"`
-	ThemeID            string      `bson:"theme_id,omitempty" json:"theme_id,omitempty"`
+	Meta         `bson:",inline"`
+	Name         string `bson:"name" json:"name"`
+	GameSystemID string `bson:"game_system_id" json:"game_system_id"`
+	Ordering     string `bson:"ordering" json:"ordering"`
+	TieBreaker   string `bson:"tie_breaker" json:"tie_breaker"`
+	Labels       bool   `bson:"labels" json:"labels"`
+	Colorblind   bool   `bson:"colorblind" json:"colorblind"`
+	ThemeID      string `bson:"theme_id,omitempty" json:"theme_id,omitempty"`
+	// SessionID is the session the encounter belongs to; empty is a private encounter of its owner.
+	SessionID          string      `bson:"session_id,omitempty" json:"session_id,omitempty"`
 	Status             string      `bson:"status" json:"status"`
 	Round              int         `bson:"round" json:"round"`
 	CurrentCombatantID string      `bson:"current_combatant_id,omitempty" json:"current_combatant_id,omitempty"`

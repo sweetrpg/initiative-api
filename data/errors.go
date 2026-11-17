@@ -1,6 +1,9 @@
 package data
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Errors the API layer maps to HTTP statuses.
 var (
@@ -9,6 +12,8 @@ var (
 	// ErrForbidden: the record exists but belongs to another owner (403). Reported only after the
 	// owner-scoped write has already failed to match.
 	ErrForbidden = errors.New("data: record belongs to another owner")
+	// ErrNotMember is ErrForbidden for session data: the caller holds no role in the session.
+	ErrNotMember = fmt.Errorf("%w: not a member of this session", ErrForbidden)
 	// ErrRevisionConflict: the write carried a stale revision (409). The current record is
 	// returned alongside it.
 	ErrRevisionConflict = errors.New("data: revision conflict")

@@ -18,6 +18,12 @@ type CombatantPatch struct {
 	Initiative *float64
 	Notes      *string
 	Health     map[string]int
+	// Visibility settings (initiative-player-access).
+	Hidden           *bool
+	HealthVisibility *string
+	NotesShared      *bool
+	// Conditions replaces the combatant's conditions when non-nil; the data layer validates each.
+	Conditions *[]data.Condition
 }
 
 func newCombatant(c data.Combatant, id string) (data.Combatant, error) {
@@ -88,6 +94,24 @@ func applyPatch(c *data.Combatant, p CombatantPatch) error {
 	}
 	if p.Notes != nil {
 		c.Notes = *p.Notes
+	}
+	if p.Conditions != nil {
+		c.Conditions = slices.Clone(*p.Conditions)
+		if c.Conditions == nil {
+			c.Conditions = []data.Condition{}
+		}
+	}
+	if p.Hidden != nil {
+		c.Hidden = *p.Hidden
+	}
+	if p.NotesShared != nil {
+		c.NotesShared = *p.NotesShared
+	}
+	if p.HealthVisibility != nil {
+		if !slices.Contains([]string{data.HealthFull, data.HealthStatus, data.HealthHidden}, *p.HealthVisibility) {
+			return invalid("health visibility %q", *p.HealthVisibility)
+		}
+		c.HealthVisibility = *p.HealthVisibility
 	}
 	if p.Health != nil {
 		merged := maps.Clone(c.Health)

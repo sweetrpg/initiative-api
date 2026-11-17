@@ -15,13 +15,17 @@ import (
 type Services struct {
 	Authz        *authz.Client
 	Entitlements *entitlements.Client
-	Themes       *domain.Themes
-	Credentials  *domain.Credentials
-	Limits       *domain.Limits
-	Locks        *domain.Locks
-	Rosters      *domain.Rosters
-	Encounters   *domain.Encounters
-	Sessions     *domain.Sessions
+	// OwnerLimits records the owner's entitlement values for integration credentials, which carry
+	// no user bearer. Optional; without it a credential's limit checks fail closed.
+	OwnerLimits *data.OwnerEntitlements
+	Themes      *domain.Themes
+	Credentials *domain.Credentials
+	Limits      *domain.Limits
+	Locks       *domain.Locks
+	Rosters     *domain.Rosters
+	Encounters  *domain.Encounters
+	Sessions    *domain.Sessions
+	Systems     *data.SystemRepo
 	// Relations answers session authorization checks (PADR-0035). Without it every session
 	// request fails closed with 503.
 	Relations *relations.Client
@@ -44,7 +48,7 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupStatusHandlers(r)
 
 	g := ProtectedGroup(r, s.Authz, s.Credentials)
-	g.Use(withChecker(s.Entitlements), withGate(s.Relations))
+	g.Use(limitBody(), withOwnerRecord(s.OwnerLimits), withChecker(s.Entitlements), withGate(s.Relations))
 	if s.Limits != nil || s.Locks != nil {
 		g.Use(reconcileLimits(s))
 	}
@@ -55,6 +59,18 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupActiveItemHandlers(u, s)
 	if s.Sessions != nil {
 		setupSessionHandlers(u, s.Sessions)
+	}
+	if s.Encounters != nil && s.Sessions != nil {
+		setupEncounterViewHandlers(u, s.Encounters, s.Sessions)
+	}
+	if s.Encounters != nil {
+		setupEncounterHandlers(g, s.Encounters, s.Rosters, s.Entitlements)
+	}
+	if s.Rosters != nil {
+		setupRosterHandlers(g, s.Rosters, s.Entitlements)
+	}
+	if s.Systems != nil {
+		setupGameSystemHandlers(g, s.Systems, s.Entitlements)
 	}
 	setupRefHandlers(g, s.Encounters)
 	if s.Credentials != nil {

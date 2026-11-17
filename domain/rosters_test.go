@@ -191,11 +191,11 @@ func TestMissingRosterWritesAreNotFound(t *testing.T) {
 	}
 }
 
-func TestCreateEncounterFromOthersRosterIsNotFound(t *testing.T) {
+func TestCreateEncounterFromOthersRosterIsForbidden(t *testing.T) {
 	s := newService(t)
 	r := mustRoster(t, s, "u1", goblin())
-	if _, err := s.CreateEncounterFromRoster(ctx, "u2", "u2", r.ID, baseEncounter()); !errors.Is(err, data.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+	if _, err := s.CreateEncounterFromRoster(ctx, "u2", "u2", r.ID, baseEncounter()); !errors.Is(err, data.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
 	}
 }
 
@@ -222,11 +222,14 @@ func TestSaveAsRosterSkipsRemovedAndLeavesEncounterAlone(t *testing.T) {
 	}
 }
 
-func TestSaveAsRosterOfOthersEncounterIsNotFound(t *testing.T) {
+func TestSaveAsRosterOfOthersEncounterIsForbidden(t *testing.T) {
 	s := newService(t)
 	r := mustRoster(t, s, "u1", goblin())
 	enc, _ := s.CreateEncounterFromRoster(ctx, "u1", "u1", r.ID, baseEncounter())
-	if _, err := s.SaveAsRoster(ctx, "u2", "u2", enc.ID, "x"); !errors.Is(err, data.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+	if _, err := s.SaveAsRoster(ctx, "u2", "u2", enc.ID, "x"); !errors.Is(err, data.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden: it exists under another owner, classified after the owner-scoped read failed", err)
+	}
+	if _, err := s.SaveAsRoster(ctx, "u2", "u2", "5f0000000000000000000099", "x"); !errors.Is(err, data.ErrNotFound) {
+		t.Fatalf("missing encounter err = %v, want ErrNotFound", err)
 	}
 }

@@ -29,12 +29,24 @@ type Encounters struct {
 
 // NewEncounters builds the encounter repository for db.
 func NewEncounters(db store.Database) *Encounters {
-	return &Encounters{Owned: NewOwned[Encounter](db, EncounterSpec), systems: NewSystemRepo(db)}
+	o := NewOwned[Encounter](db, EncounterSpec)
+	o.extra = bson.D{{Key: "session_id", Value: nil}}
+	o.exclude = func(e *Encounter) bool { return e.SessionID != "" }
+	return &Encounters{Owned: o, systems: NewSystemRepo(db)}
 }
 
 // ValidateEncounter checks a whole encounter document: ordering, tie breaker, and status come
 // from their constants, and every turn_queue entry names one of the encounter's combatants.
 func ValidateEncounter(e *Encounter) error {
+	if err := CheckText("encounter name", e.Name, MaxNameLen); err != nil { // required-ness is the domain's rule
+		return err
+	}
+	if err := CheckText("theme_id", e.ThemeID, MaxThemeIDLen); err != nil {
+		return err
+	}
+	if e.Position < 0 {
+		return fmt.Errorf("%w: position %d", ErrInvalid, e.Position)
+	}
 	if !slices.Contains(orderings, e.Ordering) {
 		return fmt.Errorf("%w: ordering %q", ErrInvalid, e.Ordering)
 	}
@@ -63,6 +75,9 @@ func ValidateState(st EncounterState) error {
 	if st.Round < 0 {
 		return fmt.Errorf("%w: round %d", ErrInvalid, st.Round)
 	}
+	if len(st.Combatants) > MaxCombatants {
+		return fmt.Errorf("%w: an encounter holds at most %d combatants", ErrInvalid, MaxCombatants)
+	}
 	ids := make(map[string]bool, len(st.Combatants))
 	for _, c := range st.Combatants {
 		if err := validateCombatant(c); err != nil {
@@ -85,6 +100,29 @@ func ValidateState(st EncounterState) error {
 }
 
 func validateEncounterSet(set map[string]any) error {
+	if v, ok := set["name"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			return fmt.Errorf("%w: name must be a string", ErrInvalid)
+		}
+		if err := CheckName("encounter name", s); err != nil {
+			return err
+		}
+	}
+	if v, ok := set["theme_id"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			return fmt.Errorf("%w: theme_id must be a string", ErrInvalid)
+		}
+		if err := CheckText("theme_id", s, MaxThemeIDLen); err != nil {
+			return err
+		}
+	}
+	if v, ok := set["position"]; ok {
+		if n, isInt := v.(int); !isInt || n < 0 {
+			return fmt.Errorf("%w: position must be a non-negative integer", ErrInvalid)
+		}
+	}
 	if v, ok := set["game_system_id"]; ok {
 		if s, isStr := v.(string); !isStr || strings.TrimSpace(s) == "" {
 			return fmt.Errorf("%w: game_system_id must be a non-empty string", ErrInvalid)
@@ -143,10 +181,23 @@ func validateCombatant(c Combatant) error {
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("%w: combatant %q has no name", ErrInvalid, c.ID)
 	}
+	if err := errors.Join(CheckText("combatant name", c.Name, MaxNameLen), CheckText("combatant notes", c.Notes, MaxNotesLen),
+		CheckMaps("combatant", c.Health, c.ExternalRefs)); err != nil {
+		return err
+	}
+	if len(c.Conditions) > MaxConditions || len(c.ControllerUserIDs) > MaxCombatants {
+		return fmt.Errorf("%w: combatant %q has too many conditions or controllers", ErrInvalid, c.ID)
+	}
 	if !slices.Contains(Kinds, c.Kind) {
 		return fmt.Errorf("%w: combatant %q kind %q", ErrInvalid, c.ID, c.Kind)
 	}
+	if !slices.Contains([]string{"", HealthFull, HealthStatus, HealthHidden}, c.HealthVisibility) {
+		return fmt.Errorf("%w: combatant %q health visibility %q", ErrInvalid, c.ID, c.HealthVisibility)
+	}
 	for _, cond := range c.Conditions {
+		if CheckText("condition name", cond.Name, MaxNameLen) != nil {
+			return fmt.Errorf("%w: combatant %q has a condition name over %d characters", ErrInvalid, c.ID, MaxNameLen)
+		}
 		if strings.TrimSpace(cond.Name) == "" || (cond.RoundsRemaining != nil && *cond.RoundsRemaining < 1) {
 			return fmt.Errorf("%w: combatant %q has an invalid condition", ErrInvalid, c.ID)
 		}
@@ -303,7 +354,7 @@ type RefMatch struct {
 	Combatant   Combatant `json:"combatant"`
 }
 
-// FindByExternalRef returns owner's live combatants whose external_refs map key to value. The
+// FindByExternalRef returns owner's live combatants in private encounters whose external_refs map key to value. The
 // database matches on the derived RefKey; the stored values are then compared exactly, so a hash
 // collision cannot return a wrong combatant.
 func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value string) ([]RefMatch, error) {
@@ -313,7 +364,9 @@ func (r *Encounters) FindByExternalRef(ctx context.Context, owner, key, value st
 	if key == "" || value == "" || len(key) > maxRefLen || len(value) > maxRefLen {
 		return nil, invalid("ref_key and ref_value are required, at most %d bytes", maxRefLen)
 	}
-	filter := append(scope(owner), bson.E{Key: "ref_keys", Value: RefKey(key, value)})
+	// Private encounters only: a session encounter is read through the session's role-aware view,
+	// so an owner who has left or been demoted cannot reach hidden combatants or GM-only notes here.
+	filter := append(scope(owner), bson.E{Key: "ref_keys", Value: RefKey(key, value)}, bson.E{Key: "session_id", Value: nil})
 	var encs []Encounter
 	if err := r.c.Find(ctx, filter, store.FindOptions{Limit: maxRefMatches}, &encs); err != nil {
 		return nil, err
