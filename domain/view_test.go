@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -10,7 +11,9 @@ import (
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 const viewSession = "5f0000000000000000000001"
@@ -500,4 +503,33 @@ func nested(t reflect.Type) bool {
 		return nested(t.Elem()) || nested(t.Key())
 	}
 	return false
+}
+
+// brokenSystems is a database whose game-system collection cannot be read.
+type brokenSystems struct{ store.Database }
+
+func (b brokenSystems) Collection(name string) store.Collection {
+	c := b.Database.Collection(name)
+	if name == data.CollectionGameSystems {
+		return failingFind{c}
+	}
+	return c
+}
+
+type failingFind struct{ store.Collection }
+
+func (failingFind) FindOne(context.Context, bson.D, any) error { return errors.New("mongo down") }
+
+func TestAViewOfACommittedWriteSurvivesAGameSystemLookupFailure(t *testing.T) {
+	s := NewEncounters(brokenSystems{fake.NewDB()})
+	enc, def := secretEncounter()
+	enc.SessionID = ""
+	enc.OwnerUserID = "gm1"
+	_ = def
+
+	view, err := s.ViewWritten(context.Background(), "gm1", enc)
+
+	if err != nil || view["name"] != "Ambush" {
+		t.Fatalf("view = %v, err = %v; a write that committed must still answer, without the health status", view, err)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -188,6 +189,42 @@ func (c *Collection) FindOneAndUpdate(_ context.Context, filter, update bson.D, 
 	return store.ErrNotFound
 }
 
+// UpsertOne applies update to the first match, or inserts a document seeded from the filter's
+// top-level equality fields and then updated.
+func (c *Collection) UpsertOne(_ context.Context, filter, update bson.D) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, d := range c.docs {
+		ok, err := match(d, filter)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		next := cloneM(d)
+		if err := applyUpdate(next, update); err != nil {
+			return err
+		}
+		c.docs[i] = next
+		return nil
+	}
+	doc := bson.M{}
+	for _, e := range filter {
+		if _, isOp := e.Value.(bson.D); !isOp && e.Key[0] != '$' {
+			doc[e.Key] = e.Value
+		}
+	}
+	if err := applyUpdate(doc, update); err != nil {
+		return err
+	}
+	if c.violatesUnique(doc, -1) {
+		return store.ErrDuplicate
+	}
+	c.docs = append(c.docs, doc)
+	return nil
+}
+
 func (c *Collection) DeleteOne(_ context.Context, filter bson.D) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -302,7 +339,7 @@ func applyUpdate(d bson.M, update bson.D) error {
 				if err != nil {
 					return err
 				}
-				d[f.Key] = m["v"]
+				setPath(d, f.Key, m["v"])
 			case "$unset":
 				delete(d, f.Key)
 			case "$inc":
@@ -315,6 +352,22 @@ func applyUpdate(d bson.M, update bson.D) error {
 		}
 	}
 	return nil
+}
+
+// setPath sets a dotted key (entries.k) inside nested documents, copying each level it touches
+// so a stored document is never mutated in place.
+func setPath(d bson.M, key string, v any) {
+	head, rest, nested := strings.Cut(key, ".")
+	if !nested {
+		d[key] = v
+		return
+	}
+	child := bson.M{}
+	if cur, ok := d[head].(bson.M); ok {
+		child = cloneM(cur)
+	}
+	setPath(child, rest, v)
+	d[head] = child
 }
 
 // norm maps stored and filter values to comparable canonical forms.

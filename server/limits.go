@@ -79,7 +79,10 @@ func setupActiveItemHandlers(g *gin.RouterGroup, s Services) {
 	}
 	g.PUT("/entitlements/active/:kind", func(c *gin.Context) {
 		var b activeItemBody
-		if err := c.ShouldBindJSON(&b); err != nil || b.IDs == nil {
+		if !bindJSON(c, &b) {
+			return
+		}
+		if b.IDs == nil {
 			badRequest(c, "request body must be JSON with an ids array")
 			return
 		}

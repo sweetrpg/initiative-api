@@ -42,6 +42,10 @@ type Collection interface {
 	Find(ctx context.Context, filter bson.D, opts FindOptions, out any) error
 	// FindOneAndUpdate applies update to the first match and decodes the post-update document.
 	FindOneAndUpdate(ctx context.Context, filter, update bson.D, out any) error
+	// UpsertOne applies update to the first match, inserting a document seeded from the filter's
+	// equality fields when nothing matches. A single atomic write: concurrent callers touching
+	// different fields cannot revert one another.
+	UpsertOne(ctx context.Context, filter, update bson.D) error
 	// DeleteOne removes the first match for good; ErrNotFound when nothing matched.
 	DeleteOne(ctx context.Context, filter bson.D) error
 	CountDocuments(ctx context.Context, filter bson.D) (int64, error)

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
 	"reflect"
 	"slices"
@@ -385,7 +386,10 @@ func (s *Encounters) render(ctx context.Context, enc data.Encounter, v data.View
 	case err == nil:
 		def = sys.Fields
 	case !errors.Is(err, data.ErrNotFound):
-		return nil, err
+		// The only thing the definition adds is the coarse health status. A lookup failure must not
+		// turn a write that already committed into a 500, so the status is left out and the failure
+		// logged.
+		slog.WarnContext(ctx, "game system lookup failed while building a view; omitting health status", "system", enc.GameSystemID, "error", err)
 	}
 	return BuildView(enc, def, v)
 }
@@ -405,4 +409,14 @@ func (s *Encounters) ViewsOwned(ctx context.Context, owner string, q data.Query)
 		out.Items = append(out.Items, view)
 	}
 	return out, nil
+}
+
+// ViewWritten renders an encounter the owner has just written, so a write's response is built by
+// the same function as a read. It refuses an encounter that is not the owner's private one.
+func (s *Encounters) ViewWritten(ctx context.Context, owner string, enc data.Encounter) (EncounterView, error) {
+	v, err := s.repo.OwnedViewer(owner, enc)
+	if err != nil {
+		return nil, err
+	}
+	return s.render(ctx, enc, v)
 }

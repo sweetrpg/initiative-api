@@ -44,7 +44,15 @@ func writeError(c *gin.Context, err error, current any) {
 func classifyError(err error) (ErrorBody, int) {
 	var ee *domain.EntitlementError
 	var er *domain.EntitlementRequiredError
+	var he *data.HealthError
 	switch {
+	case errors.As(err, &he):
+		// Typed validation failure (initiative-api-resources, "Typed error responses"): the code is
+		// stable and the key names the offending health field, so a client can mark it.
+		if he.Unknown {
+			return ErrorBody{Code: "unknown_field", Message: "That health field is not defined by the game system.", Key: he.Field}, http.StatusUnprocessableEntity
+		}
+		return ErrorBody{Code: "field_out_of_range", Message: "That health value is outside the allowed range for the game system.", Key: he.Field}, http.StatusUnprocessableEntity
 	case errors.As(err, &ee):
 		return ErrorBody{Code: "entitlement_limit_reached", Message: "Your plan's limit for this item has been reached.", Key: ee.Key, Limit: &ee.Limit}, http.StatusForbidden
 	case errors.Is(err, domain.ErrReadOnly):
@@ -55,6 +63,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "owner_entitlements_pending", Message: "The session owner has not connected yet. Try again after they do."}, http.StatusServiceUnavailable
 	case errors.Is(err, domain.ErrSyncPending):
 		return ErrorBody{Code: "membership_sync_pending", Message: "Your change was saved, but access is still being updated. Repeat the request in a moment."}, http.StatusServiceUnavailable
+	case errors.Is(err, domain.ErrLimitsNotSynced):
+		return ErrorBody{Code: "entitlements_unavailable", Message: "Your plan limits have not been synced yet. Open Initiative once with your own sign-in, then try again."}, http.StatusServiceUnavailable
 	case errors.Is(err, relations.ErrDenied):
 		return ErrorBody{Code: "forbidden", Message: "You may not do that."}, http.StatusForbidden
 	case errors.Is(err, relations.ErrRejected):

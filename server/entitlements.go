@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
+	"github.com/sweetrpg/initiative-api/entitlements"
 )
 
 // entitlementPrefix selects every Initiative key in the catalog.
@@ -44,6 +45,17 @@ func (h entitlementHandlers) list(c *gin.Context) {
 	if err != nil {
 		writeError(c, err, nil)
 		return
+	}
+	if len(results) > 0 {
+		if uc, ok := checkerFor(c, h.svc.Entitlements).(userChecker); ok && uc.record != nil {
+			fresh := make([]entitlements.Result, 0, len(results))
+			for _, r := range results {
+				if !r.Stale && !r.Degraded {
+					fresh = append(fresh, r)
+				}
+			}
+			uc.remember(c.Request.Context(), fresh...)
+		}
 	}
 	items := make([]EntitlementItem, 0, len(results))
 	for _, r := range results {

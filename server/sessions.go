@@ -40,8 +40,7 @@ func (h sessionHandlers) create(c *gin.Context) {
 	var b struct {
 		Name string `json:"name"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON with a name")
+	if !bindJSON(c, &b) {
 		return
 	}
 	s, err := h.svc.Create(c.Request.Context(), authz.Viewer(c), b.Name)
@@ -143,8 +142,7 @@ func (h sessionHandlers) setRole(c *gin.Context) {
 	var b struct {
 		Role string `json:"role"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON with a role")
+	if !bindJSON(c, &b) {
 		return
 	}
 	m, err := h.svc.SetRole(c.Request.Context(), authz.Viewer(c), c.Param("id"), c.Param("user"), b.Role)
@@ -169,7 +167,10 @@ func (h sessionHandlers) createInvite(c *gin.Context) {
 		TTLHours int `json:"ttl_hours"`
 	}
 	if c.Request.ContentLength != 0 {
-		if err := c.ShouldBindJSON(&b); err != nil || b.TTLHours < 0 {
+		if !bindJSON(c, &b) {
+			return
+		}
+		if b.TTLHours < 0 {
 			badRequest(c, "request body must be JSON with an optional ttl_hours")
 			return
 		}
@@ -196,7 +197,10 @@ func (h sessionHandlers) join(c *gin.Context) {
 	var b struct {
 		Code string `json:"code"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil || b.Code == "" {
+	if !bindJSON(c, &b) {
+		return
+	}
+	if b.Code == "" {
 		badRequest(c, "request body must be JSON with a code")
 		return
 	}
@@ -212,8 +216,7 @@ func (h sessionHandlers) approve(c *gin.Context) {
 	var b struct {
 		Role string `json:"role"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON with a role")
+	if !bindJSON(c, &b) {
 		return
 	}
 	m, err := h.svc.Approve(c.Request.Context(), authz.Viewer(c), c.Param("id"), c.Param("request"), b.Role)
@@ -228,8 +231,7 @@ func (h sessionHandlers) reject(c *gin.Context) {
 	var b struct {
 		Reason string `json:"reason"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON with a reason")
+	if !bindJSON(c, &b) {
 		return
 	}
 	jr, err := h.svc.Reject(c.Request.Context(), authz.Viewer(c), c.Param("id"), c.Param("request"), b.Reason)
@@ -244,8 +246,7 @@ func (h sessionHandlers) block(c *gin.Context) {
 	var b struct {
 		UserID string `json:"user_id"`
 	}
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON with a user_id")
+	if !bindJSON(c, &b) {
 		return
 	}
 	if err := h.svc.Block(c.Request.Context(), authz.Viewer(c), c.Param("id"), b.UserID); err != nil {

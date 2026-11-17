@@ -137,3 +137,18 @@ func (r *Encounters) ListOwnedViews(ctx context.Context, owner string, q Query) 
 	page, err := runQuery[Encounter](ctx, r.c, r.spec, base, q)
 	return page, ownerViewer(owner), err
 }
+
+// OwnedViewer returns the viewer for rendering e, an encounter the caller has just read or written
+// on the owner path. It refuses an encounter that is not the owner's or that belongs to a session,
+// so an owner viewer is never issued for data the owner path may not show.
+func (r *Encounters) OwnedViewer(owner string, e Encounter) (Viewer, error) {
+	if checkUserID(owner) != nil || e.OwnerUserID != owner || e.SessionID != "" {
+		return Viewer{}, ErrForbidden
+	}
+	return ownerViewer(owner), nil
+}
+
+// RequireSystem rejects a game system that has no definition.
+func (r *Encounters) RequireSystem(ctx context.Context, sysID string) error {
+	return r.requireSystem(ctx, sysID)
+}

@@ -342,15 +342,17 @@ func (r *Owned[T, P]) List(ctx context.Context, ownerUserID string, q Query) (Pa
 	if err := checkUserID(ownerUserID); err != nil {
 		return Page[T]{}, err
 	}
-	return runQuery[T](ctx, r.c, r.spec, scope(ownerUserID), q)
+	return runQuery[T](ctx, r.c, r.spec, r.scoped(ownerUserID), q)
 }
 
-// Count returns how many of owner's live records match filters, counted by the database.
+// Count returns how many of owner's live records match filters, counted by the database. For
+// encounters that is the private ones only: an encounter in a session counts against the session's
+// limits, not the owner's saved-encounter limit.
 func (r *Owned[T, P]) Count(ctx context.Context, ownerUserID string, filters []Filter) (int64, error) {
 	if err := checkUserID(ownerUserID); err != nil {
 		return 0, err
 	}
-	clauses, err := clausesFor(r.spec, scope(ownerUserID), Query{Filters: filters})
+	clauses, err := clausesFor(r.spec, r.scoped(ownerUserID), Query{Filters: filters})
 	if err != nil {
 		return 0, err
 	}
