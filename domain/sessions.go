@@ -90,12 +90,13 @@ type SessionView struct {
 // Sessions implements session membership and its rules.
 type Sessions struct {
 	repo *data.Sessions
+	enc  *data.Encounters
 	now  func() time.Time
 }
 
 // NewSessions builds the service on db.
 func NewSessions(db store.Database) *Sessions {
-	return &Sessions{repo: data.NewSessions(db), now: func() time.Time { return time.Now().UTC() }}
+	return &Sessions{repo: data.NewSessions(db), enc: data.NewEncounters(db), now: func() time.Time { return time.Now().UTC() }}
 }
 
 // Viewer returns how actor may see the session's encounters; see data.Sessions.AuthorizeView.
@@ -377,6 +378,7 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 		}
 		return data.Member{}, err
 	}
+	s.scrubControllers(ctx, d, jr.UserID)
 	m, err := s.repo.AddMember(ctx, d, jr.UserID, role)
 	if err != nil {
 		return data.Member{}, err
@@ -444,9 +446,15 @@ func (s *Sessions) SetRole(ctx context.Context, actor, id, user, role string) (d
 	if !canManageRole(am.Role, role) || !canManageRole(am.Role, t.Role) {
 		return data.Member{}, data.ErrForbidden
 	}
+	if t.Role == data.RoleObserver {
+		s.scrubControllers(ctx, d, user) // an observer being promoted starts with no control
+	}
 	m, err := s.repo.SetRole(ctx, d, user, role)
 	if err != nil {
 		return data.Member{}, err
+	}
+	if role == data.RoleObserver {
+		s.scrubControllers(ctx, d, user)
 	}
 	return m, s.syncGrant(ctx, am.Role, d.SessionID(), user, role)
 }
@@ -467,6 +475,7 @@ func (s *Sessions) Remove(ctx context.Context, actor, id, user string) error {
 	if err := s.repo.RemoveMember(ctx, d, user); err != nil {
 		return err
 	}
+	s.scrubControllers(ctx, d, user)
 	s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	return nil
 }
@@ -483,6 +492,7 @@ func (s *Sessions) Leave(ctx context.Context, actor, id string) error {
 	if err := s.repo.RemoveMember(ctx, d, actor); err != nil {
 		return err
 	}
+	s.scrubControllers(ctx, d, actor)
 	s.syncRevoke(ctx, m.Role, d.SessionID(), actor, m.Role)
 	return nil
 }
@@ -511,6 +521,7 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	}
 	switch err := s.repo.RemoveMember(ctx, d, user); {
 	case err == nil:
+		s.scrubControllers(ctx, d, user)
 		s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	case !errors.Is(err, data.ErrNotFound):
 		return err
@@ -534,4 +545,14 @@ func (s *Sessions) Blocks(ctx context.Context, actor, id string, q data.Query) (
 		return data.Page[data.Block]{}, err
 	}
 	return s.repo.Blocks(ctx, d, q)
+}
+
+// scrubControllers removes user from every combatant's controllers in the session's encounters,
+// so a removed, blocked, or demoted member cannot regain control by rejoining or being promoted.
+// It runs after the membership write and again before admission; it is idempotent and best
+// effort, because the live Viewer already denies a non-player any control (domain.controls).
+func (s *Sessions) scrubControllers(ctx context.Context, d data.Decision, user string) {
+	if err := s.enc.ScrubController(ctx, d, user); err != nil {
+		slog.WarnContext(ctx, "scrubbing a member's combatant controls failed; admission scrubs again", "session", d.SessionID(), "user", user, "error", err)
+	}
 }
