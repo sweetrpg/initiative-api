@@ -368,10 +368,15 @@ func (s *Sessions) Approve(ctx context.Context, actor, id, requestID, role strin
 	// Before the request settles, and failing closed: a stale controller id must not revive on
 	// admission. The user is not a member yet, so this cannot race a legitimate assignment, and a
 	// failure leaves the request pending to retry rather than approved with no member.
-	if pending, perr := s.repo.PendingUser(ctx, d, requestID); perr == nil {
+	// Only a request that is not pending (a retried approval, or no such request) skips the scrub;
+	// any other lookup error fails closed rather than admit with stale ids intact.
+	switch pending, perr := s.repo.PendingUser(ctx, d, requestID); {
+	case perr == nil:
 		if err := s.enc.ScrubController(ctx, d, pending); err != nil {
 			return data.Member{}, err
 		}
+	case !errors.Is(perr, data.ErrNotFound):
+		return data.Member{}, perr
 	}
 	jr, err := s.repo.Decide(ctx, d, requestID, data.RequestApproved, role, "")
 	if errors.Is(err, data.ErrConflict) && jr.Status == data.RequestApproved && jr.Role == role {

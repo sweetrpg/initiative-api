@@ -62,7 +62,9 @@ func (s *Encounters) AssignControllers(ctx context.Context, sessions *Sessions, 
 	return s.render(ctx, updated, viewer)
 }
 
-// notControllers returns the users in ids who no longer hold a controlling membership.
+// notControllers returns the users in ids who no longer hold a controlling membership. A lookup
+// that fails for any reason counts as "gone": the user is then scrubbed, which a legitimate
+// controller can undo by being assigned again, whereas keeping an unverified id could not be.
 func (s *Sessions) notControllers(ctx context.Context, d data.Decision, ids []string) []string {
 	var gone []string
 	for _, u := range ids {

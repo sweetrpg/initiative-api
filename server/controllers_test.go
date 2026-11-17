@@ -385,3 +385,94 @@ func TestAnOversizedControllerListIs422(t *testing.T) {
 		t.Fatalf("%d controllers = %d %s, want 422", len(ids), w.Code, w.Body)
 	}
 }
+
+// flakyMembers fails FindOne on session_requests once while failOnce is set, and answers "not
+// found" for u-2's member record from its second lookup on while leaveAfterFirst is set, as if
+// the user left between the membership check and the write.
+type flakyDB struct {
+	store.Database
+	failRequestOnce, leaveAfterFirst *atomic.Bool
+	u2Lookups                        *atomic.Int64
+}
+
+func (d flakyDB) Collection(name string) store.Collection {
+	c := d.Database.Collection(name)
+	switch name {
+	case data.CollectionSessionRequests:
+		return flakyFindOne{c, func(bson.D) error {
+			if d.failRequestOnce.CompareAndSwap(true, false) {
+				return errors.New("timeout")
+			}
+			return nil
+		}}
+	case data.CollectionSessionMembers:
+		return flakyFindOne{c, func(f bson.D) error {
+			for _, e := range f {
+				if e.Key == "user_id" && e.Value == "u-2" && d.leaveAfterFirst.Load() && d.u2Lookups.Add(1) > 1 {
+					return store.ErrNotFound
+				}
+			}
+			return nil
+		}}
+	}
+	return c
+}
+
+type flakyFindOne struct {
+	store.Collection
+	gate func(bson.D) error
+}
+
+func (c flakyFindOne) FindOne(ctx context.Context, f bson.D, out any) error {
+	if err := c.gate(f); err != nil {
+		return err
+	}
+	return c.Collection.FindOne(ctx, f, out)
+}
+
+func newFlaky(t *testing.T) (http.Handler, *fake.DB, string, flakyDB) {
+	t.Helper()
+	d := flakyDB{failRequestOnce: new(atomic.Bool), leaveAfterFirst: new(atomic.Bool), u2Lookups: new(atomic.Int64)}
+	r, db, sid := viewTableOn(t, "3", func(f *fake.DB) store.Database { d.Database = f; return d })
+	return r, db, sid, d
+}
+
+func TestATransientPendingLookupErrorRefusesAdmissionAndARetrySucceeds(t *testing.T) {
+	r, db, sid, d := newFlaky(t)
+	if w := callAs(r, "user-two", "POST", "/sessions/"+sid+"/leave", ""); w.Code >= 300 {
+		t.Fatalf("leave = %d %s", w.Code, w.Body)
+	}
+	replaceEncounter(t, db, encE1, sid, func(e *data.Encounter) { e.Combatants[0].ControllerUserIDs = []string{"u-2"} })
+	code := inviteCode(t, r, "user-ok", sid)
+	reqID := decodeBody(t, callAs(r, "user-two", "POST", "/sessions/join", `{"code":"`+code+`"}`))["id"].(string)
+
+	d.failRequestOnce.Store(true)
+	w := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/requests/"+reqID+"/approve", `{"role":"player"}`)
+
+	if w.Code < 500 || roleOf(t, r, "user-two", sid) != "" {
+		t.Fatalf("approve with a failing lookup = %d %s, role %q; want a server error and no membership", w.Code, w.Body, roleOf(t, r, "user-two", sid))
+	}
+	if w := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/requests/"+reqID+"/approve", `{"role":"player"}`); w.Code != 200 {
+		t.Fatalf("retry = %d %s", w.Code, w.Body)
+	}
+	if mineFor(t, r, "user-two", sid, "pc") {
+		t.Error("u-2 controls the pc after the retried admission")
+	}
+}
+
+func TestAControllerWhoLeavesDuringAnAssignmentIsScrubbedAndTheAnswerIs409(t *testing.T) {
+	r, _, sid, d := newFlaky(t)
+
+	d.leaveAfterFirst.Store(true) // the first u-2 lookup (the membership check) passes; the re-check after the write does not
+	w := callAs(r, "user-ok", "PUT", controllersPath(sid, "orc"), `{"controller_user_ids":["u-2"],"revision":3}`)
+	d.leaveAfterFirst.Store(false)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("assign while the member leaves = %d %s, want 409", w.Code, w.Body)
+	}
+	for _, cid := range []string{"orc", "pc"} {
+		if got := controllersOf(t, r, sid, cid); slices.Contains(got, "u-2") {
+			t.Errorf("%s still lists u-2 after the scrub: %v", cid, got)
+		}
+	}
+}
