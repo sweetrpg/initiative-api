@@ -166,3 +166,13 @@ func withoutController(cs []Combatant, userID string) ([]Combatant, bool) {
 	}
 	return out, changed
 }
+
+// ValidateCombatantChange checks c, a combatant as it would be after an edit, against the same
+// rules a write enforces: the combatant's own fields, and its health against the game system's
+// definition (the default system when the encounter's has none).
+func (r *Encounters) ValidateCombatantChange(ctx context.Context, gameSystemID string, c Combatant) error {
+	if err := validateCombatant(c); err != nil {
+		return err
+	}
+	return r.checkHealth(ctx, gameSystemID, []Combatant{c}, nil)
+}
