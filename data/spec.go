@@ -110,7 +110,7 @@ var (
 		Filterable:  []string{"name"},
 		Sortable:    []string{"name", "created_at"},
 		Projectable: []string{"name", "revision", "owner_user_id", "created_at", "updated_at", "created_by", "updated_by"},
-		Updatable:   []string{"name"},
+		Updatable:   []string{"name", "allow_co_gm_create_encounter"},
 		Indexes:     []store.IndexSpec{{Name: "owner_created", Keys: bson.D{{Key: "owner_user_id", Value: 1}, {Key: "created_at", Value: -1}}}},
 	}
 
