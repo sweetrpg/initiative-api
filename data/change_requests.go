@@ -14,6 +14,9 @@ const (
 	ChangePending  = "pending"
 	ChangeApproved = "approved"
 	ChangeRejected = "rejected"
+	// ChangeCancelled marks a pending request whose requester left the session or lost their
+	// player role before it was decided.
+	ChangeCancelled = "cancelled"
 )
 
 // MaxPendingChangeRequests bounds one player's open requests in a session, so a client cannot
@@ -22,18 +25,21 @@ const MaxPendingChangeRequests = 50
 
 // ChangeRequest is a player's proposed change to one combatant's health values or conditions
 // (initiative-player-access). It changes nothing until a GM or co-GM approves it. Health holds the
-// values to set (merged into the combatant's health, like a combatant patch); Conditions, when
-// present, replaces the combatant's conditions (an empty list clears them). The values are
-// absolute, never deltas, so applying a request twice is harmless.
+// values to set (merged into the combatant's health, like a combatant patch) and is absolute, so
+// applying it twice is harmless. Conditions are a delta by name, applied to the combatant as it
+// is when the request is applied: RemoveConditions drops conditions by name, AddConditions sets
+// (adds, or replaces the rounds of) a condition by name. A condition added by the GM after the
+// request was submitted therefore survives approval.
 type ChangeRequest struct {
-	ID          string         `bson:"_id" json:"id"`
-	SessionID   string         `bson:"session_id" json:"session_id"`
-	EncounterID string         `bson:"encounter_id" json:"encounter_id"`
-	CombatantID string         `bson:"combatant_id" json:"combatant_id"`
-	RequestedBy string         `bson:"requested_by" json:"requested_by"`
-	Health      map[string]int `bson:"health,omitempty" json:"health,omitempty"`
-	Conditions  *[]Condition   `bson:"conditions,omitempty" json:"conditions,omitempty"`
-	Status      string         `bson:"status" json:"status"`
+	ID               string         `bson:"_id" json:"id"`
+	SessionID        string         `bson:"session_id" json:"session_id"`
+	EncounterID      string         `bson:"encounter_id" json:"encounter_id"`
+	CombatantID      string         `bson:"combatant_id" json:"combatant_id"`
+	RequestedBy      string         `bson:"requested_by" json:"requested_by"`
+	Health           map[string]int `bson:"health,omitempty" json:"health,omitempty"`
+	AddConditions    []Condition    `bson:"add_conditions,omitempty" json:"add_conditions,omitempty"`
+	RemoveConditions []string       `bson:"remove_conditions,omitempty" json:"remove_conditions,omitempty"`
+	Status           string         `bson:"status" json:"status"`
 	// BaseRevision is the encounter revision the player saw when submitting.
 	BaseRevision int64      `bson:"base_revision" json:"base_revision"`
 	CreatedAt    time.Time  `bson:"created_at" json:"created_at"`
@@ -67,6 +73,8 @@ func (r *ChangeRequests) Create(ctx context.Context, v Viewer, req ChangeRequest
 	if err != nil {
 		return ChangeRequest{}, err
 	}
+	// Count-then-insert: concurrent submissions can overrun the cap by at most the number of
+	// requests in flight at once, which one player's connection count bounds.
 	if n >= MaxPendingChangeRequests {
 		return ChangeRequest{}, invalid("you have %d change requests waiting for the GM; wait for some to be decided", n)
 	}
@@ -129,7 +137,16 @@ func (r *ChangeRequests) Decide(ctx context.Context, d Decision, encounterID, id
 	if reason != "" {
 		set = append(set, bson.E{Key: "reason", Value: reason})
 	}
-	err := r.c.FindOneAndUpdate(ctx, append(filter, bson.E{Key: "status", Value: ChangePending}), bson.D{{Key: "$set", Value: set}}, &req)
+	open := bson.E{Key: "status", Value: ChangePending}
+	if status == ChangeApproved {
+		// An approval that claimed the request but never recorded a result (a crash, or a failed
+		// reopen) can be completed by the same approver approving again; the change is idempotent.
+		open = bson.E{Key: "$or", Value: bson.A{
+			bson.D{{Key: "status", Value: ChangePending}},
+			bson.D{{Key: "status", Value: ChangeApproved}, {Key: "decided_by", Value: d.actor}, {Key: "applied_revision", Value: nil}},
+		}}
+	}
+	err := r.c.FindOneAndUpdate(ctx, append(filter, open), bson.D{{Key: "$set", Value: set}}, &req)
 	if !errors.Is(err, store.ErrNotFound) {
 		return req, err
 	}
@@ -137,6 +154,32 @@ func (r *ChangeRequests) Decide(ctx context.Context, d Decision, encounterID, id
 		return req, ErrConflict
 	}
 	return req, ErrNotFound
+}
+
+// CancelPending cancels userID's pending requests in the session, for a member who left, was
+// removed, or lost the player role. d grants can_edit, or can_view for one's own leave. The
+// per-player cap bounds the loop.
+func (r *ChangeRequests) CancelPending(ctx context.Context, d Decision, userID string) error {
+	need := relEdit
+	if userID == d.actor {
+		need = relView
+	}
+	if err := pairOK(d, need, userID); err != nil {
+		return err
+	}
+	for range MaxPendingChangeRequests + 1 {
+		var discard ChangeRequest
+		err := r.c.FindOneAndUpdate(ctx,
+			bson.D{{Key: "session_id", Value: d.session}, {Key: "requested_by", Value: userID}, {Key: "status", Value: ChangePending}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: ChangeCancelled}, {Key: "decided_by", Value: d.actor}, {Key: "decided_at", Value: r.now()}}}}, &discard)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Reopen puts an approved request this decision approved back to pending, for an approval whose

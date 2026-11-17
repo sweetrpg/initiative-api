@@ -3,13 +3,21 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // changeTable is viewTable with the pc (controlled by u-2) holding health the default system
@@ -68,7 +76,7 @@ func requests(t *testing.T, r http.Handler, token, sid, query string) []map[stri
 func TestAControllingPlayerSubmitsAChangeAndTheCombatantIsUnchanged(t *testing.T) {
 	r, _, sid := changeTable(t)
 
-	code, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4},"conditions":[{"name":"prone"}]}`)
+	code, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4},"conditions":{"add":[{"name":"prone"}]}}`)
 
 	if code != http.StatusCreated || req["status"] != "pending" || req["requested_by"] != "u-2" || req["base_revision"] != float64(3) || req["combatant_id"] != "pc" {
 		t.Fatalf("submit = %d %v, want a pending request by u-2 at revision 3", code, req)
@@ -131,8 +139,8 @@ func TestSubmissionIsValidatedAgainstTheGameSystem(t *testing.T) {
 		"below the minimum":  `{"health":{"hp":-1}}`,
 		"undefined field":    `{"health":{"mana":3}}`,
 		"nothing proposed":   `{}`,
-		"empty condition":    `{"conditions":[{"name":" "}]}`,
-		"too many":           `{"conditions":[` + manyConditions(data.MaxConditions+1) + `]}`,
+		"empty condition":    `{"conditions":{"add":[{"name":" "}]}}`,
+		"too many":           `{"conditions":{"add":[` + manyConditions(data.MaxConditions+1) + `]}}`,
 		"a field of its own": `{"health":{"hp":4},"notes":"x"}`,
 	}
 	for name, body := range tests {
@@ -191,7 +199,7 @@ func approve(r http.Handler, token, sid, id string) (int, map[string]any) {
 
 func TestApprovalAppliesTheChangeInTheSameBumpAndRecordsTheApprover(t *testing.T) {
 	r, _, sid := changeTable(t)
-	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4},"conditions":[{"name":"prone"}]}`)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4},"conditions":{"add":[{"name":"prone"}]}}`)
 
 	code, done := approve(r, "user-ok", sid, req["id"].(string))
 
@@ -242,12 +250,6 @@ func TestAStaleRequestFailsWithATypedErrorAndStaysPending(t *testing.T) {
 		},
 		"the combatant was removed": func(t *testing.T, _ http.Handler, db *fake.DB, sid string) {
 			setPC(t, db, sid, func(e *data.Encounter) { e.Combatants[0].Removed = true })
-		},
-		"the requester was demoted": func(t *testing.T, r http.Handler, db *fake.DB, sid string) {
-			if w := callAs(r, "user-ok", "PATCH", "/sessions/"+sid+"/members/u-2", `{"role":"observer"}`); w.Code != 200 {
-				t.Fatalf("demote = %d", w.Code)
-			}
-			setPC(t, db, sid, func(*data.Encounter) {})
 		},
 	}
 	for name, make := range staleness {
@@ -360,3 +362,364 @@ func TestPendingRequestsPerPlayerAreCapped(t *testing.T) {
 }
 
 func hex6(i int) string { return fmt.Sprintf("%06x", i+1) }
+
+func conditionNames(t *testing.T, r http.Handler, sid string) []string {
+	t.Helper()
+	body := decodeBody(t, callAs(r, "user-ok", "GET", encPath(sid, encE1)+"/combatants/pc", ""))
+	var out []string
+	for _, c := range body["conditions"].([]any) {
+		out = append(out, c.(map[string]any)["name"].(string))
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestAConditionAddedByTheGMAfterSubmissionSurvivesApproval(t *testing.T) {
+	r, db, sid := changeTable(t)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"conditions":{"add":[{"name":"prone"}],"remove":["poisoned"]}}`)
+	setPC(t, db, sid, func(e *data.Encounter) {
+		e.Combatants[0].Conditions = []data.Condition{{Name: "poisoned"}, {Name: "stunned"}}
+	})
+
+	if code, b := approve(r, "user-ok", sid, req["id"].(string)); code != 200 {
+		t.Fatalf("approve = %d %v", code, b)
+	}
+
+	if got := conditionNames(t, r, sid); !slices.Equal(got, []string{"prone", "stunned"}) {
+		t.Fatalf("conditions = %v, want the player's prone added, poisoned removed, and the GM's stunned kept", got)
+	}
+}
+
+func TestAddingAConditionThatAlreadyExistsUpdatesItInPlace(t *testing.T) {
+	r, db, sid := changeTable(t)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"conditions":{"add":[{"name":"prone","rounds_remaining":2}]}}`)
+	setPC(t, db, sid, func(e *data.Encounter) { e.Combatants[0].Conditions = []data.Condition{{Name: "prone"}} })
+
+	approve(r, "user-ok", sid, req["id"].(string))
+
+	if got := conditionNames(t, r, sid); !slices.Equal(got, []string{"prone"}) {
+		t.Fatalf("conditions = %v, want one prone", got)
+	}
+}
+
+func TestATightenedDefinitionDoesNotBlockAConditionsOnlyRequest(t *testing.T) {
+	r, db, sid := changeTable(t)
+	zero, one, five := 0, 1, 5
+	tight := data.GameSystem{ID: data.DefaultSystemID, Name: "No System", Family: "f", Aliases: []string{"none"}, Fields: []data.TrackerField{
+		{Key: "hp", Label: "HP", Kind: data.FieldCounter, Def: 5, Min: &zero, MaxRef: "max_hp"},
+		{Key: "max_hp", Label: "Max HP", Kind: data.FieldCounter, Def: 5, Min: &one, Max: &five}, // the stored max_hp 10 is now over the limit
+	}}
+	if _, err := data.NewSystemRepo(db).Upsert(context.Background(), tight); err != nil {
+		t.Fatal(err)
+	}
+
+	code, req := submit(t, r, "user-two", sid, "pc", `{"conditions":{"add":[{"name":"prone"}]}}`)
+	done, b := approve(r, "user-ok", sid, idOf(req))
+
+	if code != http.StatusCreated || done != 200 {
+		t.Fatalf("conditions-only: submit = %d %v, approve = %d %v; a stored value the definition now rejects must not block it", code, req, done, b)
+	}
+}
+
+func idOf(m map[string]any) string { s, _ := m["id"].(string); return s }
+
+func TestRequestsInTheOldSpellingOfAWholeConditionsListAreRefused(t *testing.T) {
+	r, _, sid := changeTable(t)
+
+	if code, b := submit(t, r, "user-two", sid, "pc", `{"conditions":[{"name":"prone"}]}`); code != 400 && code != 422 {
+		t.Fatalf("a bare conditions list = %d %v, want it refused", code, b)
+	}
+}
+
+func TestAnApprovalLeftUnfinishedIsCompletedByItsApproverApprovingAgain(t *testing.T) {
+	r, db, sid := changeTable(t)
+	joinAs(t, r, sid, "user-four", "co_gm")
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+	var discard data.ChangeRequest
+	err := db.Fake(data.CollectionChangeRequests).FindOneAndUpdate(context.Background(), bson.D{{Key: "_id", Value: idOf(req)}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "approved"}, {Key: "decided_by", Value: "u-1"}}}}, &discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	other, _ := approve(r, "user-four", sid, idOf(req))
+	code, done := approve(r, "user-ok", sid, idOf(req))
+
+	if other != http.StatusConflict {
+		t.Errorf("another approver on an unfinished approval = %d, want 409", other)
+	}
+	if code != 200 || done["applied_revision"] != float64(4) || pcHealth(t, r, sid)["hp"] != float64(4) {
+		t.Fatalf("repair = %d %v, hp %v; want it completed", code, done, pcHealth(t, r, sid)["hp"])
+	}
+	if again, _ := approve(r, "user-ok", sid, idOf(req)); again != http.StatusConflict {
+		t.Errorf("approving a finished request again = %d, want 409", again)
+	}
+}
+
+// failing wraps one collection's FindOneAndUpdate with gate; a non-nil error is returned instead
+// of running the update.
+type failingUpdates struct {
+	store.Database
+	collection string
+	gate       func(update bson.D) error
+}
+
+func (d failingUpdates) Collection(name string) store.Collection {
+	c := d.Database.Collection(name)
+	if name == d.collection {
+		return gatedUpdate{c, d.gate}
+	}
+	return c
+}
+
+type gatedUpdate struct {
+	store.Collection
+	gate func(bson.D) error
+}
+
+func (c gatedUpdate) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
+	if err := c.gate(u); err != nil {
+		return err
+	}
+	return c.Collection.FindOneAndUpdate(ctx, f, u, out)
+}
+
+func setsStatus(u bson.D, status string) bool {
+	for _, op := range u {
+		if set, ok := op.Value.(bson.D); ok && op.Key == "$set" {
+			for _, e := range set {
+				if e.Key == "status" && e.Value == status {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func TestAFailedReopenLeavesAnUnfinishedApprovalThatApprovingAgainCompletes(t *testing.T) {
+	r, db, sid := viewTableOn(t, "3", func(d *fake.DB) store.Database {
+		return failingUpdates{d, data.CollectionChangeRequests, func(u bson.D) error {
+			if setsStatus(u, "pending") {
+				return errors.New("store down")
+			}
+			return nil
+		}}
+	})
+	seedSystem(t, db)
+	setPC(t, db, sid, func(*data.Encounter) {})
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+	locked := time.Now()
+	setPC(t, db, sid, func(e *data.Encounter) { e.LockedAt = &locked })
+	if code, _ := approve(r, "user-ok", sid, idOf(req)); code != http.StatusForbidden {
+		t.Fatalf("approve on a locked encounter = %d, want 403", code)
+	}
+	if got := requests(t, r, "user-ok", sid, "?status=approved"); len(got) != 1 || got[0]["applied_revision"] != nil {
+		t.Fatalf("approved = %v, want the claimed request left approved with no result", got)
+	}
+	setPC(t, db, sid, func(*data.Encounter) {})
+
+	code, done := approve(r, "user-ok", sid, idOf(req))
+
+	if code != 200 || done["applied_revision"] == nil || pcHealth(t, r, sid)["hp"] != float64(4) {
+		t.Fatalf("approve again = %d %v, hp %v", code, done, pcHealth(t, r, sid)["hp"])
+	}
+}
+
+func TestApprovalRetriesAnEncounterThatMovedOnThreeTimes(t *testing.T) {
+	for _, tt := range []struct {
+		misses   int
+		wantCode int
+		pending  int
+	}{{2, 200, 0}, {3, http.StatusConflict, 1}} {
+		var misses atomic.Int64
+		r, db, sid := viewTableOn(t, "3", func(d *fake.DB) store.Database {
+			return failingUpdates{d, data.CollectionEncounters, func(u bson.D) error {
+				if misses.Load() < int64(tt.misses) && !setsStatus(u, "x") {
+					misses.Add(1)
+					return store.ErrNotFound // as if another writer got the revision first
+				}
+				return nil
+			}}
+		})
+		seedSystem(t, db)
+		setPC(t, db, sid, func(*data.Encounter) {})
+		misses.Store(0)
+		_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+
+		code, b := approve(r, "user-ok", sid, idOf(req))
+
+		if code != tt.wantCode || len(requests(t, r, "user-ok", sid, "?status=pending")) != tt.pending {
+			t.Errorf("%d conflicts: approve = %d %v, pending %d; want %d and %d pending", tt.misses, code, b, len(requests(t, r, "user-ok", sid, "?status=pending")), tt.wantCode, tt.pending)
+		}
+	}
+}
+
+func TestApproveAndRejectRacingLeaveExactlyOneOutcome(t *testing.T) {
+	for range 10 {
+		r, _, sid := changeTable(t)
+		_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		wg.Add(2)
+		go func() { defer wg.Done(); codes[0], _ = approve(r, "user-ok", sid, idOf(req)) }()
+		go func() {
+			defer wg.Done()
+			codes[1] = callAs(r, "user-ok", "POST", crPath(sid, idOf(req), "reject"), `{"reason":"no"}`).Code
+		}()
+		wg.Wait()
+
+		hp, rev := pcHealth(t, r, sid)["hp"], gmRevision(t, r, sid)
+		switch {
+		case codes[0] == 200 && codes[1] == http.StatusConflict:
+			if hp != float64(4) || rev != 4 {
+				t.Fatalf("approved but hp %v revision %v", hp, rev)
+			}
+		case codes[1] == 200 && codes[0] == http.StatusConflict:
+			if hp != float64(9) || rev != 3 {
+				t.Fatalf("rejected but hp %v revision %v: a rejected request changed the combatant", hp, rev)
+			}
+		default:
+			t.Fatalf("approve = %d, reject = %d; want exactly one 200 and one 409", codes[0], codes[1])
+		}
+	}
+}
+
+func TestARequestFromAnotherEncounterOrSessionIsNotFoundUnderAValidURL(t *testing.T) {
+	r, db, sid := changeTable(t)
+	for id, req := range map[string]data.ChangeRequest{
+		"5f00000000000000000000c1": {SessionID: sid, EncounterID: "5f00000000000000000000ff"},
+		"5f00000000000000000000c2": {SessionID: foreignSession, EncounterID: encE1},
+	} {
+		req.ID, req.CombatantID, req.RequestedBy, req.Status, req.CreatedAt = id, "pc", "u-2", data.ChangePending, time.Now()
+		req.Health = map[string]int{"hp": 1}
+		if err := db.Fake(data.CollectionChangeRequests).InsertOne(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		approveCode, _ := approve(r, "user-ok", sid, id)
+		reject := callAs(r, "user-ok", "POST", crPath(sid, id, "reject"), `{"reason":"x"}`)
+		if approveCode != 404 || reject.Code != 404 {
+			t.Errorf("request %s in %s/%s: approve = %d, reject = %d; want 404", id, req.SessionID, req.EncounterID, approveCode, reject.Code)
+		}
+	}
+}
+
+func TestAPlayerCannotRejectAndAnotherPlayersReasonStaysPrivate(t *testing.T) {
+	r, db, sid := changeTable(t)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+	rejected := data.ChangeRequest{ID: "5f00000000000000000000c3", SessionID: sid, EncounterID: encE1, CombatantID: "orc", RequestedBy: "u-9",
+		Status: data.ChangeRejected, Reason: "private reason for u-9", CreatedAt: time.Now()}
+	if err := db.Fake(data.CollectionChangeRequests).InsertOne(context.Background(), rejected); err != nil {
+		t.Fatal(err)
+	}
+
+	w := callAs(r, "user-two", "POST", crPath(sid, idOf(req), "reject"), `{"reason":"I changed my mind"}`)
+	list := callAs(r, "user-two", "GET", crPath(sid), "")
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("a player rejecting = %d, want 403", w.Code)
+	}
+	if strings.Contains(list.Body.String(), "private reason") || strings.Contains(list.Body.String(), "u-9") {
+		t.Errorf("a player's list leaks another player's request: %s", list.Body)
+	}
+}
+
+func TestSubmissionIsRefusedOnALockedOrInactiveEncounterOrSession(t *testing.T) {
+	now := time.Now()
+	tests := map[string]struct {
+		arrange func(t *testing.T, db *fake.DB, sid string)
+		code    string
+	}{
+		"locked encounter": {func(t *testing.T, db *fake.DB, sid string) {
+			setPC(t, db, sid, func(e *data.Encounter) { e.LockedAt = &now })
+		}, "entitlement_required"},
+		"inactive encounter": {func(t *testing.T, db *fake.DB, sid string) {
+			setPC(t, db, sid, func(e *data.Encounter) { e.InactiveAt = &now })
+		}, "item_inactive"},
+		"inactive session": {func(t *testing.T, db *fake.DB, sid string) {
+			var discard data.Session
+			err := db.Fake(data.CollectionSessions).FindOneAndUpdate(context.Background(), bson.D{{Key: "_id", Value: sid}},
+				bson.D{{Key: "$set", Value: bson.D{{Key: "inactive_at", Value: now}}}}, &discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}, "item_inactive"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			r, db, sid := changeTable(t)
+			tt.arrange(t, db, sid)
+
+			code, b := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+
+			if code != http.StatusForbidden || b["code"] != tt.code {
+				t.Fatalf("= %d %v, want 403 %s", code, b, tt.code)
+			}
+		})
+	}
+}
+
+func TestRemovingOrDemotingAPlayerCancelsTheirPendingRequests(t *testing.T) {
+	steps := map[string]func(r http.Handler, sid string) *httptest.ResponseRecorder{
+		"removed": func(r http.Handler, sid string) *httptest.ResponseRecorder {
+			return callAs(r, "user-ok", "DELETE", "/sessions/"+sid+"/members/u-2", "")
+		},
+		"demoted": func(r http.Handler, sid string) *httptest.ResponseRecorder {
+			return callAs(r, "user-ok", "PATCH", "/sessions/"+sid+"/members/u-2", `{"role":"observer"}`)
+		},
+		"left": func(r http.Handler, sid string) *httptest.ResponseRecorder {
+			return callAs(r, "user-two", "POST", "/sessions/"+sid+"/leave", "")
+		},
+	}
+	for name, step := range steps {
+		t.Run(name, func(t *testing.T) {
+			r, _, sid := changeTable(t)
+			_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+
+			if w := step(r, sid); w.Code >= 300 {
+				t.Fatalf("%s = %d %s", name, w.Code, w.Body)
+			}
+
+			if got := requests(t, r, "user-ok", sid, "?status=cancelled"); len(got) != 1 || got[0]["id"] != idOf(req) {
+				t.Fatalf("cancelled = %v, want the player's request", got)
+			}
+			if code, _ := approve(r, "user-ok", sid, idOf(req)); code != http.StatusConflict {
+				t.Errorf("approving a cancelled request = %d, want 409", code)
+			}
+		})
+	}
+}
+
+func TestChangeRequestResponsesCarryNoEncounterData(t *testing.T) {
+	r, _, sid := changeTable(t)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+	approved := callAs(r, "user-ok", "POST", crPath(sid, idOf(req), "approve"), "")
+	_, second := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":3}}`)
+	rejected := callAs(r, "user-ok", "POST", crPath(sid, idOf(second), "reject"), `{"reason":"no"}`)
+	list := callAs(r, "user-ok", "GET", crPath(sid), "")
+
+	for name, body := range map[string]string{"submit": mustJSON(req), "approve": approved.Body.String(), "reject": rejected.Body.String(), "list": list.Body.String()} {
+		for _, key := range []string{`"combatants"`, `"notes"`, `"turn_queue"`, `"initiative"`, `"controller_user_ids"`} {
+			if strings.Contains(body, key) {
+				t.Errorf("%s response carries %s: %s", name, key, body)
+			}
+		}
+	}
+}
+
+func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+func TestRejectionReasonsAreCleanedAndCapped(t *testing.T) {
+	r, _, sid := changeTable(t)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+
+	long := callAs(r, "user-ok", "POST", crPath(sid, idOf(req), "reject"), `{"reason":"`+strings.Repeat("x", 501)+`"}`)
+	clean := callAs(r, "user-ok", "POST", crPath(sid, idOf(req), "reject"), `{"reason":"too\u0000 risky\u001b\n"}`)
+
+	if long.Code != http.StatusUnprocessableEntity {
+		t.Errorf("a 501 character reason = %d, want 422", long.Code)
+	}
+	if b := decodeBody(t, clean); clean.Code != 200 || b["reason"] != "too risky" {
+		t.Errorf("reason = %v (%d), want control characters stripped", b["reason"], clean.Code)
+	}
+}

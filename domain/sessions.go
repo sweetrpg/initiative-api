@@ -89,14 +89,15 @@ type SessionView struct {
 
 // Sessions implements session membership and its rules.
 type Sessions struct {
-	repo *data.Sessions
-	enc  *data.Encounters
-	now  func() time.Time
+	repo    *data.Sessions
+	enc     *data.Encounters
+	changes *data.ChangeRequests
+	now     func() time.Time
 }
 
 // NewSessions builds the service on db.
 func NewSessions(db store.Database) *Sessions {
-	return &Sessions{repo: data.NewSessions(db), enc: data.NewEncounters(db), now: func() time.Time { return time.Now().UTC() }}
+	return &Sessions{repo: data.NewSessions(db), enc: data.NewEncounters(db), changes: data.NewChangeRequests(db), now: func() time.Time { return time.Now().UTC() }}
 }
 
 // Viewer returns how actor may see the session's encounters; see data.Sessions.AuthorizeView.
@@ -569,5 +570,10 @@ func (s *Sessions) Blocks(ctx context.Context, actor, id string, q data.Query) (
 func (s *Sessions) scrubControllers(ctx context.Context, d data.Decision, user string) {
 	if err := s.enc.ScrubController(ctx, d, user); err != nil {
 		slog.WarnContext(ctx, "scrubbing a member's combatant controls failed; admission scrubs again", "session", d.SessionID(), "user", user, "error", err)
+	}
+	// Their pending change requests can no longer be approved (approval needs a current player
+	// controller), so close them instead of leaving them in the GM's queue.
+	if err := s.changes.CancelPending(ctx, d, user); err != nil {
+		slog.WarnContext(ctx, "cancelling a member's pending change requests failed", "session", d.SessionID(), "user", user, "error", err)
 	}
 }

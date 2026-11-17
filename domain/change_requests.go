@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/store"
@@ -29,11 +30,19 @@ type ChangeNotifier interface {
 	ChangeDecided(ctx context.Context, req data.ChangeRequest)
 }
 
-// ChangeInput is what a player proposes: health values to set, and/or a replacement conditions
-// list (non-nil, possibly empty).
+// maxRejectReason bounds a rejection reason, in runes.
+const maxRejectReason = 500
+
+// ChangeInput is what a player proposes: health values to set, and/or conditions to add (or
+// update by name) and remove by name.
 type ChangeInput struct {
-	Health     map[string]int
-	Conditions *[]data.Condition
+	Health           map[string]int
+	AddConditions    []data.Condition
+	RemoveConditions []string
+}
+
+func (in ChangeInput) empty() bool {
+	return len(in.Health) == 0 && len(in.AddConditions) == 0 && len(in.RemoveConditions) == 0
 }
 
 // ChangeRequests implements change requests: submit, list, approve, and reject.
@@ -51,7 +60,9 @@ func NewChangeRequests(db store.Database, encounters *Encounters, sessions *Sess
 }
 
 // applyChange returns c with in applied. Only health and conditions can change here, so a change
-// request can never alter initiative, notes, visibility, or controllers.
+// request can never alter initiative, notes, visibility, or controllers. Health values are set;
+// conditions change by name against c as it is now: removals first, then each added condition
+// replaces the one with its name or is appended. Applying it twice gives the same result.
 func applyChange(c data.Combatant, in ChangeInput) data.Combatant {
 	if len(in.Health) > 0 {
 		merged := maps.Clone(c.Health)
@@ -61,13 +72,43 @@ func applyChange(c data.Combatant, in ChangeInput) data.Combatant {
 		maps.Copy(merged, in.Health)
 		c.Health = merged
 	}
-	if in.Conditions != nil {
-		c.Conditions = slices.Clone(*in.Conditions)
-		if c.Conditions == nil {
-			c.Conditions = []data.Condition{}
+	if len(in.AddConditions) > 0 || len(in.RemoveConditions) > 0 {
+		conds := slices.DeleteFunc(slices.Clone(c.Conditions), func(x data.Condition) bool {
+			return slices.Contains(in.RemoveConditions, x.Name)
+		})
+		for _, add := range in.AddConditions {
+			if i := slices.IndexFunc(conds, func(x data.Condition) bool { return x.Name == add.Name }); i >= 0 {
+				conds[i] = add
+			} else {
+				conds = append(conds, add)
+			}
 		}
+		if conds == nil {
+			conds = []data.Condition{}
+		}
+		c.Conditions = conds
 	}
 	return c
+}
+
+// checkInput validates the shape of a proposal before any encounter is read.
+func checkInput(in ChangeInput) error {
+	if in.empty() {
+		return invalid("a change request needs health values or conditions")
+	}
+	if len(in.AddConditions) > data.MaxConditions || len(in.RemoveConditions) > data.MaxConditions {
+		return invalid("at most %d conditions can be added or removed in one request", data.MaxConditions)
+	}
+	for i, name := range in.RemoveConditions {
+		if strings.TrimSpace(name) == "" {
+			return invalid("a condition to remove needs a name")
+		}
+		if err := data.CheckText("condition name", name, data.MaxNameLen); err != nil {
+			return err
+		}
+		in.RemoveConditions[i] = name
+	}
+	return nil
 }
 
 // Submit records the player's change request for a combatant they control. The caller must hold
@@ -75,8 +116,13 @@ func applyChange(c data.Combatant, in ChangeInput) data.Combatant {
 // removed member, and a stale or demoted controller are all refused. The change is validated
 // against the game system at submission as well as at approval.
 func (s *ChangeRequests) Submit(ctx context.Context, actor, sessionID, encounterID, combatantID string, in ChangeInput) (data.ChangeRequest, error) {
-	if len(in.Health) == 0 && in.Conditions == nil {
-		return data.ChangeRequest{}, invalid("a change request needs health values or conditions")
+	if err := checkInput(in); err != nil {
+		return data.ChangeRequest{}, err
+	}
+	if sess, _, _, err := s.sessions.as(ctx, actor, sessionID, ActView); err != nil {
+		return data.ChangeRequest{}, err
+	} else if sess.InactiveAt != nil {
+		return data.ChangeRequest{}, data.ErrInactive
 	}
 	v, err := s.sessions.Viewer(ctx, actor, sessionID)
 	if err != nil {
@@ -102,11 +148,12 @@ func (s *ChangeRequests) Submit(ctx context.Context, actor, sessionID, encounter
 	case enc.InactiveAt != nil:
 		return data.ChangeRequest{}, data.ErrInactive
 	}
-	if err := s.encounter.repo.ValidateCombatantChange(ctx, enc.GameSystemID, applyChange(c, in)); err != nil {
+	if err := s.encounter.repo.ValidateCombatantChange(ctx, enc.GameSystemID, c, applyChange(c, in)); err != nil {
 		return data.ChangeRequest{}, err
 	}
 	req, err := s.repo.Create(ctx, v, data.ChangeRequest{
-		EncounterID: enc.ID, CombatantID: c.ID, Health: in.Health, Conditions: in.Conditions, BaseRevision: enc.Revision,
+		EncounterID: enc.ID, CombatantID: c.ID, Health: in.Health, AddConditions: in.AddConditions,
+		RemoveConditions: in.RemoveConditions, BaseRevision: enc.Revision,
 	})
 	if err != nil {
 		return data.ChangeRequest{}, err
@@ -157,7 +204,10 @@ func (s *ChangeRequests) Approve(ctx context.Context, actor, sessionID, encounte
 	if err != nil {
 		return data.ChangeRequest{}, err
 	}
-	if req.Status != data.ChangePending {
+	// An approval this caller started but never finished (a crash, or a failed reopen) is
+	// completed by approving again; anything else already decided is a conflict.
+	unfinished := req.Status == data.ChangeApproved && req.DecidedBy == actor && req.AppliedRevision == 0
+	if req.Status != data.ChangePending && !unfinished {
 		return req, data.ErrConflict
 	}
 	next, enc, err := s.build(ctx, viewer, d, req)
@@ -173,7 +223,8 @@ func (s *ChangeRequests) Approve(ctx context.Context, actor, sessionID, encounte
 	applied, err := s.write(ctx, viewer, d, req, next, enc)
 	if err != nil {
 		if rerr := s.repo.Reopen(ctx, d, encounterID, req.ID); rerr != nil {
-			slog.ErrorContext(ctx, "could not reopen a change request after a failed approval", "request", req.ID, "error", rerr)
+			slog.ErrorContext(ctx, "could not reopen a change request after a failed approval; it stays approved without a change until its approver approves again",
+				"request", req.ID, "session", sessionID, "encounter", encounterID, "error", rerr)
 		}
 		return data.ChangeRequest{}, err
 	}
@@ -228,8 +279,8 @@ func (s *ChangeRequests) build(ctx context.Context, v data.Viewer, d data.Decisi
 	case m.Role != data.RolePlayer:
 		return nil, enc, fmt.Errorf("%w: the requester is no longer a player", ErrChangeStale)
 	}
-	changed := applyChange(c, ChangeInput{Health: req.Health, Conditions: req.Conditions})
-	if err := s.encounter.repo.ValidateCombatantChange(ctx, enc.GameSystemID, changed); err != nil {
+	changed := applyChange(c, ChangeInput{Health: req.Health, AddConditions: req.AddConditions, RemoveConditions: req.RemoveConditions})
+	if err := s.encounter.repo.ValidateCombatantChange(ctx, enc.GameSystemID, c, changed); err != nil {
 		if errors.Is(err, data.ErrInvalid) {
 			return nil, enc, fmt.Errorf("%w: %s", ErrChangeStale, strings.TrimPrefix(err.Error(), data.ErrInvalid.Error()+": "))
 		}
@@ -243,11 +294,16 @@ func (s *ChangeRequests) build(ctx context.Context, v data.Viewer, d data.Decisi
 // Reject settles a pending request with a reason; the combatant is unchanged and the requester
 // sees the reason.
 func (s *ChangeRequests) Reject(ctx context.Context, actor, sessionID, encounterID, requestID, reason string) (data.ChangeRequest, error) {
-	reason = strings.TrimSpace(reason)
+	reason = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, reason))
 	if reason == "" {
 		return data.ChangeRequest{}, invalid("a reason is required to reject a change request")
 	}
-	if err := data.CheckText("reason", reason, data.MaxNotesLen); err != nil {
+	if err := data.CheckText("reason", reason, maxRejectReason); err != nil {
 		return data.ChangeRequest{}, err
 	}
 	_, _, d, err := s.sessions.as(ctx, actor, sessionID, ActManageMembers)

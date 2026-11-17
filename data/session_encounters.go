@@ -167,12 +167,14 @@ func withoutController(cs []Combatant, userID string) ([]Combatant, bool) {
 	return out, changed
 }
 
-// ValidateCombatantChange checks c, a combatant as it would be after an edit, against the same
-// rules a write enforces: the combatant's own fields, and its health against the game system's
-// definition (the default system when the encounter's has none).
-func (r *Encounters) ValidateCombatantChange(ctx context.Context, gameSystemID string, c Combatant) error {
-	if err := validateCombatant(c); err != nil {
+// ValidateCombatantChange checks after, a combatant as it would be once an edit applies to before
+// (the combatant as stored), against the rules a write enforces: its own fields, and its health
+// against the game system's definition (the default system when the encounter's has none). Health
+// is checked only when the edit changed it, so a stored value that a later definition change made
+// invalid does not block an unrelated edit.
+func (r *Encounters) ValidateCombatantChange(ctx context.Context, gameSystemID string, before, after Combatant) error {
+	if err := validateCombatant(after); err != nil {
 		return err
 	}
-	return r.checkHealth(ctx, gameSystemID, []Combatant{c}, nil)
+	return r.checkHealth(ctx, gameSystemID, []Combatant{after}, []Combatant{before})
 }

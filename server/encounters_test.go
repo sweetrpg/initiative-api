@@ -367,7 +367,7 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 		"GET /sessions/:id/encounters/:eid":                 func() call { return call{"GET", sess, "", "user-two", true} },
 		"GET /sessions/:id/encounters/:eid/combatants/:cid": func() call { return call{"GET", sess + "/combatants/pc", "", "user-two", true} },
 		"POST /sessions/:id/encounters/:eid/combatants/:cid/change-requests": func() call {
-			return call{"POST", sess + "/combatants/pc/change-requests", `{"conditions":[{"name":"prone"}]}`, "user-two", false}
+			return call{"POST", sess + "/combatants/pc/change-requests", `{"conditions":{"add":[{"name":"prone"}]}}`, "user-two", false}
 		},
 		"GET /sessions/:id/encounters/:eid/change-requests": func() call { return call{"GET", sess + "/change-requests", "", "user-ok", false} },
 		"POST /sessions/:id/encounters/:eid/change-requests/:rid/approve": func() call {

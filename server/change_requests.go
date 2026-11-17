@@ -24,8 +24,12 @@ func setupChangeRequestHandlers(g *gin.RouterGroup, svc *domain.ChangeRequests) 
 }
 
 type changeBody struct {
-	Health     map[string]int    `json:"health"`
-	Conditions *[]data.Condition `json:"conditions"`
+	Health map[string]int `json:"health"`
+	// Conditions change by name: add sets (adds or updates) conditions, remove drops them.
+	Conditions struct {
+		Add    []data.Condition `json:"add"`
+		Remove []string         `json:"remove"`
+	} `json:"conditions"`
 }
 
 func (h changeRequestHandlers) submit(c *gin.Context) {
@@ -34,7 +38,7 @@ func (h changeRequestHandlers) submit(c *gin.Context) {
 		return
 	}
 	req, err := h.svc.Submit(c.Request.Context(), authz.Viewer(c), c.Param("id"), c.Param("eid"), c.Param("cid"),
-		domain.ChangeInput{Health: b.Health, Conditions: b.Conditions})
+		domain.ChangeInput{Health: b.Health, AddConditions: b.Conditions.Add, RemoveConditions: b.Conditions.Remove})
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -48,8 +52,8 @@ func (h changeRequestHandlers) list(c *gin.Context) {
 		return
 	}
 	status := c.Query("status")
-	if status != "" && status != data.ChangePending && status != data.ChangeApproved && status != data.ChangeRejected {
-		badRequest(c, "status must be pending, approved or rejected")
+	if status != "" && status != data.ChangePending && status != data.ChangeApproved && status != data.ChangeRejected && status != data.ChangeCancelled {
+		badRequest(c, "status must be pending, approved, rejected or cancelled")
 		return
 	}
 	p, err := h.svc.List(c.Request.Context(), authz.Viewer(c), c.Param("id"), c.Param("eid"), status, q)
