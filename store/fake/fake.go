@@ -480,10 +480,49 @@ func matchElem(d bson.M, e bson.E) (bool, error) {
 		}
 		return e.Key == "$and", nil
 	}
+	if strings.Contains(e.Key, ".") {
+		return matchPath(d, e)
+	}
 	if ops, ok := e.Value.(bson.D); ok && len(ops) > 0 && len(ops[0].Key) > 0 && ops[0].Key[0] == '$' {
 		return matchOps(d[e.Key], ops)
 	}
 	return eq(d[e.Key], e.Value), nil
+}
+
+// matchPath matches a dotted key (combatants.controller_user_ids) the way Mongo does: the path
+// is followed through nested documents and arrays of documents, and the condition holds if any
+// value found satisfies it.
+func matchPath(d bson.M, e bson.E) (bool, error) {
+	for _, have := range valuesAt(d, strings.Split(e.Key, ".")) {
+		if ops, ok := e.Value.(bson.D); ok && len(ops) > 0 && len(ops[0].Key) > 0 && ops[0].Key[0] == '$' {
+			m, err := matchOps(have, ops)
+			if err != nil || m {
+				return m, err
+			}
+		} else if eq(have, e.Value) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func valuesAt(v any, path []string) []any {
+	if len(path) == 0 {
+		return []any{v}
+	}
+	switch x := v.(type) {
+	case bson.M:
+		if next, ok := x[path[0]]; ok {
+			return valuesAt(next, path[1:])
+		}
+	case bson.A:
+		var out []any
+		for _, el := range x {
+			out = append(out, valuesAt(el, path)...)
+		}
+		return out
+	}
+	return nil
 }
 
 func eq(have, want any) bool {

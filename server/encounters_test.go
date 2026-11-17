@@ -356,12 +356,15 @@ func TestEveryEncounterRouteAnswersThroughTheViewBuilder(t *testing.T) {
 		"GET /sessions/:id/encounters":                      func() call { return call{"GET", "/sessions/" + sid + "/encounters", "", "user-two", true} },
 		"GET /sessions/:id/encounters/:eid":                 func() call { return call{"GET", sess, "", "user-two", true} },
 		"GET /sessions/:id/encounters/:eid/combatants/:cid": func() call { return call{"GET", sess + "/combatants/pc", "", "user-two", true} },
+		"PUT /sessions/:id/encounters/:eid/combatants/:cid/controllers": func() call {
+			return call{"PUT", sess + "/combatants/orc/controllers", `{"controller_user_ids":["u-2"],"revision":3}`, "user-ok", true}
+		},
 	}
 	order := []string{"GET /encounters", "POST /encounters", "GET /encounters/:id", "PATCH /encounters/:id", "POST /encounters/:id/combatants",
 		"PATCH /encounters/:id/combatants/:cid", "DELETE /encounters/:id/combatants/:cid", "POST /encounters/:id/combatants/:cid/restore",
 		"POST /encounters/:id/start", "POST /encounters/:id/advance", "POST /encounters/:id/back", "POST /encounters/:id/end", "POST /encounters/:id/reset",
 		"POST /rosters/:id/encounters", "POST /encounters/:id/save-as-roster", "GET /sessions/:id/encounters", "GET /sessions/:id/encounters/:eid",
-		"GET /sessions/:id/encounters/:eid/combatants/:cid", "DELETE /encounters/:id"}
+		"GET /sessions/:id/encounters/:eid/combatants/:cid", "PUT /sessions/:id/encounters/:eid/combatants/:cid/controllers", "DELETE /encounters/:id"}
 
 	for _, route := range r.(*gin.Engine).Routes() {
 		if !strings.Contains(route.Path, "encounters") {

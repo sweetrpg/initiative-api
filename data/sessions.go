@@ -517,6 +517,29 @@ func (r *Sessions) Decide(ctx context.Context, d Decision, requestID, status, ro
 	return jr, ErrNotFound
 }
 
+// PendingUser returns the user who made the still-pending request requestID, so work that must
+// precede the decision (scrubbing stale combatant controls) can run before the request settles.
+// A request that is not pending is ErrNotFound: a retried approval of a member who already has
+// controls must not be scrubbed.
+func (r *Sessions) PendingUser(ctx context.Context, d Decision, requestID string) (string, error) {
+	if err := d.require(relApprove); err != nil {
+		return "", err
+	}
+	id, ok := cleanID(requestID)
+	if !ok {
+		return "", ErrNotFound
+	}
+	var jr JoinRequest
+	filter := append(bson.D{{Key: "_id", Value: id}, {Key: "status", Value: RequestPending}}, sessionScope(d.session)...)
+	if err := r.requests.FindOne(ctx, filter, &jr); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return jr.UserID, nil
+}
+
 // DropRequest removes userID's request, if any.
 func (r *Sessions) DropRequest(ctx context.Context, d Decision, userID string) error {
 	if err := pairOK(d, relEdit, userID); err != nil {
