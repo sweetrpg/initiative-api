@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -65,17 +66,50 @@ func checkTheme(ctx context.Context, themes *data.Owned[data.Theme, *data.Theme]
 // Create stores enc as owner's new draft encounter. The name is required, the game system must
 // exist, and any combatants supplied get server-assigned IDs.
 func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.Encounter) (data.Encounter, error) {
+	// An encounter joins a session only through CreateInSession, which the session's own rules
+	// authorize; a caller-supplied session id here is refused.
+	if enc.SessionID != "" {
+		return data.Encounter{}, invalid("an encounter cannot be created inside a session here")
+	}
+	return s.create(ctx, owner, actor, enc, requireSystem)
+}
+
+// CreateInSession stores enc as a new draft encounter of the grant's session, owned by the GM, and
+// returns it as the grantee sees it. The grant (Sessions.AuthorizeEncounterCreate) carries the
+// decisions: who may create, the limit, and which game systems the owner is entitled to. Two
+// creates can both pass the limit check, so the new encounter is recounted after the insert and
+// retracted if it put the owner over the limit.
+// ponytail: concurrent creates near the limit may all be retracted; none is ever kept over it.
+func (s *Encounters) CreateInSession(ctx context.Context, g EncounterGrant, enc data.Encounter) (EncounterView, error) {
+	enc.SessionID = g.sessionID
+	created, err := s.create(ctx, g.Owner, g.actor, enc, g.systemOK)
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.repo.CountAll(ctx, g.Owner)
+	if err == nil && n > int64(g.limit) {
+		err = &EntitlementError{Key: KeySavedEncounters, Limit: g.limit}
+	}
+	if err != nil {
+		// The encounter must not stay live over the limit while the caller is told it failed: a
+		// retry would add another, and the limit reconciler never lists session encounters. If it
+		// cannot be retracted, report that (a server error) instead of the limit.
+		if rerr := s.repo.RetractNew(ctx, g.decision, created.ID); rerr != nil {
+			slog.ErrorContext(ctx, "retracting an over-limit session encounter failed", "encounter", created.ID, "error", rerr)
+			return nil, fmt.Errorf("could not undo a session encounter created over the limit: %w", rerr)
+		}
+		return nil, err
+	}
+	return s.render(ctx, created, g.viewer)
+}
+
+func (s *Encounters) create(ctx context.Context, owner, actor string, enc data.Encounter, systemOK func(context.Context, string) error) (data.Encounter, error) {
 	if err := checkTheme(ctx, s.themes, owner, enc.ThemeID); err != nil {
 		return data.Encounter{}, err
 	}
 	enc.Name = strings.TrimSpace(enc.Name)
 	if enc.Name == "" {
 		return data.Encounter{}, invalid("encounter name is required")
-	}
-	// An encounter joins a session only through a path that authorizes the caller as that
-	// session's GM; until one exists, a caller-supplied session id is refused.
-	if enc.SessionID != "" {
-		return data.Encounter{}, invalid("an encounter cannot be created inside a session here")
 	}
 	_, err := s.systems.Get(ctx, enc.GameSystemID)
 	if errors.Is(err, data.ErrNotFound) {
@@ -84,7 +118,7 @@ func (s *Encounters) Create(ctx context.Context, owner, actor string, enc data.E
 	if err != nil {
 		return data.Encounter{}, err
 	}
-	if err := requireSystem(ctx, enc.GameSystemID); err != nil {
+	if err := systemOK(ctx, enc.GameSystemID); err != nil {
 		return data.Encounter{}, err
 	}
 	combatants := make([]data.Combatant, 0, len(enc.Combatants))
@@ -112,9 +146,12 @@ func (s *Encounters) List(ctx context.Context, owner string, q data.Query) (data
 	return s.repo.List(ctx, owner, q)
 }
 
-// Count returns how many encounters owner holds.
+// Count returns how many live encounters owner holds, private and in a session alike: both count
+// against the saved-encounters limit. The limit reconciler's item list is the owner's private
+// encounters only (data.NewEncounters narrows reads to session_id nil), so an owner over a reduced
+// limit through session encounters clears it by deleting some or by ending the session.
 func (s *Encounters) Count(ctx context.Context, owner string) (int64, error) {
-	return s.repo.Count(ctx, owner, nil)
+	return s.repo.CountAll(ctx, owner)
 }
 
 // UpdateSettings sets the encounter's settings (name, game_system_id, ordering, tie_breaker,

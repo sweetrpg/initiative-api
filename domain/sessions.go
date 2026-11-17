@@ -26,23 +26,27 @@ type Action string
 
 // Session actions.
 const (
-	ActView          Action = "view"
-	ActInvite        Action = "invite"
-	ActDecideRequest Action = "decide_request"
-	ActManageMembers Action = "manage_members"
-	ActBlock         Action = "block"
-	ActLeave         Action = "leave"
-	ActDelete        Action = "delete_session"
+	ActView            Action = "view"
+	ActInvite          Action = "invite"
+	ActDecideRequest   Action = "decide_request"
+	ActManageMembers   Action = "manage_members"
+	ActBlock           Action = "block"
+	ActLeave           Action = "leave"
+	ActDelete          Action = "delete_session"
+	ActUpdate          Action = "update_session"
+	ActCreateEncounter Action = "create_encounter"
 )
 
 var allowed = map[Action][]string{
-	ActView:          {data.RoleGM, data.RoleCoGM, data.RolePlayer, data.RoleObserver},
-	ActInvite:        {data.RoleGM, data.RoleCoGM},
-	ActDecideRequest: {data.RoleGM, data.RoleCoGM},
-	ActManageMembers: {data.RoleGM, data.RoleCoGM},
-	ActBlock:         {data.RoleGM, data.RoleCoGM},
-	ActLeave:         {data.RoleCoGM, data.RolePlayer, data.RoleObserver},
-	ActDelete:        {data.RoleGM},
+	ActView:            {data.RoleGM, data.RoleCoGM, data.RolePlayer, data.RoleObserver},
+	ActInvite:          {data.RoleGM, data.RoleCoGM},
+	ActDecideRequest:   {data.RoleGM, data.RoleCoGM},
+	ActManageMembers:   {data.RoleGM, data.RoleCoGM},
+	ActBlock:           {data.RoleGM, data.RoleCoGM},
+	ActLeave:           {data.RoleCoGM, data.RolePlayer, data.RoleObserver},
+	ActDelete:          {data.RoleGM},
+	ActUpdate:          {data.RoleGM},
+	ActCreateEncounter: {data.RoleGM, data.RoleCoGM},
 }
 
 // Allowed reports whether a member holding role may take action.
@@ -71,7 +75,10 @@ var ErrOwnerLimitsUnknown = errors.New("domain: session owner entitlements not r
 const ownerLimitsRefreshEvery = time.Minute
 
 // sessionKeys are the owner entitlements recorded on a session.
-var sessionKeys = []string{KeyMembersPerSession}
+var sessionKeys = []string{KeyMembersPerSession, KeySavedEncounters}
+
+// sessionFlags are the owner flags recorded on a session beside the limits.
+var sessionFlags = []string{KeyGameSystemsExtra}
 
 // OwnerLimit returns the owner's recorded value for key, or ErrOwnerLimitsUnknown if none yet.
 func OwnerLimit(sess data.Session, key string) (int, error) {
@@ -86,6 +93,18 @@ func OwnerLimit(sess data.Session, key string) (int, error) {
 type SessionView struct {
 	data.Session
 	Role string `json:"role"`
+	// AllowCoGMEncounters is the "allow a co-GM to create an encounter" setting. It is set only for
+	// the GM and co-GMs; players and observers never see it.
+	AllowCoGMEncounters *bool `json:"allow_co_gm_create_encounter,omitempty"`
+}
+
+// viewOf builds the view of sess for a member holding role.
+func viewOf(sess data.Session, role string) SessionView {
+	v := SessionView{Session: sess, Role: role}
+	if role == data.RoleGM || role == data.RoleCoGM {
+		v.AllowCoGMEncounters = &sess.AllowCoGMCreateEncounter
+	}
+	return v
 }
 
 // Sessions implements session membership and its rules.
@@ -93,7 +112,10 @@ type Sessions struct {
 	repo    *data.Sessions
 	enc     *data.Encounters
 	changes *data.ChangeRequests
-	now     func() time.Time
+	// OwnerRecordMaxAge is how old the GM's recorded entitlements may be when a co-GM acts on
+	// them (the configured OWNER_ENTITLEMENTS_MAX_AGE). Zero means seven days.
+	OwnerRecordMaxAge time.Duration
+	now               func() time.Time
 }
 
 // NewSessions builds the service on db.
@@ -110,9 +132,14 @@ func (s *Sessions) Viewer(ctx context.Context, actor, sessionID string) (data.Vi
 // Sessions beyond the GM's entitled count are refused with *EntitlementError; inactive sessions
 // count, so a GM over a reduced limit cannot create.
 func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > maxSessionName {
-		return SessionView{}, invalid("session name is required and at most %d characters", maxSessionName)
+	return s.CreateWith(ctx, actor, name, false)
+}
+
+// CreateWith is Create with the co-GM encounter-creation setting chosen up front.
+func (s *Sessions) CreateWith(ctx context.Context, actor, name string, allowCoGMCreate bool) (SessionView, error) {
+	name, err := cleanSessionName(name)
+	if err != nil {
+		return SessionView{}, err
 	}
 	chk, ok := ctx.Value(checkerKey{}).(Checker)
 	if !ok {
@@ -137,7 +164,7 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 	if err != nil {
 		return SessionView{}, err
 	}
-	sess := data.Session{Name: name}
+	sess := data.Session{Name: name, AllowCoGMCreateEncounter: allowCoGMCreate}
 	if err := s.repo.Open(ctx, actor, id, &sess); err != nil {
 		// Frees the mint slot; garbage collection covers a failure here.
 		if eerr := s.endSession(ctx, id); eerr != nil {
@@ -145,7 +172,50 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 		}
 		return SessionView{}, err
 	}
-	return SessionView{Session: sess, Role: data.RoleGM}, nil
+	return viewOf(sess, data.RoleGM), nil
+}
+
+func cleanSessionName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len([]rune(name)) > maxSessionName {
+		return "", invalid("session name is required and at most %d characters", maxSessionName)
+	}
+	return name, nil
+}
+
+// SessionChanges are the settings the GM may change on a session; nil leaves one as it is.
+type SessionChanges struct {
+	Name                *string
+	AllowCoGMEncounters *bool
+}
+
+// Update changes the session's settings at rev. Only the GM may: the relation asked of OpenFGA is
+// gm and the write is scoped to the session's owner, so a co-GM cannot change the setting that
+// grants co-GMs a power.
+func (s *Sessions) Update(ctx context.Context, actor, id string, rev int64, ch SessionChanges) (SessionView, error) {
+	_, m, d, err := s.as(ctx, actor, id, ActUpdate)
+	if err != nil {
+		return SessionView{}, err
+	}
+	set := map[string]any{}
+	if ch.Name != nil {
+		name, err := cleanSessionName(*ch.Name)
+		if err != nil {
+			return SessionView{}, err
+		}
+		set["name"] = name
+	}
+	if ch.AllowCoGMEncounters != nil {
+		set["allow_co_gm_create_encounter"] = *ch.AllowCoGMEncounters
+	}
+	if len(set) == 0 {
+		return SessionView{}, invalid("nothing to update")
+	}
+	sess, err := s.repo.Update(ctx, d, rev, set)
+	if err != nil {
+		return SessionView{}, err
+	}
+	return viewOf(sess, m.Role), nil
 }
 
 // actionRelation is the OpenFGA relation on the session each action needs. The role rules in
@@ -153,8 +223,10 @@ func (s *Sessions) Create(ctx context.Context, actor, name string) (SessionView,
 var actionRelation = map[Action]string{
 	ActView: "can_view", ActLeave: "can_view",
 	ActInvite: "can_edit", ActBlock: "can_edit", ActManageMembers: "can_edit",
-	ActDecideRequest: "can_approve",
-	ActDelete:        "gm",
+	ActDecideRequest:   "can_approve",
+	ActDelete:          "gm",
+	ActUpdate:          "gm",
+	ActCreateEncounter: "can_edit",
 }
 
 // as authorizes actor for action a on session id with auth-api (OpenFGA), then returns the
@@ -193,25 +265,29 @@ func (s *Sessions) refreshOwnerLimits(ctx context.Context, d data.Decision, sess
 	if !ok {
 		return sess
 	}
-	limits := make(map[string]int, len(sessionKeys))
-	for _, key := range sessionKeys {
+	limits, flags := make(map[string]int, len(sessionKeys)), make(map[string]bool, len(sessionFlags))
+	for _, key := range append(slices.Clone(sessionKeys), sessionFlags...) {
 		res, err := chk.Check(ctx, key, entitlements.FailOpen)
 		if err != nil || res.Degraded || res.Stale {
 			slog.WarnContext(ctx, "session owner entitlements not refreshed", "session", sess.ID, "key", key, "error", err)
 			return sess
 		}
-		limits[key] = res.Limit
+		if slices.Contains(sessionFlags, key) {
+			flags[key] = res.Flag
+		} else {
+			limits[key] = res.Limit
+		}
 	}
 	fresh := sess.OwnerLimitsAt != nil && s.now().Sub(*sess.OwnerLimitsAt) < ownerLimitsRefreshEvery
-	if fresh && maps.Equal(limits, sess.OwnerLimits) {
+	if fresh && maps.Equal(limits, sess.OwnerLimits) && maps.Equal(flags, sess.OwnerFlags) {
 		return sess
 	}
-	if err := s.repo.RecordOwnerLimits(ctx, d, limits); err != nil {
+	if err := s.repo.RecordOwnerLimits(ctx, d, limits, flags); err != nil {
 		slog.WarnContext(ctx, "session owner entitlements not recorded", "session", sess.ID, "error", err)
 		return sess
 	}
 	now := s.now()
-	sess.OwnerLimits, sess.OwnerLimitsAt = limits, &now
+	sess.OwnerLimits, sess.OwnerFlags, sess.OwnerLimitsAt = limits, flags, &now
 	return sess
 }
 
@@ -222,7 +298,7 @@ func (s *Sessions) Items() Limited { return s.repo.Limits() }
 // Get returns the session with actor's role. Only members may read it.
 func (s *Sessions) Get(ctx context.Context, actor, id string) (SessionView, error) {
 	sess, m, _, err := s.as(ctx, actor, id, ActView)
-	return SessionView{Session: sess, Role: m.Role}, err
+	return viewOf(sess, m.Role), err
 }
 
 // List returns the sessions actor belongs to.
@@ -247,7 +323,7 @@ func (s *Sessions) List(ctx context.Context, actor string, q data.Query) (data.P
 		if err != nil {
 			return data.Page[SessionView]{}, err
 		}
-		out.Items = append(out.Items, SessionView{Session: sess, Role: m.Role})
+		out.Items = append(out.Items, viewOf(sess, m.Role))
 	}
 	return out, nil
 }

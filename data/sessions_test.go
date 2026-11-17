@@ -203,7 +203,7 @@ func TestEveryDataCallRefusesTheZeroDecision(t *testing.T) {
 		"AddBlock":     func() error { return r.AddBlock(ctx, d, "u1") },
 		"RemoveBlock":  func() error { return r.RemoveBlock(ctx, d, "u1") },
 		"DropSession":  func() error { return r.DropSession(ctx, d) },
-		"OwnerLimits":  func() error { return r.RecordOwnerLimits(ctx, d, nil) },
+		"OwnerLimits":  func() error { return r.RecordOwnerLimits(ctx, d, nil, nil) },
 	}
 	for name, call := range calls {
 		if err := call(); !errors.Is(err, ErrForbidden) {

@@ -155,6 +155,15 @@ func (r *Encounters) Create(ctx context.Context, ownerUserID, actingUserID strin
 	return r.Owned.Create(ctx, ownerUserID, actingUserID, e)
 }
 
+// CountAll returns how many live encounters owner holds, private and in a session alike. Both
+// count against the saved-encounters limit.
+func (r *Encounters) CountAll(ctx context.Context, owner string) (int64, error) {
+	if err := checkUserID(owner); err != nil {
+		return 0, err
+	}
+	return r.c.CountDocuments(ctx, scope(owner))
+}
+
 // Update validates the enumerated values in set, then applies it with the revision check. A change
 // of game system also checks every combatant's health against the new system.
 func (r *Encounters) Update(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (Encounter, error) {

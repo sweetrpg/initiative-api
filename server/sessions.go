@@ -20,6 +20,7 @@ func setupSessionHandlers(g *gin.RouterGroup, svc *domain.Sessions) {
 	g.GET("/sessions", h.list)
 	g.POST("/sessions/join", h.join)
 	g.GET("/sessions/:id", h.get)
+	g.PATCH("/sessions/:id", h.update)
 	g.DELETE("/sessions/:id", h.remove)
 	g.POST("/sessions/:id/leave", h.leave)
 	g.GET("/sessions/:id/members", h.members)
@@ -38,12 +39,13 @@ func setupSessionHandlers(g *gin.RouterGroup, svc *domain.Sessions) {
 
 func (h sessionHandlers) create(c *gin.Context) {
 	var b struct {
-		Name string `json:"name"`
+		Name                string `json:"name"`
+		AllowCoGMEncounters bool   `json:"allow_co_gm_create_encounter"`
 	}
 	if !bindJSON(c, &b) {
 		return
 	}
-	s, err := h.svc.Create(c.Request.Context(), authz.Viewer(c), b.Name)
+	s, err := h.svc.CreateWith(c.Request.Context(), authz.Viewer(c), b.Name, b.AllowCoGMEncounters)
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -66,6 +68,28 @@ func (h sessionHandlers) list(c *gin.Context) {
 
 func (h sessionHandlers) get(c *gin.Context) {
 	s, err := h.svc.Get(c.Request.Context(), authz.Viewer(c), c.Param("id"))
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	c.JSON(http.StatusOK, s)
+}
+
+// update changes the session's name or its co-GM encounter-creation setting. GM only.
+func (h sessionHandlers) update(c *gin.Context) {
+	var b struct {
+		Name                *string `json:"name"`
+		AllowCoGMEncounters *bool   `json:"allow_co_gm_create_encounter"`
+		Revision            int64   `json:"revision"`
+	}
+	if !bindJSON(c, &b) {
+		return
+	}
+	rev, ok := revisionOf(c, b.Revision)
+	if !ok {
+		return
+	}
+	s, err := h.svc.Update(c.Request.Context(), authz.Viewer(c), c.Param("id"), rev, domain.SessionChanges{Name: b.Name, AllowCoGMEncounters: b.AllowCoGMEncounters})
 	if err != nil {
 		writeError(c, err, nil)
 		return

@@ -237,9 +237,13 @@ func TestARetryAfterTheSessionWasEndedTreatsADenialAsAlreadyEnded(t *testing.T) 
 }
 
 func TestReleasedEncountersCannotLeaveTheGMOverTheSavedEncounterLimit(t *testing.T) {
-	r, _, sid := changeTable(t) // every entitlement limit is 3
-	for i := 0; i < 3; i++ {
-		newEncounter(t, r, "user-ok", `{"name":"P","game_system_id":"`+data.DefaultSystemID+`"}`)
+	r, db, sid := changeTable(t) // every entitlement limit is 3
+	// The API refuses a create over the limit, session encounters included, so the private ones
+	// are seeded: with the session's own that makes four.
+	for _, id := range []string{"5f00000000000000000000f1", "5f00000000000000000000f2", "5f00000000000000000000f3"} {
+		if err := db.Fake(data.CollectionEncounters).InsertOne(context.Background(), buildEncounter(id, "")); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	w := deleteSession(r, "user-ok", sid, "1")

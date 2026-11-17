@@ -35,6 +35,12 @@ type Session struct {
 	// token cannot read the owner's entitlements (initiative-entitlement-gating).
 	OwnerLimits   map[string]int `bson:"owner_limits,omitempty" json:"-"`
 	OwnerLimitsAt *time.Time     `bson:"owner_limits_at,omitempty" json:"-"`
+	// OwnerFlags holds the owner's entitled flags (the game-systems flag) as read at OwnerLimitsAt,
+	// for the same reason as OwnerLimits. Never client-writable.
+	OwnerFlags map[string]bool `bson:"owner_flags,omitempty" json:"-"`
+	// AllowCoGMCreateEncounter lets a co-GM create encounters in the session. Only the GM changes
+	// it. It is never serialized from here: SessionView shows it to the GM and co-GMs only.
+	AllowCoGMCreateEncounter bool `bson:"allow_co_gm_create_encounter" json:"-"`
 }
 
 // Member is one user's place in a session. This collection is the source of truth for who holds
@@ -201,6 +207,14 @@ func (r *Sessions) SoftDelete(ctx context.Context, d Decision, expectedRevision 
 	return r.owned.SoftDelete(ctx, d.actor, d.actor, d.session, expectedRevision)
 }
 
+// Update changes the session's settings at expectedRevision and returns it. Only the GM may.
+func (r *Sessions) Update(ctx context.Context, d Decision, expectedRevision int64, set map[string]any) (Session, error) {
+	if err := d.require(relGM); err != nil {
+		return Session{}, err
+	}
+	return r.owned.Update(ctx, d.actor, d.actor, d.session, expectedRevision, set)
+}
+
 // ResumeDeletion returns the Decision to finish deleting a session this user already deleted: the
 // session document is soft-deleted and owned by actor, who deleted it. A deleted session has no
 // OpenFGA tuples left to ask (and its record is gone from Live), so Mongo is the proof here, and
@@ -315,13 +329,13 @@ func (r *Sessions) SessionIDsOf(ctx context.Context, userID string, q Query) (Pa
 // RecordOwnerLimits stores the owner's current entitled values on the session. It changes neither
 // the revision nor the audit stamp: nobody edited the session. Only the owner may: the write is
 // owner-scoped to the decision's actor.
-func (r *Sessions) RecordOwnerLimits(ctx context.Context, d Decision, limits map[string]int) error {
+func (r *Sessions) RecordOwnerLimits(ctx context.Context, d Decision, limits map[string]int, flags map[string]bool) error {
 	if err := d.require(relView); err != nil {
 		return err
 	}
 	var discard Session
 	err := r.c.FindOneAndUpdate(ctx, scopeID(d.actor, d.session), bson.D{{Key: "$set", Value: bson.D{
-		{Key: "owner_limits", Value: limits}, {Key: "owner_limits_at", Value: r.now()},
+		{Key: "owner_limits", Value: limits}, {Key: "owner_flags", Value: flags}, {Key: "owner_limits_at", Value: r.now()},
 	}}}, &discard)
 	if errors.Is(err, store.ErrNotFound) {
 		return ErrNotFound
