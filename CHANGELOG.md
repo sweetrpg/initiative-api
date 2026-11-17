@@ -1,4 +1,23 @@
 
+## 0.7.0 - 2026-11-17
+
+### Added
+- Assign combatant controllers within a session
+- Player change requests with approval
+- Deleting a session makes its encounters the GM's private encounters
+
+
+### Fixed
+- Fail closed on pre-admission scrubs and page the scrub
+- Fail closed when the pending-request lookup errors
+- Make change request conditions a delta and harden approval
+- Make approval resumable and validate only changed keys
+- Validate the encounter id in change request queries
+- Settle approval claims after a disconnect and cancel approving requests
+- Report a failed end-session on delete and bound the request sweep
+
+
+
 ## 0.6.0 - 2026-11-17
 
 ### Added
