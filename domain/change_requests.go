@@ -99,14 +99,13 @@ func checkInput(in ChangeInput) error {
 	if len(in.AddConditions) > data.MaxConditions || len(in.RemoveConditions) > data.MaxConditions {
 		return invalid("at most %d conditions can be added or removed in one request", data.MaxConditions)
 	}
-	for i, name := range in.RemoveConditions {
+	for _, name := range in.RemoveConditions {
 		if strings.TrimSpace(name) == "" {
 			return invalid("a condition to remove needs a name")
 		}
 		if err := data.CheckText("condition name", name, data.MaxNameLen); err != nil {
 			return err
 		}
-		in.RemoveConditions[i] = name
 	}
 	return nil
 }
@@ -217,18 +216,24 @@ func (s *ChangeRequests) Approve(ctx context.Context, actor, sessionID, encounte
 		return data.ChangeRequest{}, err
 	}
 	applied, err := s.write(ctx, viewer, d, req, next, enc)
+	// Settling the claim must survive the caller going away: a request cancelled after the
+	// encounter write would otherwise stay approving, and a later approval would re-apply values
+	// that may be stale by then.
+	settle := context.WithoutCancel(ctx)
 	if err != nil {
-		if uerr := s.repo.Unclaim(ctx, d, encounterID, req.ID); uerr != nil {
+		if uerr := s.repo.Unclaim(settle, d, encounterID, req.ID); uerr != nil {
 			slog.ErrorContext(ctx, "could not release a change request claim after a failed approval; a GM can resume it once the claim is older than the timeout",
 				"request", req.ID, "session", sessionID, "encounter", encounterID, "error", uerr)
 		}
 		return data.ChangeRequest{}, err
 	}
-	done, err := s.repo.Finish(ctx, d, encounterID, req.ID, applied.Revision)
+	done, err := s.repo.Finish(settle, d, encounterID, req.ID, applied.Revision)
 	if err != nil {
-		// The change is applied. Losing the claim here means another GM resumed the request after
-		// the timeout and will record it; the write is idempotent, so report what happened.
-		slog.WarnContext(ctx, "could not record a change request as approved", "request", req.ID, "error", err)
+		// The change is applied but the request was not recorded as approved: another GM resumed
+		// it after the timeout, it was cancelled, or the store failed. A resume re-applies the
+		// idempotent change, so report what happened.
+		slog.WarnContext(ctx, "change applied but the request was not recorded as approved", "request", req.ID,
+			"session", sessionID, "encounter", encounterID, "applied_revision", applied.Revision, "error", err)
 		req.Status, req.AppliedRevision = data.ChangeApproved, applied.Revision
 		done = req
 	}

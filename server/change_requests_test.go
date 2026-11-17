@@ -485,6 +485,9 @@ func TestAnApprovingRequestShowsAsPendingAndHidesTheClaim(t *testing.T) {
 	if _, leaks := gm[0]["claimed_at"]; leaks {
 		t.Error("the claim time is exposed")
 	}
+	if _, leaks := gm[0]["decided_by"]; leaks {
+		t.Error("the claiming approver is exposed while the request shows as pending")
+	}
 }
 
 func TestAFailedUnclaimLeavesAClaimThatIsResumedOnceItIsOld(t *testing.T) {
@@ -789,5 +792,126 @@ func TestAMalformedEncounterIDNeverReachesTheChangeRequestQueries(t *testing.T) 
 		if list.Code != 404 || approve.Code != 404 {
 			t.Errorf("encounter id %q: list = %d, approve = %d; want 404", id, list.Code, approve.Code)
 		}
+	}
+}
+
+// cancelling cancels the request context at a chosen point of an approval, and makes the
+// change_requests collection refuse any update made with a cancelled context, as a dropped
+// connection would.
+type cancelling struct {
+	store.Database
+	cancel      context.CancelFunc
+	beforeWrite bool // cancel when the encounter write is attempted; otherwise right after it succeeds
+}
+
+func (d cancelling) Collection(name string) store.Collection {
+	c := d.Database.Collection(name)
+	switch name {
+	case data.CollectionEncounters:
+		return cancelOnWrite{c, d}
+	case data.CollectionChangeRequests:
+		return refuseCancelled{c}
+	}
+	return c
+}
+
+type cancelOnWrite struct {
+	store.Collection
+	d cancelling
+}
+
+func (c cancelOnWrite) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
+	sets := false
+	for _, op := range u {
+		if set, ok := op.Value.(bson.D); ok && op.Key == "$set" {
+			for _, e := range set {
+				sets = sets || e.Key == "combatants"
+			}
+		}
+	}
+	if sets && c.d.beforeWrite {
+		c.d.cancel()
+	}
+	err := c.Collection.FindOneAndUpdate(ctx, f, u, out)
+	if sets && !c.d.beforeWrite && err == nil {
+		c.d.cancel()
+	}
+	return err
+}
+
+type refuseCancelled struct{ store.Collection }
+
+func (c refuseCancelled) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Collection.FindOneAndUpdate(ctx, f, u, out)
+}
+
+func callWithContext(r http.Handler, ctx context.Context, token, method, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequestWithContext(ctx, method, path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func cancellingTable(t *testing.T, beforeWrite bool) (http.Handler, *fake.DB, string, context.Context) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	r, db, sid := viewTableOn(t, "3", func(d *fake.DB) store.Database { return cancelling{d, cancel, beforeWrite} })
+	seedSystem(t, db)
+	setPC(t, db, sid, func(*data.Encounter) {})
+	return r, db, sid, ctx
+}
+
+func TestADisconnectAfterTheEncounterWriteStillRecordsTheApproval(t *testing.T) {
+	r, _, sid, ctx := cancellingTable(t, false)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+
+	callWithContext(r, ctx, "user-ok", "POST", crPath(sid, idOf(req), "approve"))
+
+	got := requests(t, r, "user-ok", sid, "?status=approved")
+	if len(got) != 1 || got[0]["applied_revision"] != float64(4) || pcHealth(t, r, sid)["hp"] != float64(4) {
+		t.Fatalf("approved = %v, hp %v; want the applied change recorded as approved even though the caller went away", got, pcHealth(t, r, sid)["hp"])
+	}
+}
+
+func TestADisconnectDuringAFailedWriteStillReleasesTheClaim(t *testing.T) {
+	r, db, sid, ctx := cancellingTable(t, true)
+	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+	locked := time.Now()
+	setPC(t, db, sid, func(e *data.Encounter) { e.LockedAt = &locked })
+
+	callWithContext(r, ctx, "user-ok", "POST", crPath(sid, idOf(req), "approve"))
+
+	if got := requests(t, r, "user-ok", sid, "?status=pending"); len(got) != 1 {
+		t.Fatalf("pending = %v, want the claim released to pending, not stranded approving", got)
+	}
+	var stuck int
+	for _, d := range db.Fake(data.CollectionChangeRequests).Docs() {
+		if d["status"] == data.ChangeApproving {
+			stuck++
+		}
+	}
+	if stuck != 0 {
+		t.Errorf("%d requests still approving", stuck)
+	}
+}
+
+func TestACancelledRequesterCancelsAnApprovingRequestToo(t *testing.T) {
+	r, db, sid := changeTable(t)
+	seedClaim(t, db, sid, "5f00000000000000000000d5", 5*time.Second)
+
+	if w := callAs(r, "user-two", "POST", "/sessions/"+sid+"/leave", ""); w.Code >= 300 {
+		t.Fatalf("leave = %d %s", w.Code, w.Body)
+	}
+
+	if got := requests(t, r, "user-ok", sid, "?status=cancelled"); len(got) != 1 || got[0]["id"] != "5f00000000000000000000d5" {
+		t.Fatalf("cancelled = %v, want the approving request cancelled with the requester's departure", got)
+	}
+	if got := requests(t, r, "user-ok", sid, "?status=pending"); len(got) != 0 {
+		t.Errorf("pending = %v, want none", got)
 	}
 }

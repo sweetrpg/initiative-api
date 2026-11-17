@@ -67,7 +67,7 @@ type ChangeRequest struct {
 func (r ChangeRequest) MarshalJSON() ([]byte, error) {
 	type plain ChangeRequest
 	if r.Status == ChangeApproving {
-		r.Status = ChangePending
+		r.Status, r.DecidedBy = ChangePending, ""
 	}
 	return json.Marshal(plain(r))
 }
@@ -227,7 +227,7 @@ func (r *ChangeRequests) settle(ctx context.Context, d Decision, encounterID, id
 	return req, ErrNotFound
 }
 
-// CancelPending cancels userID's pending requests in the session, for a member who left, was
+// CancelPending cancels userID's pending and approving requests in the session, for a member who left, was
 // removed, or lost the player role. d grants can_edit, or can_view for one's own leave. The
 // per-player cap bounds the loop.
 func (r *ChangeRequests) CancelPending(ctx context.Context, d Decision, userID string) error {
@@ -241,7 +241,8 @@ func (r *ChangeRequests) CancelPending(ctx context.Context, d Decision, userID s
 	for range MaxPendingChangeRequests + 1 {
 		var discard ChangeRequest
 		err := r.c.FindOneAndUpdate(ctx,
-			bson.D{{Key: "session_id", Value: d.session}, {Key: "requested_by", Value: userID}, {Key: "status", Value: ChangePending}},
+			bson.D{{Key: "session_id", Value: d.session}, {Key: "requested_by", Value: userID},
+				{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{ChangePending, ChangeApproving}}}}},
 			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: ChangeCancelled}, {Key: "decided_by", Value: d.actor}, {Key: "decided_at", Value: r.now()}}}}, &discard)
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
