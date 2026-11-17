@@ -780,3 +780,14 @@ func TestRejectionReasonsAreCleanedAndCapped(t *testing.T) {
 		t.Errorf("reason = %v (%d), want control characters stripped", b["reason"], clean.Code)
 	}
 }
+
+func TestAMalformedEncounterIDNeverReachesTheChangeRequestQueries(t *testing.T) {
+	r, _, sid := changeTable(t)
+	for _, id := range []string{"not-an-id", `{"$ne":""}`, "5f00000000000000000000e1%00"} {
+		list := callAs(r, "user-ok", "GET", "/sessions/"+sid+"/encounters/"+id+"/change-requests", "")
+		approve := callAs(r, "user-ok", "POST", "/sessions/"+sid+"/encounters/"+id+"/change-requests/5f00000000000000000000aa/approve", "")
+		if list.Code != 404 || approve.Code != 404 {
+			t.Errorf("encounter id %q: list = %d, approve = %d; want 404", id, list.Code, approve.Code)
+		}
+	}
+}
