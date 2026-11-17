@@ -53,16 +53,16 @@ func allowRelations(w http.ResponseWriter, r *http.Request) {
 }
 
 // credRouterRel is credRouterDB with a caller-supplied check-relation handler.
-func credRouterRel(t *testing.T, limit string, db store.Database, rel http.HandlerFunc) (*gin.Engine, *domain.Credentials) {
+func credRouterRel(t *testing.T, limit string, db store.Database, rel http.HandlerFunc, opts ...func(*Services)) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
 	ent := func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"key":"initiative.integration_credentials","type":"limit","value":` + limit + `,"ttl_seconds":0}`))
 	}
-	return credRouterEnt(t, db, rel, ent)
+	return credRouterEnt(t, db, rel, ent, opts...)
 }
 
-// credRouterEnt is credRouterRel with a caller-supplied entitlements-api.
-func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.HandlerFunc) (*gin.Engine, *domain.Credentials) {
+// credRouterEnt is credRouterRel with a caller-supplied entitlements-api. opts adjust the services before the router is built.
+func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.HandlerFunc, opts ...func(*Services)) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
 	relAPI := httptest.NewServer(rel)
 	t.Cleanup(relAPI.Close)
@@ -81,6 +81,9 @@ func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.Handler
 		Themes:       themes, Credentials: creds,
 		Systems: data.NewSystemRepo(db), Rosters: domain.NewRosters(db), Encounters: encounters, Sessions: sessions, ChangeRequests: domain.NewChangeRequests(db, encounters, sessions),
 		Relations: relations.New(relAPI.URL), OwnerLimits: data.NewOwnerEntitlements(db, time.Hour),
+	}
+	for _, o := range opts {
+		o(&svc)
 	}
 	r := gin.New()
 	r.Use(Correlation())

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/store"
@@ -31,6 +32,11 @@ const ClaimTimeout = 60 * time.Second
 // MaxPendingChangeRequests bounds one player's open requests in a session, so a client cannot
 // grow the collection without limit while the GM is away.
 const MaxPendingChangeRequests = 50
+
+// maxCancelSweeps bounds how many requests one session deletion cancels in a pass: far more
+// members than a session may have (20 plus the GM) times each one's pending cap. A session over
+// it fails the deletion, which a retry continues.
+const maxCancelSweeps = 100 * MaxPendingChangeRequests
 
 // ChangeRequest is a player's proposed change to one combatant's health values or conditions
 // (initiative-player-access). It changes nothing until a GM or co-GM approves it. Health holds the
@@ -225,6 +231,28 @@ func (r *ChangeRequests) settle(ctx context.Context, d Decision, encounterID, id
 		return req, ErrConflict
 	}
 	return req, ErrNotFound
+}
+
+// CancelSession cancels every request still waiting (pending or approving) in the session, for a
+// session that is being deleted. d must be the GM's. Idempotent; it fails rather than stop silently
+// if more than maxCancelSweeps requests are waiting.
+func (r *ChangeRequests) CancelSession(ctx context.Context, d Decision) error {
+	if err := d.require(relGM); err != nil {
+		return err
+	}
+	for range maxCancelSweeps {
+		var discard ChangeRequest
+		err := r.c.FindOneAndUpdate(ctx,
+			bson.D{{Key: "session_id", Value: d.session}, {Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{ChangePending, ChangeApproving}}}}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: ChangeCancelled}, {Key: "decided_by", Value: d.actor}, {Key: "decided_at", Value: r.now()}}}}, &discard)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: more than %d change requests waiting in one session; retry delete", ErrInvalid, maxCancelSweeps)
 }
 
 // CancelPending cancels userID's pending and approving requests in the session, for a member who left, was

@@ -238,12 +238,16 @@ func TestDeletingASessionEndsItAtAuthAPI(t *testing.T) {
 	s, id := seat(t, fa, nil)
 	sess, _ := s.Get(sctx, "gm", id)
 
+	if err := s.Delete(withAuth(fa), "gm", id, sess.Revision); !errors.Is(err, relations.ErrUnavailable) {
+		t.Fatalf("delete with the end call failing = %v, want that error", err)
+	}
+	fa.endErr = nil
 	if err := s.Delete(withAuth(fa), "gm", id, sess.Revision); err != nil {
-		t.Fatalf("delete with the end call failing = %v, want success", err)
+		t.Fatalf("retry = %v, want success", err)
 	}
 
-	if len(fa.ended) != 1 || fa.ended[0] != id {
-		t.Errorf("ended = %v, want the session id", fa.ended)
+	if len(fa.ended) != 2 || fa.ended[1] != id {
+		t.Errorf("ended = %v, want the session ended again on the retry", fa.ended)
 	}
 }
 
