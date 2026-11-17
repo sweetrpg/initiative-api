@@ -2,6 +2,7 @@ package data
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -14,10 +15,18 @@ const (
 	ChangePending  = "pending"
 	ChangeApproved = "approved"
 	ChangeRejected = "rejected"
+	// ChangeApproving is an approval's claim: the request is taken but the encounter write has not
+	// finished. Views show it as pending. It becomes approved when the write succeeds, goes back to
+	// pending if the write fails, and can be resumed by a GM once the claim is older than
+	// ClaimTimeout.
+	ChangeApproving = "approving"
 	// ChangeCancelled marks a pending request whose requester left the session or lost their
 	// player role before it was decided.
 	ChangeCancelled = "cancelled"
 )
+
+// ClaimTimeout is how long an approving claim is left alone before another approval may resume it.
+const ClaimTimeout = 60 * time.Second
 
 // MaxPendingChangeRequests bounds one player's open requests in a session, so a client cannot
 // grow the collection without limit while the GM is away.
@@ -47,8 +56,20 @@ type ChangeRequest struct {
 	DecidedAt    *time.Time `bson:"decided_at,omitempty" json:"decided_at,omitempty"`
 	// Reason is why a rejected request was rejected.
 	Reason string `bson:"reason,omitempty" json:"reason,omitempty"`
+	// ClaimedAt is when an approval took the request (status approving).
+	ClaimedAt *time.Time `bson:"claimed_at,omitempty" json:"-"`
 	// AppliedRevision is the encounter revision an approved request produced.
 	AppliedRevision int64 `bson:"applied_revision,omitempty" json:"applied_revision,omitempty"`
+}
+
+// MarshalJSON shows an approving request as pending: the claim is an internal step of an approval,
+// and until it completes the change has not been applied.
+func (r ChangeRequest) MarshalJSON() ([]byte, error) {
+	type plain ChangeRequest
+	if r.Status == ChangeApproving {
+		r.Status = ChangePending
+	}
+	return json.Marshal(plain(r))
 }
 
 // ChangeRequests is the repository for change requests. Every function takes the Viewer or
@@ -98,7 +119,11 @@ func (r *ChangeRequests) List(ctx context.Context, v Viewer, encounterID, status
 		return Page[ChangeRequest]{}, ErrForbidden
 	}
 	q = byCreated(q)
-	if status != "" {
+	switch status {
+	case "":
+	case ChangePending:
+		q.Filters = append(q.Filters, Filter{Field: "status", Op: OpIn, Values: []any{ChangePending, ChangeApproving}})
+	default:
 		q.Filters = append(q.Filters, Filter{Field: "status", Op: OpEq, Values: []any{status}})
 	}
 	return runQuery[ChangeRequest](ctx, r.c, ChangeRequestSpec, base, q)
@@ -121,9 +146,61 @@ func (r *ChangeRequests) Load(ctx context.Context, d Decision, encounterID, id s
 	return req, err
 }
 
-// Decide settles a pending request as approved or rejected (with reason) in one compare-and-set
-// on status, so two deciders cannot both win. A request already decided is ErrConflict.
-func (r *ChangeRequests) Decide(ctx context.Context, d Decision, encounterID, id, status, reason string) (ChangeRequest, error) {
+// Reject settles a pending request as rejected with reason, in one compare-and-set on status, so
+// it cannot win against an approval that has claimed the request. A request in any other state is
+// ErrConflict.
+func (r *ChangeRequests) Reject(ctx context.Context, d Decision, encounterID, id, reason string) (ChangeRequest, error) {
+	return r.settle(ctx, d, encounterID, id, bson.E{Key: "status", Value: ChangePending},
+		bson.D{{Key: "status", Value: ChangeRejected}, {Key: "decided_by", Value: d.actor}, {Key: "decided_at", Value: r.now()}, {Key: "reason", Value: reason}})
+}
+
+// Claim takes a request for approval: pending becomes approving (claimed_at, decided_by), and an
+// approving request whose claim is older than ClaimTimeout is taken over, so an approval that
+// crashed can be resumed. A younger claim, and any decided request, is ErrConflict.
+func (r *ChangeRequests) Claim(ctx context.Context, d Decision, encounterID, id string) (ChangeRequest, error) {
+	now := r.now()
+	open := bson.E{Key: "$or", Value: bson.A{
+		bson.D{{Key: "status", Value: ChangePending}},
+		bson.D{{Key: "status", Value: ChangeApproving}, {Key: "claimed_at", Value: bson.D{{Key: "$lte", Value: now.Add(-ClaimTimeout)}}}},
+	}}
+	return r.settle(ctx, d, encounterID, id, open,
+		bson.D{{Key: "status", Value: ChangeApproving}, {Key: "decided_by", Value: d.actor}, {Key: "claimed_at", Value: now}})
+}
+
+// Finish records that the claimed approval's encounter write succeeded at revision: approving
+// becomes approved. It only matches the claim d took; a request taken over since is ErrConflict
+// (the change itself is idempotent, so the takeover's write does no harm).
+func (r *ChangeRequests) Finish(ctx context.Context, d Decision, encounterID, id string, revision int64) (ChangeRequest, error) {
+	return r.settle(ctx, d, encounterID, id, bson.E{Key: "$and", Value: bson.A{
+		bson.D{{Key: "status", Value: ChangeApproving}}, bson.D{{Key: "decided_by", Value: d.actor}}}},
+		bson.D{{Key: "status", Value: ChangeApproved}, {Key: "decided_at", Value: r.now()}, {Key: "applied_revision", Value: revision}})
+}
+
+// Unclaim puts a request this decision claimed back to pending, for an approval whose encounter
+// write failed.
+func (r *ChangeRequests) Unclaim(ctx context.Context, d Decision, encounterID, id string) error {
+	if err := d.require(relEdit); err != nil {
+		return err
+	}
+	id, ok := cleanID(id)
+	if !ok {
+		return ErrNotFound
+	}
+	var discard ChangeRequest
+	err := r.c.FindOneAndUpdate(ctx,
+		bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "encounter_id", Value: encounterID},
+			{Key: "status", Value: ChangeApproving}, {Key: "decided_by", Value: d.actor}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: ChangePending}}},
+			{Key: "$unset", Value: bson.D{{Key: "decided_by", Value: ""}, {Key: "claimed_at", Value: ""}}}}, &discard)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrNotFound
+	}
+	return err
+}
+
+// settle applies set to the request if it is in the state open describes, in one atomic write. When
+// nothing matched, a request that exists is ErrConflict and one that does not is ErrNotFound.
+func (r *ChangeRequests) settle(ctx context.Context, d Decision, encounterID, id string, open bson.E, set bson.D) (ChangeRequest, error) {
 	var req ChangeRequest
 	if err := d.require(relEdit); err != nil {
 		return req, err
@@ -133,19 +210,6 @@ func (r *ChangeRequests) Decide(ctx context.Context, d Decision, encounterID, id
 		return req, ErrNotFound
 	}
 	filter := bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "encounter_id", Value: encounterID}}
-	set := bson.D{{Key: "status", Value: status}, {Key: "decided_by", Value: d.actor}, {Key: "decided_at", Value: r.now()}}
-	if reason != "" {
-		set = append(set, bson.E{Key: "reason", Value: reason})
-	}
-	open := bson.E{Key: "status", Value: ChangePending}
-	if status == ChangeApproved {
-		// An approval that claimed the request but never recorded a result (a crash, or a failed
-		// reopen) can be completed by the same approver approving again; the change is idempotent.
-		open = bson.E{Key: "$or", Value: bson.A{
-			bson.D{{Key: "status", Value: ChangePending}},
-			bson.D{{Key: "status", Value: ChangeApproved}, {Key: "decided_by", Value: d.actor}, {Key: "applied_revision", Value: nil}},
-		}}
-	}
 	err := r.c.FindOneAndUpdate(ctx, append(filter, open), bson.D{{Key: "$set", Value: set}}, &req)
 	if !errors.Is(err, store.ErrNotFound) {
 		return req, err
@@ -180,37 +244,4 @@ func (r *ChangeRequests) CancelPending(ctx context.Context, d Decision, userID s
 		}
 	}
 	return nil
-}
-
-// Reopen puts an approved request this decision approved back to pending, for an approval whose
-// encounter write did not happen.
-func (r *ChangeRequests) Reopen(ctx context.Context, d Decision, encounterID, id string) error {
-	if err := d.require(relEdit); err != nil {
-		return err
-	}
-	var discard ChangeRequest
-	err := r.c.FindOneAndUpdate(ctx,
-		bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "encounter_id", Value: encounterID},
-			{Key: "status", Value: ChangeApproved}, {Key: "decided_by", Value: d.actor}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: ChangePending}}},
-			{Key: "$unset", Value: bson.D{{Key: "decided_by", Value: ""}, {Key: "decided_at", Value: ""}}}}, &discard)
-	if errors.Is(err, store.ErrNotFound) {
-		return ErrNotFound
-	}
-	return err
-}
-
-// MarkApplied records the encounter revision an approved request produced.
-func (r *ChangeRequests) MarkApplied(ctx context.Context, d Decision, encounterID, id string, revision int64) (ChangeRequest, error) {
-	var req ChangeRequest
-	if err := d.require(relEdit); err != nil {
-		return req, err
-	}
-	err := r.c.FindOneAndUpdate(ctx,
-		bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "encounter_id", Value: encounterID}, {Key: "status", Value: ChangeApproved}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "applied_revision", Value: revision}}}}, &req)
-	if errors.Is(err, store.ErrNotFound) {
-		return req, ErrNotFound
-	}
-	return req, err
 }

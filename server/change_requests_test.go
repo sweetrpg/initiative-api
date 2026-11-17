@@ -431,28 +431,114 @@ func TestRequestsInTheOldSpellingOfAWholeConditionsListAreRefused(t *testing.T) 
 	}
 }
 
-func TestAnApprovalLeftUnfinishedIsCompletedByItsApproverApprovingAgain(t *testing.T) {
+func seedClaim(t *testing.T, db *fake.DB, sid, id string, claimedAgo time.Duration) {
+	t.Helper()
+	claimed := time.Now().Add(-claimedAgo)
+	insertRequest(t, db, data.ChangeRequest{ID: id, SessionID: sid, EncounterID: encE1, CombatantID: "pc", RequestedBy: "u-2",
+		Health: map[string]int{"hp": 4}, Status: data.ChangeApproving, DecidedBy: "u-1", ClaimedAt: &claimed, BaseRevision: 3})
+}
+
+func TestAnOldApprovingClaimIsResumedByAnyGMAndAppliedOnce(t *testing.T) {
 	r, db, sid := changeTable(t)
 	joinAs(t, r, sid, "user-four", "co_gm")
+	seedClaim(t, db, sid, "5f00000000000000000000d1", 2*data.ClaimTimeout)
+
+	code, done := approve(r, "user-four", sid, "5f00000000000000000000d1")
+	again, _ := approve(r, "user-ok", sid, "5f00000000000000000000d1")
+
+	if code != 200 || done["status"] != "approved" || done["decided_by"] != "u-4" || done["applied_revision"] != float64(4) {
+		t.Fatalf("resume = %d %v, want approved by u-4 at revision 4", code, done)
+	}
+	if h := pcHealth(t, r, sid); h["hp"] != float64(4) || gmRevision(t, r, sid) != 4 {
+		t.Errorf("pc health %v revision %v, want hp 4 and one revision bump", h, gmRevision(t, r, sid))
+	}
+	if again != http.StatusConflict {
+		t.Errorf("approve of an approved request = %d, want 409 (terminal)", again)
+	}
+}
+
+func TestAYoungApprovingClaimIs409ForApproveAndRejectAndChangesNothing(t *testing.T) {
+	r, db, sid := changeTable(t)
+	seedClaim(t, db, sid, "5f00000000000000000000d2", 5*time.Second)
+
+	code, _ := approve(r, "user-ok", sid, "5f00000000000000000000d2")
+	reject := callAs(r, "user-ok", "POST", crPath(sid, "5f00000000000000000000d2", "reject"), `{"reason":"x"}`)
+
+	if code != http.StatusConflict || reject.Code != http.StatusConflict {
+		t.Errorf("approve = %d, reject = %d on a claim in progress; want 409 and 409", code, reject.Code)
+	}
+	if h := pcHealth(t, r, sid); h["hp"] != float64(9) || gmRevision(t, r, sid) != 3 {
+		t.Errorf("pc health %v revision %v: a claim in progress must change nothing", h, gmRevision(t, r, sid))
+	}
+}
+
+func TestAnApprovingRequestShowsAsPendingAndHidesTheClaim(t *testing.T) {
+	r, db, sid := changeTable(t)
+	seedClaim(t, db, sid, "5f00000000000000000000d3", 5*time.Second)
+
+	gm := requests(t, r, "user-ok", sid, "?status=pending")
+	player := requests(t, r, "user-two", sid, "")
+
+	if len(gm) != 1 || gm[0]["status"] != "pending" || len(player) != 1 || player[0]["status"] != "pending" {
+		t.Fatalf("GM pending list %v, player list %v; want the approving request shown as pending to both", gm, player)
+	}
+	if _, leaks := gm[0]["claimed_at"]; leaks {
+		t.Error("the claim time is exposed")
+	}
+}
+
+func TestAFailedUnclaimLeavesAClaimThatIsResumedOnceItIsOld(t *testing.T) {
+	r, db, sid := viewTableOn(t, "3", func(d *fake.DB) store.Database {
+		return failingUpdates{d, data.CollectionChangeRequests, func(u bson.D) error {
+			if setsStatus(u, "pending") {
+				return errors.New("store down")
+			}
+			return nil
+		}}
+	})
+	seedSystem(t, db)
+	setPC(t, db, sid, func(*data.Encounter) {})
 	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
+	locked := time.Now()
+	setPC(t, db, sid, func(e *data.Encounter) { e.LockedAt = &locked })
+	if code, _ := approve(r, "user-ok", sid, idOf(req)); code != http.StatusForbidden {
+		t.Fatalf("approve on a locked encounter = %d, want 403", code)
+	}
+	setPC(t, db, sid, func(*data.Encounter) {})
+
+	young, _ := approve(r, "user-ok", sid, idOf(req))
+	old := time.Now().Add(-2 * data.ClaimTimeout)
 	var discard data.ChangeRequest
-	err := db.Fake(data.CollectionChangeRequests).FindOneAndUpdate(context.Background(), bson.D{{Key: "_id", Value: idOf(req)}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "approved"}, {Key: "decided_by", Value: "u-1"}}}}, &discard)
-	if err != nil {
+	if err := db.Fake(data.CollectionChangeRequests).FindOneAndUpdate(context.Background(), bson.D{{Key: "_id", Value: idOf(req)}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "claimed_at", Value: old}}}}, &discard); err != nil {
 		t.Fatal(err)
 	}
-
-	other, _ := approve(r, "user-four", sid, idOf(req))
 	code, done := approve(r, "user-ok", sid, idOf(req))
 
-	if other != http.StatusConflict {
-		t.Errorf("another approver on an unfinished approval = %d, want 409", other)
+	if young != http.StatusConflict || code != 200 || done["applied_revision"] == nil || pcHealth(t, r, sid)["hp"] != float64(4) {
+		t.Fatalf("young claim = %d, aged claim = %d %v, hp %v; want 409 then a completed approval", young, code, done, pcHealth(t, r, sid)["hp"])
 	}
-	if code != 200 || done["applied_revision"] != float64(4) || pcHealth(t, r, sid)["hp"] != float64(4) {
-		t.Fatalf("repair = %d %v, hp %v; want it completed", code, done, pcHealth(t, r, sid)["hp"])
+}
+
+func TestOnlyTheChangedHealthKeysAreValidated(t *testing.T) {
+	r, db, sid := changeTable(t)
+	setPC(t, db, sid, func(e *data.Encounter) { e.Combatants[0].Health = map[string]int{"hp": 99, "max_hp": 10} }) // stored hp is over max_hp
+
+	other, _ := submit(t, r, "user-two", sid, "pc", `{"health":{"max_hp":12}}`)
+	bad, _ := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":100}}`)
+
+	if other != http.StatusCreated || bad != http.StatusUnprocessableEntity {
+		t.Fatalf("a change to another key = %d, a new invalid value = %d; want 201 and 422", other, bad)
 	}
-	if again, _ := approve(r, "user-ok", sid, idOf(req)); again != http.StatusConflict {
-		t.Errorf("approving a finished request again = %d, want 409", again)
+}
+
+func insertRequest(t *testing.T, db *fake.DB, req data.ChangeRequest) {
+	t.Helper()
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = time.Now()
+	}
+	if err := db.Fake(data.CollectionChangeRequests).InsertOne(context.Background(), req); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -495,35 +581,6 @@ func setsStatus(u bson.D, status string) bool {
 		}
 	}
 	return false
-}
-
-func TestAFailedReopenLeavesAnUnfinishedApprovalThatApprovingAgainCompletes(t *testing.T) {
-	r, db, sid := viewTableOn(t, "3", func(d *fake.DB) store.Database {
-		return failingUpdates{d, data.CollectionChangeRequests, func(u bson.D) error {
-			if setsStatus(u, "pending") {
-				return errors.New("store down")
-			}
-			return nil
-		}}
-	})
-	seedSystem(t, db)
-	setPC(t, db, sid, func(*data.Encounter) {})
-	_, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4}}`)
-	locked := time.Now()
-	setPC(t, db, sid, func(e *data.Encounter) { e.LockedAt = &locked })
-	if code, _ := approve(r, "user-ok", sid, idOf(req)); code != http.StatusForbidden {
-		t.Fatalf("approve on a locked encounter = %d, want 403", code)
-	}
-	if got := requests(t, r, "user-ok", sid, "?status=approved"); len(got) != 1 || got[0]["applied_revision"] != nil {
-		t.Fatalf("approved = %v, want the claimed request left approved with no result", got)
-	}
-	setPC(t, db, sid, func(*data.Encounter) {})
-
-	code, done := approve(r, "user-ok", sid, idOf(req))
-
-	if code != 200 || done["applied_revision"] == nil || pcHealth(t, r, sid)["hp"] != float64(4) {
-		t.Fatalf("approve again = %d %v, hp %v", code, done, pcHealth(t, r, sid)["hp"])
-	}
 }
 
 func TestApprovalRetriesAnEncounterThatMovedOnThreeTimes(t *testing.T) {

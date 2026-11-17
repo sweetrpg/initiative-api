@@ -191,6 +191,11 @@ func (s *ChangeRequests) List(ctx context.Context, actor, sessionID, encounterID
 // change that no longer applies is ErrChangeStale and the request stays pending. An encounter
 // that moved on since the request was submitted is not a reason to fail: the request is applied
 // to the current revision.
+//
+// The request moves pending -> approving -> approved. The claim is taken before the write, so a
+// concurrent reject or second approval loses; if the write fails the claim is undone. A claim that
+// is never finished (a crash) is younger than ClaimTimeout: 409, retry later; older: any GM's
+// approval resumes it, which is safe because the change is idempotent.
 func (s *ChangeRequests) Approve(ctx context.Context, actor, sessionID, encounterID, requestID string) (data.ChangeRequest, error) {
 	_, _, d, err := s.sessions.as(ctx, actor, sessionID, ActManageMembers)
 	if err != nil {
@@ -204,40 +209,33 @@ func (s *ChangeRequests) Approve(ctx context.Context, actor, sessionID, encounte
 	if err != nil {
 		return data.ChangeRequest{}, err
 	}
-	// An approval this caller started but never finished (a crash, or a failed reopen) is
-	// completed by approving again; anything else already decided is a conflict.
-	unfinished := req.Status == data.ChangeApproved && req.DecidedBy == actor && req.AppliedRevision == 0
-	if req.Status != data.ChangePending && !unfinished {
-		return req, data.ErrConflict
-	}
 	next, enc, err := s.build(ctx, viewer, d, req)
 	if err != nil {
 		return data.ChangeRequest{}, err
 	}
-	// Claim the request before the write, so a concurrent reject or second approval cannot also
-	// win. Everything that can make the change stale was checked above, so a later failure is a
-	// conflict or an outage, and the claim is undone.
-	if req, err = s.repo.Decide(ctx, d, encounterID, requestID, data.ChangeApproved, ""); err != nil {
+	if req, err = s.repo.Claim(ctx, d, encounterID, requestID); err != nil {
 		return data.ChangeRequest{}, err
 	}
 	applied, err := s.write(ctx, viewer, d, req, next, enc)
 	if err != nil {
-		if rerr := s.repo.Reopen(ctx, d, encounterID, req.ID); rerr != nil {
-			slog.ErrorContext(ctx, "could not reopen a change request after a failed approval; it stays approved without a change until its approver approves again",
-				"request", req.ID, "session", sessionID, "encounter", encounterID, "error", rerr)
+		if uerr := s.repo.Unclaim(ctx, d, encounterID, req.ID); uerr != nil {
+			slog.ErrorContext(ctx, "could not release a change request claim after a failed approval; a GM can resume it once the claim is older than the timeout",
+				"request", req.ID, "session", sessionID, "encounter", encounterID, "error", uerr)
 		}
 		return data.ChangeRequest{}, err
 	}
-	if done, merr := s.repo.MarkApplied(ctx, d, encounterID, req.ID, applied.Revision); merr == nil {
-		req = done
-	} else {
-		slog.WarnContext(ctx, "could not record the revision a change request produced", "request", req.ID, "error", merr)
-		req.AppliedRevision = applied.Revision
+	done, err := s.repo.Finish(ctx, d, encounterID, req.ID, applied.Revision)
+	if err != nil {
+		// The change is applied. Losing the claim here means another GM resumed the request after
+		// the timeout and will record it; the write is idempotent, so report what happened.
+		slog.WarnContext(ctx, "could not record a change request as approved", "request", req.ID, "error", err)
+		req.Status, req.AppliedRevision = data.ChangeApproved, applied.Revision
+		done = req
 	}
 	if s.Notifier != nil {
-		s.Notifier.ChangeDecided(ctx, req)
+		s.Notifier.ChangeDecided(ctx, done)
 	}
-	return req, nil
+	return done, nil
 }
 
 // write stores next as the encounter's combatants at enc's revision. If the encounter changed
@@ -310,7 +308,7 @@ func (s *ChangeRequests) Reject(ctx context.Context, actor, sessionID, encounter
 	if err != nil {
 		return data.ChangeRequest{}, err
 	}
-	req, err := s.repo.Decide(ctx, d, encounterID, requestID, data.ChangeRejected, reason)
+	req, err := s.repo.Reject(ctx, d, encounterID, requestID, reason)
 	if err != nil {
 		return data.ChangeRequest{}, err
 	}
