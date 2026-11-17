@@ -89,7 +89,7 @@ func main() {
 		),
 		Authz:        authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
 		Entitlements: entitlements.New(cfg.EntitlementsAPIURL),
-		OwnerLimits:  data.NewOwnerEntitlements(db),
+		OwnerLimits:  data.NewOwnerEntitlements(db, cfg.OwnerEntitlementsMaxAge),
 		Themes:       themes,
 		Credentials:  creds,
 		Rosters:      rosters,

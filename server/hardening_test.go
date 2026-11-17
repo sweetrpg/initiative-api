@@ -206,3 +206,27 @@ func TestEveryWriteRouteRefusesAnotherUserWith403AndNoDocument(t *testing.T) {
 		t.Errorf("the encounter changed: %v", got)
 	}
 }
+
+func TestTrailingBytesPastTheCapAre413NotBadRequest(t *testing.T) {
+	r, _ := encRouter(t, "5")
+	body := `{"name":"a"}` + strings.Repeat(" ", maxBodyBytes+10)
+
+	w := callAs(r, "user-ok", "POST", "/rosters", body)
+
+	if w.Code != http.StatusRequestEntityTooLarge || decodeBody(t, w)["code"] != "payload_too_large" {
+		t.Fatalf("valid JSON then %d bytes of padding = %d %s, want 413 payload_too_large", len(body), w.Code, w.Body)
+	}
+}
+
+func TestThemeAndCredentialWritesRejectAnUnknownBodyField(t *testing.T) {
+	r, _ := encRouter(t, "5")
+	for _, route := range []struct{ path, body string }{
+		{"/themes", `{"name":"x","surprise":1}`},
+		{"/credentials", `{"label":"x","scopes":["read"],"surprise":1}`},
+	} {
+		w := callAs(r, "user-ok", "POST", route.path, route.body)
+		if b := decodeBody(t, w); w.Code != 422 || b["code"] != "unknown_body_field" || b["key"] != "surprise" {
+			t.Errorf("POST %s with an unknown field = %d %s, want 422 unknown_body_field", route.path, w.Code, w.Body)
+		}
+	}
+}

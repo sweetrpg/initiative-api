@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
@@ -78,7 +79,7 @@ func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.Handler
 		Entitlements: entitlements.New(ent.URL),
 		Themes:       themes, Credentials: creds,
 		Rosters: domain.NewRosters(db), Encounters: domain.NewEncounters(db), Sessions: domain.NewSessions(db),
-		Relations: relations.New(relAPI.URL), OwnerLimits: data.NewOwnerEntitlements(db),
+		Relations: relations.New(relAPI.URL), OwnerLimits: data.NewOwnerEntitlements(db, time.Hour),
 	}
 	r := gin.New()
 	r.Use(Correlation())

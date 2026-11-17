@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func lookupFrom(m map[string]string) func(string) (string, bool) {
@@ -39,6 +40,8 @@ func TestLoadErrors(t *testing.T) {
 		{"missing auth-api url", map[string]string{"AUTH_API_URL": " "}, "AUTH_API_URL: required"},
 		{"missing entitlements-api url", map[string]string{"ENTITLEMENTS_API_URL": " "}, "ENTITLEMENTS_API_URL: required"},
 		{"non-http users-api url", map[string]string{"USERS_API_URL": "ftp://users"}, "USERS_API_URL"},
+		{"unparsable max age", map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "week"}, "OWNER_ENTITLEMENTS_MAX_AGE"},
+		{"zero max age", map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "0s"}, "OWNER_ENTITLEMENTS_MAX_AGE"},
 		{"wildcard origin", map[string]string{"ALLOWED_ORIGINS": "https://a.example,*"}, "wildcard"},
 	}
 	for _, tt := range tests {
@@ -81,5 +84,16 @@ func TestLoadRequiresRedisHost(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "REDIS_HOST") {
 		t.Fatalf("err = %v, want REDIS_HOST required", err)
+	}
+}
+
+func TestLoadOwnerEntitlementsMaxAge(t *testing.T) {
+	c, err := Load(lookupFrom(withAuth(nil)))
+	if err != nil || c.OwnerEntitlementsMaxAge != 7*24*time.Hour {
+		t.Fatalf("default = %v, %v; want 168h", c.OwnerEntitlementsMaxAge, err)
+	}
+	c, err = Load(lookupFrom(withAuth(map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "36h"})))
+	if err != nil || c.OwnerEntitlementsMaxAge != 36*time.Hour {
+		t.Fatalf("set = %v, %v; want 36h", c.OwnerEntitlementsMaxAge, err)
 	}
 }

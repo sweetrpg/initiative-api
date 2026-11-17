@@ -1,14 +1,17 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/initiative-api/store/fake"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // strictEntitlements is an entitlements-api that, like the real one, refuses a request with no
@@ -108,5 +111,34 @@ func TestRecordedLimitsBelongToTheOwnerOnly(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("credential of a user with no record = %d %s, want 503 even though another user's limits are recorded", w.Code, w.Body)
+	}
+}
+
+func TestACredentialCreateFailsClosedOnceTheRecordedLimitIsOlderThanTheMaxAge(t *testing.T) {
+	var calls atomic.Int64
+	db := fake.NewDB()
+	seedSystem(t, db)
+	r, _ := credRouterEnt(t, db, allowRelations, strictEntitlements("2", &calls))
+	secret := creds(t, r)
+	if w := callAs(r, "user-ok", "POST", "/rosters", `{"name":"First"}`); w.Code != 201 {
+		t.Fatalf("first-party create = %d %s", w.Code, w.Body)
+	}
+	if w := callAs(r, secret, "POST", "/rosters", `{"name":"Second"}`); w.Code != 201 {
+		t.Fatalf("credential create off a fresh record = %d %s", w.Code, w.Body)
+	}
+
+	// Age every recorded key past the one-hour max age the test router configures.
+	old := time.Now().Add(-2 * time.Hour).UTC()
+	for _, d := range db.Fake("owner_entitlements").Docs() {
+		for field := range d["entries"].(bson.M) {
+			_ = db.Fake("owner_entitlements").UpsertOne(context.Background(), bson.D{{Key: "_id", Value: d["_id"]}},
+				bson.D{{Key: "$set", Value: bson.D{{Key: "entries." + field + ".read_at", Value: old}}}})
+		}
+	}
+
+	w := callAs(r, secret, "POST", "/rosters", `{"name":"Third"}`)
+
+	if b := decodeBody(t, w); w.Code != http.StatusServiceUnavailable || b["code"] != "entitlements_unavailable" {
+		t.Fatalf("credential create off a stale record = %d %s, want 503 entitlements_unavailable", w.Code, w.Body)
 	}
 }

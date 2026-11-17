@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sweetrpg/initiative-api/constants"
 )
@@ -32,7 +33,14 @@ type Config struct {
 	// RedisHost is the rate limiter's counter store; the limiter fails closed without it
 	// (PADR-0036), so it is required. Port and password are read by the Redis pool itself.
 	RedisHost string
+	// OwnerEntitlementsMaxAge is how long a recorded owner entitlement value stays usable for
+	// integration credentials, which cannot read it live. Past it the credential gets
+	// limits_not_synced until the owner opens the app.
+	OwnerEntitlementsMaxAge time.Duration
 }
+
+// defaultOwnerEntitlementsMaxAge is seven days.
+const defaultOwnerEntitlementsMaxAge = "168h"
 
 var logLevels = map[string]bool{"DEBUG": true, "INFO": true, "WARN": true, "ERROR": true}
 
@@ -62,6 +70,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	var errs []error
+	maxAge := get(constants.OWNER_ENTITLEMENTS_MAX_AGE, defaultOwnerEntitlementsMaxAge)
+	if d, err := time.ParseDuration(maxAge); err != nil || d <= 0 {
+		errs = append(errs, fmt.Errorf("%s %q: must be a positive duration such as 168h", constants.OWNER_ENTITLEMENTS_MAX_AGE, maxAge))
+	} else {
+		c.OwnerEntitlementsMaxAge = d
+	}
 	if _, _, err := net.SplitHostPort(c.BindAddress); err != nil {
 		errs = append(errs, fmt.Errorf("BIND_ADDRESS %q: %w", c.BindAddress, err))
 	}

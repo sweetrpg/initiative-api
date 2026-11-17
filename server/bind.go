@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +25,8 @@ func limitBody() gin.HandlerFunc {
 	}
 }
 
+var errTrailingData = errors.New("trailing data after the JSON value")
+
 var unknownField = regexp.MustCompile(`unknown field "([^"]*)"`)
 
 // bindJSON decodes the body into v and refuses a field v does not declare. It writes the typed
@@ -34,12 +37,12 @@ func bindJSON(c *gin.Context, v any) bool {
 	dec.DisallowUnknownFields()
 	err := dec.Decode(v)
 	if err == nil {
-		// One JSON value only: trailing data is a malformed request.
-		if _, extra := dec.Token(); !errors.Is(extra, io.EOF) {
-			badRequest(c, "request body must be a single JSON object")
-			return false
+		// One JSON value only: trailing data is a malformed request. Reading it can still hit the cap.
+		_, extra := dec.Token()
+		if errors.Is(extra, io.EOF) {
+			return true
 		}
-		return true
+		err = cmp.Or(extra, errTrailingData)
 	}
 	var tooBig *http.MaxBytesError
 	if errors.As(err, &tooBig) {

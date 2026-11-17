@@ -176,6 +176,10 @@ func setDoc(set map[string]any, extra ...bson.E) bson.D {
 // so a stale revision or another owner's record modifies nothing. When nothing matched, the
 // cause is classified afterwards: ErrNotFound, ErrForbidden, or ErrRevisionConflict (with the
 // current record returned).
+//
+// Update applies set as given and checks nothing about its values. Size and name bounds on a
+// roster's characters live in the domain layer (domain.Rosters), so a caller that reaches this
+// method directly bypasses them; go through the domain.
 func (r *Owned[T, P]) Update(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {
 	var out T
 	if err := requireOwnerActor(ownerUserID, actingUserID); err != nil {

@@ -36,14 +36,14 @@ func (u userChecker) Check(ctx context.Context, key string, p entitlements.Polic
 	return res, err
 }
 
-// recorded answers from the owner's record. With no record of the key it fails closed with
-// ErrLimitsNotSynced: the owner has to use the app once with their own sign-in.
+// recorded answers from the owner's record. With no record of the key, or one older than the max
+// age, it fails closed with ErrLimitsNotSynced: the owner has to use the app once with their own sign-in.
 func (u userChecker) recorded(ctx context.Context, key string) (entitlements.Result, error) {
 	if u.record == nil {
 		return entitlements.Result{}, domain.ErrLimitsNotSynced
 	}
-	e, _, err := u.record.Get(ctx, u.user, key)
-	if errors.Is(err, data.ErrNotFound) {
+	e, err := u.record.Get(ctx, u.user, key)
+	if errors.Is(err, data.ErrNotFound) || (err == nil && !u.record.Fresh(e)) {
 		return entitlements.Result{}, domain.ErrLimitsNotSynced
 	}
 	if err != nil {
@@ -158,8 +158,7 @@ func (h themeHandlers) get(c *gin.Context) {
 
 func (h themeHandlers) create(c *gin.Context) {
 	var b themeBody
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be a JSON theme")
+	if !bindJSON(c, &b) {
 		return
 	}
 	owner := authz.Viewer(c)
@@ -177,7 +176,10 @@ func (h themeHandlers) create(c *gin.Context) {
 
 func (h themeHandlers) update(c *gin.Context) {
 	var b themePatchBody
-	if err := c.ShouldBindJSON(&b); err != nil || b.Revision < 1 {
+	if !bindJSON(c, &b) {
+		return
+	}
+	if b.Revision < 1 {
 		badRequest(c, "request body must be JSON with the theme's current revision")
 		return
 	}

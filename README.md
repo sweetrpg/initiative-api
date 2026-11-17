@@ -29,6 +29,7 @@ make run
 | `USERS_API_URL` | required | users-api base URL; resolves the caller to `users._id` |
 | `ENTITLEMENTS_API_URL` | required | entitlements-api base URL; the caller's bearer is forwarded on checks |
 | `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
+| `OWNER_ENTITLEMENTS_MAX_AGE` | `168h` | how long a recorded owner entitlement serves integration credentials; positive Go duration |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASS` | `REDIS_HOST` required | rate-limit counters; the service stops at startup without `REDIS_HOST` |
 | `RATE_LIMIT_STANDARD`, `RATE_LIMIT_STANDARD_WINDOW_SECONDS`, `RATE_LIMIT_CHEAP`, `RATE_LIMIT_CHEAP_WINDOW_SECONDS` | api-core defaults | per-client budgets (PADR-0036) |
 

@@ -92,8 +92,7 @@ type credentialBody struct {
 // create returns the secret once, alongside the stored record.
 func (h credentialHandlers) create(c *gin.Context) {
 	var b credentialBody
-	if err := c.ShouldBindJSON(&b); err != nil {
-		badRequest(c, "request body must be JSON with label and scopes")
+	if !bindJSON(c, &b) {
 		return
 	}
 	cred, secret, err := h.svc.Credentials.Create(c.Request.Context(), authz.Viewer(c), b.Label, b.Scopes, checkerFor(c, h.svc.Entitlements))
@@ -187,6 +186,7 @@ func adminDeleteCredential(c *gin.Context, creds *domain.Credentials) {
 	var b struct {
 		Reason string `json:"reason"`
 	}
+	// A missing or malformed body is the same 422 as an empty reason, not bindJSON's 400.
 	if err := c.ShouldBindJSON(&b); err != nil || strings.TrimSpace(b.Reason) == "" {
 		c.AbortWithStatusJSON(http.StatusUnprocessableEntity, ErrorBody{Code: "reason_required", Message: "A reason is required to delete a credential.", CorrelationID: CorrelationID(c)})
 		return
