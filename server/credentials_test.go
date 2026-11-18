@@ -103,7 +103,7 @@ func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.Handler
 		o(&svc)
 	}
 	r := gin.New()
-	r.Use(Middleware(accessLogger)...)
+	r.Use(Middleware(accessLogger, 30*time.Second)...)
 	SetupHandlers(r, svc)
 	probe := ProtectedGroup(r, svc.Authz, svc.Credentials)
 	probe.Any("/probe", func(c *gin.Context) { c.String(http.StatusOK, authz.Viewer(c)) })

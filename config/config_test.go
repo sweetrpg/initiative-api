@@ -40,6 +40,7 @@ func TestLoadErrors(t *testing.T) {
 		{"double star stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "**"}, "match any host"},
 		{"star question stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "*?*"}, "match any host"},
 		{"malformed stream origin pattern", map[string]string{"STREAM_ALLOWED_ORIGINS": "app[.example.test"}, "not a valid host pattern"},
+		{"request timeout too long", map[string]string{"REQUEST_TIMEOUT": "10m"}, "REQUEST_TIMEOUT"},
 		{"bad bind address", map[string]string{"BIND_ADDRESS": "8000"}, "BIND_ADDRESS"},
 		{"bad log level", map[string]string{"LOG_LEVEL": "loud"}, "LOG_LEVEL"},
 		{"relative otlp endpoint", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "tempo:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},

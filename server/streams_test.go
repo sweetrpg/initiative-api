@@ -757,3 +757,34 @@ func TestADemotedMembersTicketServesTheLowerLevel(t *testing.T) {
 		t.Errorf("head view_tag = %v, want the observer's %q", head["view_tag"], want)
 	}
 }
+
+func TestARequestPastItsDeadlineIs503TimeoutButTheStreamUpgradeIsExempt(t *testing.T) {
+	r := gin.New()
+	r.Use(RequestDeadline(30 * time.Millisecond))
+	slow := func(c *gin.Context) {
+		<-c.Request.Context().Done()
+		writeError(c, c.Request.Context().Err(), nil)
+	}
+	r.GET("/slow", slow)
+	var streamDeadline bool
+	r.GET("/streams", func(c *gin.Context) {
+		_, streamDeadline = c.Request.Context().Deadline()
+		c.Status(http.StatusNoContent)
+	})
+	var mintDeadline bool
+	r.POST("/streams/tickets", func(c *gin.Context) { _, mintDeadline = c.Request.Context().Deadline(); c.Status(http.StatusNoContent) })
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/slow", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"timeout"`) || w.Header().Get("Retry-After") == "" {
+		t.Errorf("a request past its deadline = %d %s retry-after %q, want 503 timeout", w.Code, w.Body, w.Header().Get("Retry-After"))
+	}
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/streams", nil))
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/streams/tickets", nil))
+	if streamDeadline {
+		t.Error("the stream upgrade has a request deadline; a long-lived connection must not")
+	}
+	if !mintDeadline {
+		t.Error("minting a ticket has no deadline")
+	}
+}

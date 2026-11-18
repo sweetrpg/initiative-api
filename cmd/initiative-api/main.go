@@ -157,7 +157,7 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 	httpLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	r := gin.New()
-	r.Use(server.Middleware(httpLogger)...)
+	r.Use(server.Middleware(httpLogger, cfg.RequestTimeout)...)
 
 	if len(cfg.AllowedOrigins) > 0 {
 		r.Use(cors.New(cors.Config{

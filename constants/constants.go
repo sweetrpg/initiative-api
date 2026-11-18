@@ -13,6 +13,7 @@ const (
 	ALLOWED_ORIGINS             = "ALLOWED_ORIGINS"
 	OWNER_ENTITLEMENTS_MAX_AGE  = "OWNER_ENTITLEMENTS_MAX_AGE"
 	SESSION_MEMBERS_MAX         = "SESSION_MEMBERS_MAX"
+	REQUEST_TIMEOUT             = "REQUEST_TIMEOUT"
 	STREAM_ALLOWED_ORIGINS      = "STREAM_ALLOWED_ORIGINS"
 	STREAM_TICKET_TTL           = "STREAM_TICKET_TTL"
 	STREAM_MAX_AGE              = "STREAM_MAX_AGE"
@@ -37,4 +38,5 @@ const (
 	MaxStreamTicketTTL     = 2 * time.Minute
 	DefaultStreamMaxAge    = time.Hour
 	DefaultStreamHeartbeat = 20 * time.Second
+	DefaultRequestTimeout  = 10 * time.Second
 )

@@ -28,8 +28,10 @@ make run
 | `AUTH_API_URL` | required | auth-api base URL; tokens are verified via `/authz/check` |
 | `USERS_API_URL` | required | users-api base URL; resolves the caller to `users._id` |
 | `ENTITLEMENTS_API_URL` | required | entitlements-api base URL; the caller's bearer is forwarded on checks |
+| `DB_OPTS` / `DB_URI` query | driver timeouts added | `serverSelectionTimeoutMS=5000`, `connectTimeoutMS=5000` and `socketTimeoutMS=30000` are added when the connection settings do not set them |
 | `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
 | `SESSION_MEMBERS_MAX` | `20` | maximum of a session's member limit; an entitled `members_per_session` above it has no effect; positive integer |
+| `REQUEST_TIMEOUT` | `10s` | deadline for every request except the event stream upgrade; past it a store call fails and the answer is 503 `timeout` with `Retry-After`; 1s-1m |
 | `STREAM_ALLOWED_ORIGINS` | unset | comma-separated host patterns a browser `Origin` may match to open an event stream (no `Origin` is always allowed; `*` is rejected); CORS `ALLOWED_ORIGINS` still applies first, so a cross-origin stream client must be in both lists |
 | `STREAM_TICKET_TTL`, `STREAM_MAX_AGE`, `STREAM_HEARTBEAT` | `30s`, `1h`, `20s` | stream ticket lifetime, maximum connection age, heartbeat and membership re-check interval; Go durations: ticket TTL 1s-2m, max age 1m-24h, heartbeat 1s-1m (it is also how often a stream re-checks membership and credentials) |
 | `OWNER_ENTITLEMENTS_MAX_AGE` | `168h` | how long a recorded owner entitlement serves integration credentials; positive Go duration |

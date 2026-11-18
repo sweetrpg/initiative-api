@@ -39,7 +39,10 @@ func LiveDB() DB {
 // ConnectDatabase opens the database and checks it answers (the driver connects lazily, so a
 // process would otherwise fail on its first query), retrying as p says. A client that opened but
 // did not answer is closed before the next try.
-func ConnectDatabase(p Policy) error { return ConnectDB(LiveDB(), p) }
+func ConnectDatabase(p Policy) error {
+	ApplyDriverTimeouts()
+	return ConnectDB(LiveDB(), p)
+}
 
 // ConnectDB is ConnectDatabase over c.
 func ConnectDB(c DB, p Policy) error {
