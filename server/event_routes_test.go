@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"testing"
@@ -195,8 +194,9 @@ var routeScenarios = map[string]func(*testing.T, eventTable) routeCall{
 		return routeCall{"user-ok", "POST", "/sessions/" + tbl.sid + "/invites", ""}
 	},
 	"DELETE /sessions/:id/invites/:invite": func(t *testing.T, tbl eventTable) routeCall {
-		inv := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/sessions/"+tbl.sid+"/invites", ""))
-		return routeCall{"user-ok", "DELETE", "/sessions/" + tbl.sid + "/invites/" + inv["id"].(string), ""}
+		inviteCode(t, tbl.r, "user-ok", tbl.sid)
+		items := decodeBody(t, callAs(tbl.r, "user-ok", "GET", "/sessions/"+tbl.sid+"/invites", ""))["items"].([]any)
+		return routeCall{"user-ok", "DELETE", "/sessions/" + tbl.sid + "/invites/" + items[0].(map[string]any)["id"].(string), ""}
 	},
 	"DELETE /sessions/:id/blocks/:user": func(t *testing.T, tbl eventTable) routeCall {
 		callAs(tbl.r, "user-ok", "POST", "/sessions/"+tbl.sid+"/blocks", `{"user_id":"u-9"}`)
@@ -217,14 +217,14 @@ var routeScenarios = map[string]func(*testing.T, eventTable) routeCall{
 		return routeCall{"user-ok", "POST", "/sessions/" + tbl.sid + "/requests/" + req["id"].(string) + "/reject", `{"reason":"no"}`}
 	},
 	"POST /themes": func(t *testing.T, tbl eventTable) routeCall {
-		return routeCall{"user-ok", "POST", "/themes", themeBody("A")}
+		return routeCall{"user-ok", "POST", "/themes", themeJSON("A")}
 	},
 	"PATCH /themes/:id": func(t *testing.T, tbl eventTable) routeCall {
-		id := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/themes", themeBody("A")))["id"].(string)
+		id := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/themes", themeJSON("A")))["id"].(string)
 		return routeCall{"user-ok", "PATCH", "/themes/" + id, `{"revision":1,"name":"B"}`}
 	},
 	"DELETE /themes/:id": func(t *testing.T, tbl eventTable) routeCall {
-		id := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/themes", themeBody("A")))["id"].(string)
+		id := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/themes", themeJSON("A")))["id"].(string)
 		return routeCall{"user-ok", "DELETE", "/themes/" + id + "?revision=1", ""}
 	},
 	"PUT /entitlements/active/:kind": func(t *testing.T, tbl eventTable) routeCall {
@@ -313,9 +313,4 @@ var routeScenarios = map[string]func(*testing.T, eventTable) routeCall{
 	"PATCH /sessions/:id/members/:user": func(t *testing.T, tbl eventTable) routeCall {
 		return routeCall{"user-ok", "PATCH", "/sessions/" + tbl.sid + "/members/u-2", `{"role":"observer"}`}
 	},
-}
-
-func themeBody(name string) string {
-	b, _ := json.Marshal(theme(name))
-	return string(b)
 }
