@@ -24,7 +24,8 @@ const FanoutCollection = "stream_fanout"
 // startup fails until the index is dropped.
 const FanoutTTL = 60 * time.Second
 
-// MaxStreamAge and GuardInterval are the bounds on revocation when a relayed eviction is lost: a
+// MaxStreamAge and GuardInterval are the values the stream transport (5.2 part 2) enforces; they
+// live here so the relay's documentation can state the bounds. They are the bounds on revocation when a relayed eviction is lost: a
 // connection ends at MaxStreamAge whatever happens, and its guard re-checks membership every
 // GuardInterval. The transport that enforces both is 5.2 part 2 (the stream endpoint, branch
 // feature/stream-tickets); until it merges, only the relay's own retries and tail-gap eviction apply.
@@ -67,7 +68,10 @@ type fanoutDoc struct {
 // last token after a transient error; only when the server says the history is gone (or the tail
 // never had a position) does it restart from now, and then it ends every local subscription
 // (GapEvictions), because evictions written in the gap are unknown and each client must reconnect
-// and be authorized again. The final bound for anything lost beyond that is MaxStreamAge, with
+// and be authorized again. A change row dropped because this pod's remote queue is full ends that
+// change's audience here for the same reason. Rows lost on the writing side (a full change queue,
+// or an insert that failed through its window) cannot be recovered by the other pods, which learn
+// of the gap only from clients refetching. The final bound for anything lost beyond that is MaxStreamAge, with
 // membership re-checked every GuardInterval.
 type Relay struct {
 	h   *Hub
@@ -79,9 +83,12 @@ type Relay struct {
 	in     chan fanoutDoc // change rows from other pods, rendered off the tail goroutine
 	done   chan struct{}
 	once   sync.Once
+	ran    atomic.Bool
+	flight sync.WaitGroup // evictions queued or being inserted
 	wg     sync.WaitGroup
 
-	failures      atomic.Int64 // tail errors
+	failures      atomic.Int64 // tail errors, ever
+	streak        atomic.Int64 // tail errors since a row last arrived; only the first logs at error level
 	dropped       atomic.Int64 // changes not relayed or not delivered (queue full or insert failed)
 	evictFailures atomic.Int64 // evictions that could not be relayed
 	gapEvictions  atomic.Int64 // times the tail restarted without a position and ended every stream
@@ -131,6 +138,7 @@ func (r *Relay) Tailing() bool { return r.tailing.Load() }
 
 // Run starts the writers, the delivery loop and the tail. It returns at once; Stop ends them.
 func (r *Relay) Run(ctx context.Context) {
+	r.ran.Store(true)
 	ctx, cancel := context.WithCancel(ctx)
 	r.wg.Add(1)
 	go func() { defer r.wg.Done(); <-r.done; cancel() }()
@@ -144,9 +152,14 @@ func (r *Relay) Run(ctx context.Context) {
 // inserted first, so a shutdown does not lose a revocation.
 func (r *Relay) Stop() {
 	r.once.Do(func() {
-		deadline := time.Now().Add(drainWait)
-		for len(r.evicts) > 0 && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
+		if r.ran.Load() {
+			// Wait for every eviction queued or mid-insert, bounded by drainWait.
+			drained := make(chan struct{})
+			go func() { r.flight.Wait(); close(drained) }()
+			select {
+			case <-drained:
+			case <-time.After(drainWait):
+			}
 		}
 		close(r.done)
 	})
@@ -165,23 +178,30 @@ func (r *Relay) publishChange(c data.Change, eventID string) {
 
 func (r *Relay) publishEvict(session, user string) {
 	d := fanoutDoc{ID: primitive.NewObjectID(), Pod: r.pod, Kind: kindEvict, At: time.Now(), Session: session, User: user}
+	r.flight.Add(1)
 	select {
 	case r.evicts <- d:
 	default:
+		r.flight.Done()
 		r.evictFailures.Add(1)
 		slog.Error("the eviction queue is full; an eviction did not reach other pods, which end the stream on their own timers",
 			"session", session, "user", user)
 	}
 }
 
-func (r *Relay) writeChanges(ctx context.Context) { r.writeFrom(ctx, r.out, changeWindow) }
-func (r *Relay) writeEvicts(ctx context.Context)  { r.writeFrom(ctx, r.evicts, evictWindow) }
+func (r *Relay) writeChanges(ctx context.Context) { r.writeFrom(ctx, r.out, changeWindow, nil) }
+func (r *Relay) writeEvicts(ctx context.Context) {
+	r.writeFrom(ctx, r.evicts, evictWindow, r.flight.Done)
+}
 
-func (r *Relay) writeFrom(ctx context.Context, q <-chan fanoutDoc, window time.Duration) {
+func (r *Relay) writeFrom(ctx context.Context, q <-chan fanoutDoc, window time.Duration, done func()) {
 	for {
 		select {
 		case d := <-q:
 			r.insert(ctx, d, window)
+			if done != nil {
+				done()
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -250,6 +270,7 @@ func (r *Relay) tail(ctx context.Context) {
 		r.tailing.Store(true)
 		for cur.Next(ctx) {
 			wait = time.Second
+			r.streak.Store(0)
 			token = cur.Token()
 			r.handle(ctx, cur.Doc())
 		}
@@ -269,7 +290,8 @@ func (r *Relay) tail(ctx context.Context) {
 }
 
 func (r *Relay) fail(ctx context.Context, msg string, err error) {
-	n := r.failures.Add(1)
+	r.failures.Add(1)
+	n := r.streak.Add(1)
 	r.degraded.Store(true)
 	if n > 1 && ctx.Err() == nil {
 		slog.WarnContext(ctx, msg, "error", err, "failures", n) // repeated: a standalone server logs once at error level
@@ -312,8 +334,10 @@ func (r *Relay) handle(ctx context.Context, raw bson.Raw) {
 		select {
 		case r.in <- d:
 		default:
+			// A view_tag-suppressed stream hides a gap, so the audience must reconnect and refetch.
 			r.dropped.Add(1)
-			slog.WarnContext(ctx, "the remote delivery queue is full; this pod's subscribers miss an event")
+			r.h.evictAudience(*d.Change)
+			slog.ErrorContext(ctx, "the remote delivery queue is full; the change's audience on this pod was disconnected to refetch")
 		}
 	}
 }

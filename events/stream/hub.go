@@ -112,11 +112,7 @@ func (h *Hub) Open(sessionID, actor, encounterID string, buf int) *Subscription 
 	h.mu.Unlock()
 	if ttl > 0 {
 		s.mu.Lock()
-		s.timer = time.AfterFunc(ttl, func() {
-			if s.viewer.Load() == nil {
-				s.Close()
-			}
-		})
+		s.timer = time.AfterFunc(ttl, s.expire)
 		s.mu.Unlock()
 	}
 	return s
@@ -162,17 +158,40 @@ func (s *Subscription) send(ev Event) (overflow bool) {
 // Close ends the subscription. It is safe to call more than once and from any goroutine.
 func (s *Subscription) Close() {
 	s.mu.Lock()
-	if !s.closed {
-		s.closed = true
-		close(s.C)
-		if s.timer != nil {
-			s.timer.Stop()
-		}
-	}
+	s.closeLocked()
 	s.mu.Unlock()
+	s.unregister()
+}
+
+// closeLocked ends the subscription; s.mu must be held.
+func (s *Subscription) closeLocked() {
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.C)
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+}
+
+func (s *Subscription) unregister() {
 	s.h.mu.Lock()
 	delete(s.h.sub, s)
 	s.h.mu.Unlock()
+}
+
+// expire ends a subscription still pending at its deadline. The grant and the close are decided
+// under s.mu, so a Grant that returned nil is never followed by this close.
+func (s *Subscription) expire() {
+	s.mu.Lock()
+	if s.viewer.Load() != nil || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closeLocked()
+	s.mu.Unlock()
+	s.unregister()
 }
 
 // Overflowed reports whether the hub closed the subscription because its buffer was full.
@@ -200,6 +219,22 @@ func (h *Hub) evictLocal(sessionID, userID string) {
 	var gone []*Subscription
 	for s := range h.sub {
 		if s.session == sessionID && (userID == "" || s.actor == userID) {
+			gone = append(gone, s)
+		}
+	}
+	h.mu.RUnlock()
+	for _, s := range gone {
+		s.Close()
+	}
+}
+
+// evictAudience ends the subscriptions that would have heard c: a session's, or an owner's private
+// ones.
+func (h *Hub) evictAudience(c data.Change) {
+	h.mu.RLock()
+	var gone []*Subscription
+	for s := range h.sub {
+		if (c.SessionID != "" && s.session == c.SessionID) || (c.SessionID == "" && s.session == "" && s.actor == c.OwnerID) {
 			gone = append(gone, s)
 		}
 	}

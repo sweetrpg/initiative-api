@@ -8,6 +8,8 @@ import (
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/events/stream"
+	"github.com/sweetrpg/initiative-api/store"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -270,4 +272,100 @@ func TestALostHistoryEndsEveryStreamBecauseEvictionsInTheGapAreUnknown(t *testin
 		t.Errorf("gap evictions = %d, want 1", n)
 	}
 	waitFor(t, "the tail to reopen", pods[0].relay.Tailing)
+}
+
+// slowCollection delays every insert, as a Mongo slowdown does.
+type slowCollection struct {
+	store.Collection
+	delay time.Duration
+}
+
+func (c slowCollection) Watch(ctx context.Context, resume bson.Raw) (store.Cursor, error) {
+	return store.Watch(ctx, c.Collection, resume)
+}
+
+func (c slowCollection) InsertOne(ctx context.Context, doc any) error {
+	select {
+	case <-time.After(c.delay):
+	case <-ctx.Done():
+		return ctx.Err() // a real driver abandons the insert when its context ends
+	}
+	return c.Collection.InsertOne(ctx, doc)
+}
+
+func TestStopWritesAnEvictionStillBeingInserted(t *testing.T) {
+	e := newEventTable(t, nil)
+	h := stream.New(e.enc)
+	r := h.AttachRelay(slowCollection{e.db.Collection(stream.FanoutCollection), 300 * time.Millisecond}, "pod-a", 4)
+	r.Run(context.Background())
+	waitFor(t, "the tail", r.Tailing)
+
+	h.Evict(e.sid, "u-2")
+	time.Sleep(50 * time.Millisecond) // the writer has taken the row and is mid-insert
+	r.Stop()
+
+	if n := len(e.db.Fake(stream.FanoutCollection).Docs()); n != 1 {
+		t.Errorf("the fan-out collection holds %d rows after Stop, want the eviction", n)
+	}
+}
+
+func TestStopWithoutRunReturnsAtOnce(t *testing.T) {
+	e := newEventTable(t, nil)
+	r := stream.New(e.enc).AttachRelay(e.db.Collection(stream.FanoutCollection), "pod-a", 4)
+	done := make(chan struct{})
+	go func() { r.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop waited on a relay that never ran")
+	}
+}
+
+func TestAGrantThatSucceedsIsNeverFollowedByThePendingClose(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	hub.SetPendingTTL(time.Millisecond)
+	v := e.viewer(t, "user-two")
+	for range 300 {
+		s := hub.Open(e.sid, "u-2", encE1, 4)
+		time.Sleep(time.Millisecond) // land the deadline close to the grant
+		if err := s.Grant(v); err != nil {
+			continue
+		}
+		time.Sleep(5 * time.Millisecond)
+		if isClosed(s) {
+			t.Fatal("a subscription whose Grant succeeded was closed by the pending deadline")
+		}
+		s.Close()
+	}
+}
+
+type slowRenderer struct{ stream.Renderer }
+
+func (r slowRenderer) Definition(ctx context.Context, enc data.Encounter) []data.TrackerField {
+	time.Sleep(100 * time.Millisecond)
+	return r.Renderer.Definition(ctx, enc)
+}
+
+func TestAFullRemoteQueueDisconnectsTheAudienceInsteadOfLeavingItStale(t *testing.T) {
+	e := newEventTable(t, nil)
+	a := stream.New(e.enc)
+	ra := a.AttachRelay(e.db.Collection(stream.FanoutCollection), "pod-a", 64)
+	b := stream.New(slowRenderer{e.enc})
+	rb := b.AttachRelay(e.db.Collection(stream.FanoutCollection), "pod-b", 1)
+	for _, r := range []*stream.Relay{ra, rb} {
+		r.Run(context.Background())
+		t.Cleanup(r.Stop)
+		waitFor(t, "the tail", r.Tailing)
+	}
+	player := subscribe(b, e.viewer(t, "user-two"), encE1, 64)
+
+	for range 20 {
+		a.Emit(context.Background(), e.change(t))
+	}
+
+	waitFor(t, "the audience to be disconnected", func() bool { return isClosed(player) })
+	if rb.Dropped() == 0 {
+		t.Error("the dropped remote rows were not counted")
+	}
 }
