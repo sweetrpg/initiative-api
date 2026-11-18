@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,6 +71,10 @@ func credRouterRel(t *testing.T, limit string, db store.Database, rel http.Handl
 // using it do not run in parallel and restore it with t.Cleanup.
 var routerHook func(*Services)
 
+// accessLogger receives the access log of every router credRouterEnt builds; a test swaps in a
+// buffer to read it.
+var accessLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
 // credRouterEnt is credRouterRel with a caller-supplied entitlements-api. opts adjust the services before the router is built.
 func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.HandlerFunc, opts ...func(*Services)) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
@@ -97,8 +103,7 @@ func credRouterEnt(t *testing.T, db store.Database, rel, entHandler http.Handler
 		o(&svc)
 	}
 	r := gin.New()
-	r.Use(Correlation())
-	r.Use(RedactTicket())
+	r.Use(Middleware(accessLogger)...)
 	SetupHandlers(r, svc)
 	probe := ProtectedGroup(r, svc.Authz, svc.Credentials)
 	probe.Any("/probe", func(c *gin.Context) { c.String(http.StatusOK, authz.Viewer(c)) })

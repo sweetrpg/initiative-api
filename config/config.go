@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sweetrpg/initiative-api/constants"
-	"github.com/sweetrpg/initiative-api/data"
 )
 
 // Config is the validated runtime configuration.
@@ -98,16 +97,16 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	for _, d := range []struct {
 		key      string
 		dst      *time.Duration
-		def      string
+		def      time.Duration
 		min, max time.Duration
 	}{
-		{constants.STREAM_TICKET_TTL, &c.StreamTicketTTL, "30s", time.Second, data.MaxTicketTTL},
-		{constants.STREAM_MAX_AGE, &c.StreamMaxAge, "1h", time.Minute, 24 * time.Hour},
+		{constants.STREAM_TICKET_TTL, &c.StreamTicketTTL, constants.DefaultStreamTicketTTL, time.Second, constants.MaxStreamTicketTTL},
+		{constants.STREAM_MAX_AGE, &c.StreamMaxAge, constants.DefaultStreamMaxAge, time.Minute, 24 * time.Hour},
 		// The heartbeat is also how often a stream re-checks membership and credentials, so it
 		// bounds how long a revocation can go unseen.
-		{constants.STREAM_HEARTBEAT, &c.StreamHeartbeat, "20s", time.Second, time.Minute},
+		{constants.STREAM_HEARTBEAT, &c.StreamHeartbeat, constants.DefaultStreamHeartbeat, time.Second, time.Minute},
 	} {
-		v := get(d.key, d.def)
+		v := get(d.key, d.def.String())
 		if n, err := time.ParseDuration(v); err != nil || n < d.min || n > d.max {
 			errs = append(errs, fmt.Errorf("%s %q: must be a duration between %s and %s", d.key, v, d.min, d.max))
 		} else {
@@ -118,6 +117,8 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		for _, o := range strings.Split(origins, ",") {
 			if o = strings.TrimSpace(o); o == "*" {
 				errs = append(errs, fmt.Errorf("%s: wildcard origin is not allowed", constants.STREAM_ALLOWED_ORIGINS))
+			} else if matchesArbitraryHost(o) {
+				errs = append(errs, fmt.Errorf("%s %q: pattern would match any host", constants.STREAM_ALLOWED_ORIGINS, o))
 			} else if _, err := path.Match(o, ""); err != nil {
 				errs = append(errs, fmt.Errorf("%s %q: not a valid host pattern", constants.STREAM_ALLOWED_ORIGINS, o))
 			} else if o != "" {
@@ -162,4 +163,15 @@ func checkURL(key, value string, required bool) []error {
 		return []error{fmt.Errorf("%s %q: must be an absolute http(s) URL", key, value)}
 	}
 	return nil
+}
+
+// matchesArbitraryHost reports whether pattern matches hosts it does not name (such as "**" or
+// "*?*"), which would defeat the ban on a wildcard origin.
+func matchesArbitraryHost(pattern string) bool {
+	for _, host := range []string{"a.b", "zz.example.test", "q"} {
+		if ok, _ := path.Match(pattern, host); ok {
+			return true
+		}
+	}
+	return false
 }

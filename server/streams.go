@@ -34,6 +34,8 @@ const (
 	pongTimeout                                 = 60 * time.Second
 	ticketQuery                                 = "ticket"
 	ticketKey                                   = "initiative.stream_ticket"
+	ticketPresentKey                            = "initiative.stream_ticket_present"
+	redactedKey                                 = "initiative.stream_redacted"
 )
 
 // StreamOptions are the transport settings of the event stream.
@@ -44,20 +46,31 @@ type StreamOptions struct {
 	// MaxAge ends a stream after this long (default 1h); Heartbeat is the interval of the
 	// application heartbeat, the protocol ping, and the membership re-check (default 20s).
 	MaxAge, Heartbeat time.Duration
+	// Buffer is how many events a stream may fall behind before it is closed (default 64).
+	Buffer int
+	// beforeWrite, when set by a test, runs before each event is written.
+	beforeWrite func()
+}
+
+func (o StreamOptions) buffer() int {
+	if o.Buffer > 0 {
+		return o.Buffer
+	}
+	return streamBuffer
 }
 
 func (o StreamOptions) maxAge() time.Duration {
 	if o.MaxAge > 0 {
 		return o.MaxAge
 	}
-	return time.Hour
+	return constants.DefaultStreamMaxAge
 }
 
 func (o StreamOptions) heartbeat() time.Duration {
 	if o.Heartbeat > 0 {
 		return o.Heartbeat
 	}
-	return 20 * time.Second
+	return constants.DefaultStreamHeartbeat
 }
 
 // RedactTicket takes the stream ticket out of the request URL before anything logs it, and keeps
@@ -65,10 +78,17 @@ func (o StreamOptions) heartbeat() time.Duration {
 // harmless, but it should never reach an access log.
 func RedactTicket() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Set(redactedKey, true)
 		if c.Request.URL.RawQuery != "" {
 			q := c.Request.URL.Query()
-			if t := q.Get(ticketQuery); t != "" {
-				c.Set(ticketKey, t)
+			if q.Has(ticketQuery) {
+				for _, t := range q[ticketQuery] { // the first non-empty value is the ticket
+					if t != "" {
+						c.Set(ticketKey, t)
+						break
+					}
+				}
+				c.Set(ticketPresentKey, true)
 				q.Del(ticketQuery)
 				c.Request.URL.RawQuery = q.Encode()
 				c.Request.RequestURI = c.Request.URL.RequestURI() // Recovery and tracing read this one
@@ -138,16 +158,21 @@ func (o StreamOptions) originAllowed(r *http.Request) bool {
 // ticketGate serves a request that carries a ticket; any other request continues to the bearer
 // chain. The ticket stands in for a bearer the browser cannot send on an upgrade.
 func (h streamHandlers) ticketGate(c *gin.Context) {
-	ticket := c.GetString(ticketKey)
-	if ticket == "" && c.Request.URL.Query().Has(ticketQuery) {
+	if _, ok := c.Get(redactedKey); !ok && c.Request.URL.Query().Has(ticketQuery) {
 		// RedactTicket was not installed ahead of the access log: refuse rather than serve a
 		// request whose ticket may already be in a log. Wiring bug, not a client error.
 		slog.ErrorContext(c.Request.Context(), "a stream ticket arrived but RedactTicket is not installed; refusing")
 		c.AbortWithStatusJSON(http.StatusInternalServerError, ErrorBody{Code: "internal", Message: "Something went wrong.", CorrelationID: CorrelationID(c)})
 		return
 	}
-	if ticket == "" {
+	if present, _ := c.Get(ticketPresentKey); present != true {
 		c.Next()
+		return
+	}
+	ticket := c.GetString(ticketKey)
+	if ticket == "" { // ?ticket= with no value
+		c.Abort()
+		writeError(c, domain.ErrTicketInvalid, nil)
 		return
 	}
 	c.Abort()
@@ -191,29 +216,36 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 		return h.svc.Streams.BearerView(ctx, actor, session, enc)
 	}
 	if id, ok := c.Get(credentialContextKey); ok {
-		// Live answers false for a revoked credential. A store error keeps the stream until it has
-		// failed maxGuardErrors checks in a row, then closes it as revoked: fail closed, but not on
-		// one blip. The bound on a missed revocation is then maxGuardErrors heartbeats.
-		var failed int
-		a.guard = func(ctx context.Context) error {
-			live, err := h.svc.Credentials.Live(ctx, id.(string))
-			switch {
-			case err != nil:
-				if failed++; failed >= maxGuardErrors {
-					return errCredentialRevoked
-				}
-			case !live:
-				return errCredentialRevoked
-			default:
-				failed = 0
-			}
-			return nil
-		}
+		a.guard = liveGuard(func(ctx context.Context) (bool, error) {
+			return h.svc.Credentials.Live(ctx, id.(string))
+		})
 	}
 	h.serve(c, a)
 }
 
 var errCredentialRevoked = errors.New("credential revoked")
+
+// liveGuard turns a liveness read into a heartbeat guard. A revoked credential ends the stream at
+// once. A store error keeps it until maxGuardErrors checks in a row have failed, then closes it as
+// revoked: fail closed, but not on one blip, so a missed revocation is bounded by that many
+// heartbeats. A successful read resets the count.
+func liveGuard(live func(context.Context) (bool, error)) func(context.Context) error {
+	var failed int
+	return func(ctx context.Context) error {
+		ok, err := live(ctx)
+		switch {
+		case err != nil:
+			if failed++; failed >= maxGuardErrors {
+				return errCredentialRevoked
+			}
+		case !ok:
+			return errCredentialRevoked
+		default:
+			failed = 0
+		}
+		return nil
+	}
+}
 
 type serveArgs struct {
 	actor, session, encounter, clientID string
@@ -226,7 +258,7 @@ type serveArgs struct {
 // does so before the upgrade, as an ordinary HTTP error.
 func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 	ctx := c.Request.Context()
-	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, streamBuffer)
+	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, h.opts.buffer())
 	defer sub.Close()
 	v, err := a.authorize(ctx)
 	if err == nil {
@@ -319,6 +351,9 @@ func (cl *connection) run(ctx context.Context) {
 					_ = cl.conn.Close(CloseMembershipChanged, "membership changed")
 				}
 				return
+			}
+			if hook := cl.h.opts.beforeWrite; hook != nil {
+				hook()
 			}
 			if cl.sub.Ended() { // evicted: what is still buffered must not be written
 				continue

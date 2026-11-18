@@ -16,7 +16,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gomodule/redigo/redis"
 	"github.com/joho/godotenv"
-	sloggin "github.com/samber/slog-gin"
 	"github.com/sweetrpg/api-core.go/ratelimit"
 	"github.com/sweetrpg/api-core.go/tracing"
 	"github.com/sweetrpg/api-core.go/util"
@@ -34,7 +33,6 @@ import (
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
 func main() {
@@ -147,12 +145,7 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 	httpLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	r := gin.New()
-	// Correlation runs first so the access log and every handler see the ID.
-	r.Use(server.Correlation())
-	r.Use(server.RedactTicket()) // before the access log, which would otherwise record the ticket
-	r.Use(sloggin.New(httpLogger))
-	r.Use(gin.Recovery())
-	r.Use(otelgin.Middleware(constants.ServiceName))
+	r.Use(server.Middleware(httpLogger)...)
 
 	if len(cfg.AllowedOrigins) > 0 {
 		r.Use(cors.New(cors.Config{

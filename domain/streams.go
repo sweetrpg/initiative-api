@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"github.com/sweetrpg/initiative-api/constants"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
@@ -18,7 +19,7 @@ import (
 var ErrTicketInvalid = errors.New("stream ticket is not valid")
 
 // DefaultTicketTTL is how long a minted ticket may be redeemed.
-const DefaultTicketTTL = 30 * time.Second
+const DefaultTicketTTL = constants.DefaultStreamTicketTTL
 
 // Streams issues and redeems the one-time tickets that open an event stream for a browser.
 type Streams struct {

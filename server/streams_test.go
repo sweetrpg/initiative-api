@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,13 +35,16 @@ type streamTable struct {
 	streams *domain.Streams
 	clock   *atomic.Int64 // unix nanoseconds the tickets are aged by
 	down    *atomic.Bool  // auth-api answers 503 while set
+	relHits *atomic.Int64 // auth-api checks received while it was down
+	svc     *Services
+	opts    StreamOptions
 }
 
 func (st streamTable) advance(d time.Duration) { st.clock.Add(int64(d)) }
 
 func newStreamTable(t *testing.T, opts StreamOptions, ticketTTL time.Duration) streamTable {
 	t.Helper()
-	st := streamTable{clock: new(atomic.Int64), down: new(atomic.Bool)}
+	st := streamTable{clock: new(atomic.Int64), down: new(atomic.Bool), relHits: new(atomic.Int64), opts: opts}
 	st.clock.Store(time.Now().UnixNano())
 	var captured *fake.DB
 	routerHook = func(svc *Services) {
@@ -54,11 +57,12 @@ func newStreamTable(t *testing.T, opts StreamOptions, ticketTTL time.Duration) s
 		svc.Streams.TTL = ticketTTL
 		svc.Streams.SetClock(func() time.Time { return time.Unix(0, st.clock.Load()) })
 		svc.Stream = opts
-		st.hub, st.streams = hub, svc.Streams
+		st.hub, st.streams, st.svc = hub, svc.Streams, svc
 	}
 	t.Cleanup(func() { routerHook = nil })
 	st.r, st.db, st.sid = viewTableRel(t, "3", func(d *fake.DB) store.Database { captured = d; return d }, func(w http.ResponseWriter, r *http.Request) {
 		if st.down.Load() {
+			st.relHits.Add(1)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -477,8 +481,9 @@ func TestAnotherUsersPrivateEncounterGetsNoTicket(t *testing.T) {
 		t.Fatalf("create = %d %s", w.Code, w.Body)
 	}
 	id := decodeBody(t, w)["id"].(string)
-	if _, code := st.ticket(t, "user-two", `{"encounter_id":"`+id+`"}`); code != http.StatusForbidden && code != http.StatusNotFound {
-		t.Errorf("another user's private encounter mint = %d, want 403 or 404", code)
+	want := callAs(st.r, "user-two", "GET", "/encounters/"+id, "").Code // what the REST read answers (PADR-0035)
+	if _, code := st.ticket(t, "user-two", `{"encounter_id":"`+id+`"}`); code != want || want < 400 {
+		t.Errorf("another user's private encounter mint = %d, want what the REST read answers (%d)", code, want)
 	}
 	if _, code := st.ticket(t, "user-ok", `{"encounter_id":"`+id+`"}`); code != http.StatusCreated {
 		t.Errorf("the owner's mint = %d", code)
@@ -511,26 +516,11 @@ func TestABearerUpgradeFollowsTheRESTAuthorization(t *testing.T) {
 		t.Errorf("a non-member's bearer upgrade = %d, want 403", got)
 	}
 	st.down.Store(true)
-	if got := st.refused(t, "session_id="+st.sid, http.Header{"Authorization": {"Bearer user-ok"}}); got != http.StatusServiceUnavailable && got != http.StatusUnauthorized {
-		t.Errorf("a bearer upgrade with auth-api down = %d, want it refused (503 or 401), never opened", got)
+	if got := st.refused(t, "session_id="+st.sid, http.Header{"Authorization": {"Bearer user-ok"}}); got != http.StatusServiceUnavailable {
+		t.Errorf("a bearer upgrade with auth-api down = %d, want 503 (fail closed)", got)
 	}
-}
-
-func TestAClientThatFallsBehindIsClosedWith4003(t *testing.T) {
-	st := newStreamTable(t, StreamOptions{}, 0)
-	tk, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
-	c, _, err := st.dial(t, "ticket="+tk, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	frame(t, c)
-	enc := st.encounter(t)
-	for i := 0; i < 20000; i++ {
-		enc.Name = "n" + strconv.Itoa(i) // a different visible view each time, so each event is sent
-		st.hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: enc, SessionID: st.sid, OwnerID: "u-1", At: time.Now()})
-	}
-	if got := closeCode(c); got != CloseSlowConsumer {
-		t.Errorf("close code = %d, want %d", got, CloseSlowConsumer)
+	if st.relHits.Load() == 0 {
+		t.Error("the outage was never reached: the stub was not asked while down")
 	}
 }
 
@@ -557,5 +547,213 @@ func TestABadClientIDOnTheBearerPathIsIgnored(t *testing.T) {
 	}
 	if hello, _ := frame(t, c); hello["client_id"] != "" {
 		t.Errorf("hello client_id = %v, want the invalid id dropped", hello["client_id"])
+	}
+}
+
+func TestAnEmptyOrDuplicatedTicketIsRefusedAndNeverLogged(t *testing.T) {
+	var logs bytes.Buffer
+	old := accessLogger
+	accessLogger = slog.New(slog.NewJSONHandler(&logs, nil))
+	t.Cleanup(func() { accessLogger = old })
+	st := newStreamTable(t, StreamOptions{}, 0)
+	bogus := "bogus" + "-ticket-value"
+	for _, q := range []string{"ticket=", "ticket=&ticket=" + bogus, "ticket=" + bogus + "&ticket="} {
+		w := httptest.NewRecorder()
+		st.r.ServeHTTP(w, httptest.NewRequest("GET", "/streams?"+q, nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("GET /streams?%s = %d, want 401", q, w.Code)
+		}
+	}
+	real, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
+	if _, _, err := st.dial(t, "ticket="+real, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{bogus, real} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("the access log of the real router chain contains a ticket: %s", secret)
+		}
+	}
+	if !strings.Contains(logs.String(), "/streams") {
+		t.Error("the access log recorded no stream request, so the check proved nothing")
+	}
+}
+
+func TestAnEvictionBetweenOpenAndGrantIsRefusedAs403(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	h := streamHandlers{svc: *st.svc, opts: st.opts}
+	r := gin.New()
+	r.Use(typedErrors())
+	r.GET("/s", func(c *gin.Context) {
+		h.serve(c, serveArgs{actor: "u-2", session: st.sid, authorize: func(context.Context) (data.Viewer, error) {
+			st.hub.Evict(st.sid, "u-2") // the member is removed while authorization is in flight
+			return st.streams.View(context.Background(), domain.Claim{UserID: "u-2", SessionID: st.sid, Level: data.ViewPlayer})
+		}})
+	})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/s", nil))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("evicted between Open and Grant = %d, want 403", w.Code)
+	}
+}
+
+func TestACredentialIsClosedAfterThreeFailedLivenessReadsInARow(t *testing.T) {
+	var live bool
+	var err error
+	guard := liveGuard(func(context.Context) (bool, error) { return live, err })
+	ctx := context.Background()
+	err = errors.New("store down")
+	for i := 1; i <= 2; i++ {
+		if got := guard(ctx); got != nil {
+			t.Fatalf("failed read %d closed the stream; want it kept until the third", i)
+		}
+	}
+	err, live = nil, true
+	if got := guard(ctx); got != nil { // a success resets the count
+		t.Fatalf("a healthy read = %v", got)
+	}
+	err = errors.New("store down")
+	for i := 1; i <= 2; i++ {
+		if got := guard(ctx); got != nil {
+			t.Fatalf("after a reset, failed read %d closed the stream", i)
+		}
+	}
+	if got := guard(ctx); !errors.Is(got, errCredentialRevoked) {
+		t.Errorf("third failed read in a row = %v, want revoked", got)
+	}
+	err, live = nil, false
+	if got := guard(ctx); !errors.Is(got, errCredentialRevoked) {
+		t.Errorf("a revoked credential = %v, want revoked", got)
+	}
+}
+
+// hold makes the connection's writer wait at the first event it takes until release is called, so
+// a test decides exactly how many events are buffered behind it.
+func hold() (opt func(*StreamOptions), release func(), taken chan struct{}) {
+	gate, taken := make(chan struct{}), make(chan struct{}, 1)
+	var once sync.Once
+	opt = func(o *StreamOptions) {
+		o.beforeWrite = func() {
+			select {
+			case taken <- struct{}{}:
+			default:
+			}
+			<-gate
+		}
+	}
+	return opt, func() { once.Do(func() { close(gate) }) }, taken
+}
+
+func TestAClientThatFallsBehindIsClosedWith4003(t *testing.T) {
+	opt, release, taken := hold()
+	o := StreamOptions{Buffer: 1}
+	opt(&o)
+	st := newStreamTable(t, o, 0)
+	t.Cleanup(release)
+	tk, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	frame(t, c)
+	enc := st.encounter(t)
+	emit := func(name string) {
+		enc.Name = name // a different visible view each time, so each change is sent
+		st.hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: enc, SessionID: st.sid, OwnerID: "u-1", At: time.Now()})
+	}
+	emit("one")
+	<-taken // the writer holds event one; the buffer (1) is empty
+	emit("two")
+	emit("three") // the buffer is full: the subscriber is closed
+	release()
+	if got := closeCode(c); got != CloseSlowConsumer {
+		t.Errorf("close code = %d, want %d", got, CloseSlowConsumer)
+	}
+}
+
+func TestAnEvictedStreamWritesNoneOfItsBufferedEvents(t *testing.T) {
+	opt, release, taken := hold()
+	o := StreamOptions{}
+	opt(&o)
+	st := newStreamTable(t, o, 0)
+	t.Cleanup(release)
+	tk, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	frame(t, c)
+	enc := st.encounter(t)
+	for i, name := range []string{"one", "two", "three"} {
+		enc.Name = name
+		st.hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: enc, SessionID: st.sid, OwnerID: "u-1", At: time.Now()})
+		if i == 0 {
+			<-taken
+		}
+	}
+	st.hub.Evict(st.sid, "u-2")
+	release()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		_, b, err := c.Read(ctx)
+		if err != nil {
+			if got := websocket.CloseStatus(err); got != CloseMembershipChanged {
+				t.Errorf("close code = %d, want %d", got, CloseMembershipChanged)
+			}
+			return
+		}
+		t.Errorf("an evicted stream still wrote a frame: %s", b)
+	}
+}
+
+func TestAClientDataMessageEndsTheStream(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	tk, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = c.Write(ctx, websocket.MessageText, bytes.Repeat([]byte("x"), 4096))
+	// CloseRead refuses any data message (1008) before the 1 KiB read limit could matter; the limit
+	// stays as the bound should that ever change.
+	if got := closeCode(c); got != websocket.StatusPolicyViolation {
+		t.Errorf("close code = %d, want 1008", got)
+	}
+}
+
+func TestADemotionWithNoEvictionIsFoundByTheNextHeartbeat(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{Heartbeat: 40 * time.Millisecond}, 0)
+	st.svc.Sessions.SetEvictor(nil) // only the heartbeat's re-check can notice
+	tk, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	if w := callAs(st.r, "user-ok", "PATCH", "/sessions/"+st.sid+"/members/u-2", `{"role":"observer"}`); w.Code >= 300 {
+		t.Fatalf("demote = %d", w.Code)
+	}
+	if got := closeCode(c); got != CloseMembershipChanged {
+		t.Errorf("close code = %d, want %d", got, CloseMembershipChanged)
+	}
+}
+
+func TestADemotedMembersTicketServesTheLowerLevel(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	tk, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+	callAs(st.r, "user-ok", "PATCH", "/sessions/"+st.sid+"/members/u-2", `{"role":"observer"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	head, _ := frame(t, c)
+	want := strings.Trim(callAs(st.r, "user-three", "GET", "/sessions/"+st.sid+"/encounters/"+encE1, "").Header().Get("ETag"), `"`)
+	if head["view_tag"] != want || want == "" {
+		t.Errorf("head view_tag = %v, want the observer's %q", head["view_tag"], want)
 	}
 }
