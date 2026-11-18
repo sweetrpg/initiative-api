@@ -56,7 +56,7 @@ func TestConcurrentAcquiresNeverLeaveABucketOverItsCap(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	n, _ := col.CountDocuments(ctx, bson.D{{Key: "bucket", Value: "u-1"}})
+	n, _ := col.CountDocuments(ctx, bson.D{{Key: "bucket", Value: "user:u-1"}})
 	if n > max {
 		t.Errorf("%d seats held, over the cap of %d", n, max)
 	}
@@ -120,7 +120,7 @@ func TestAReconnectTakesOverEveryDroppedSeatOfItsClientOnlyOnceItHasOne(t *testi
 	if err := r.Acquire(ctx, lease("c", "u-1", "web-1"), time.Minute, 1); err != nil {
 		t.Fatalf("reconnect with the cap at 1 = %v, want it to take over the dropped seats", err)
 	}
-	if n, _ := col.CountDocuments(ctx, bson.D{{Key: "bucket", Value: "u-1"}}); n != 1 {
+	if n, _ := col.CountDocuments(ctx, bson.D{{Key: "bucket", Value: "user:u-1"}}); n != 1 {
 		t.Errorf("%d rows, want only the new seat", n)
 	}
 }

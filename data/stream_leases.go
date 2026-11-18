@@ -37,7 +37,7 @@ var leaseIndexes = []store.IndexSpec{
 
 // StreamLease is one stream's seat. Until is when the seat lapses unless renewed: a pod that
 // crashes leaves seats that expire on their own, and a dropped client keeps its seat for a grace
-// period so a reconnect does not need a free one. Bucket is what the cap counts: the user for a
+// period so a reconnect does not need a free one. Bucket is what the cap counts: "user:<id>" for a
 // user's stream, "cred:<id>" for an integration credential's, so a runaway credential cannot lock
 // its owner out of their own stream. Every pod stamps Until from its own clock and the pods compare
 // them, so the cluster's clocks must agree to within a few seconds (a skew moves a seat's lapse by
@@ -99,7 +99,7 @@ func (r *StreamLeases) Acquire(ctx context.Context, l StreamLease, ttl time.Dura
 		return err
 	}
 	if l.Bucket == "" {
-		l.Bucket = l.UserID
+		l.Bucket = "user:" + l.UserID
 	}
 	l.Until, l.Dropped = r.now().Add(ttl), false
 	if err := r.c.InsertOne(ctx, l); err != nil {
@@ -134,6 +134,9 @@ func (r *StreamLeases) takeOver(ctx context.Context, l StreamLease) {
 	}
 }
 
+// ponytail: Renew can bring back a seat that lapsed (after more than the lease TTL of failed
+// renewals) without recounting, so a bucket may sit one over its cap until that stream ends; a
+// recount here would close a healthy stream on a store blip.
 // Renew pushes the seat's end to ttl from now. If the row is gone (its TTL ran out while renewals
 // were failing) it is put back, so a healthy stream does not lose its seat. A renewal that fails
 // leaves the stream up; its seat lapses after the lease TTL if renewals keep failing.

@@ -855,7 +855,6 @@ func TestARefusedConnectLeavesTheTicketRedeemable(t *testing.T) {
 		t.Fatalf("second stream = %d, want 429", got)
 	}
 	// The cap is still full, so the ticket is not spent on the next try either; free the seat and use it.
-	st.db.Fake(data.CollectionStreamLeases).Docs()
 	for _, d := range st.db.Fake(data.CollectionStreamLeases).Docs() {
 		_ = st.db.Fake(data.CollectionStreamLeases).DeleteOne(context.Background(), bson.D{{Key: "_id", Value: d["_id"]}})
 	}
@@ -897,27 +896,70 @@ func TestThePodSlotCounterNeverCountsARefusedAttempt(t *testing.T) {
 	}
 }
 
-func TestTheSlotIsReleasedWhenAHandlerPanicsOrFailsToAuthorize(t *testing.T) {
+func TestTheSlotIsReleasedWhenARealHandlerPanicsOrFailsToAuthorize(t *testing.T) {
 	st := newStreamTable(t, StreamOptions{MaxPerPod: 1}, 0)
-	h := streamHandlers{svc: *st.svc, opts: st.opts, open: new(atomic.Int64)}
-	r := gin.New()
-	r.Use(gin.Recovery())
-	r.GET("/panic", func(c *gin.Context) {
-		release, _ := h.admit()
-		defer release()
-		panic("boom")
-	})
-	r.GET("/deny", func(c *gin.Context) {
-		release, _ := h.admit()
-		defer release()
-		h.serve(c, serveArgs{actor: "u-9", session: st.sid, authorize: func(context.Context) (data.Viewer, error) { return data.Viewer{}, data.ErrNotMember }})
-	})
-	for _, p := range []string{"/panic", "/deny"} {
-		r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", p, nil))
+	for name, hook := range map[string]func(){"panic": func() { panic("boom") }, "deny": nil} {
+		opts := st.opts
+		opts.onServe = hook
+		h := streamHandlers{svc: *st.svc, opts: opts, open: new(atomic.Int64)}
+		r := gin.New()
+		r.Use(gin.Recovery(), func(c *gin.Context) { c.Set(authzViewerKey, "u-9"); c.Next() })
+		r.GET("/streams", h.bearerStream) // a non-member of the session: authorization refuses it
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", "/streams?session_id="+st.sid, nil))
 		if n := h.open.Load(); n != 0 {
-			t.Errorf("%s left %d slots held", p, n)
+			t.Errorf("%s: %d slots still held (status %d)", name, n, w.Code)
 		}
 	}
+}
+
+func TestAJunkTicketOnAFullPodIsAPlain401WithNoUpgrade(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{MaxPerPod: 1}, 0)
+	first, _ := st.open(t, "user-ok", "")
+	defer func() { _ = first.CloseNow() }()
+	if got := st.refused(t, "ticket=not-a-real-ticket", nil); got != http.StatusUnauthorized {
+		t.Errorf("a junk ticket on a full pod = %d, want 401 and no upgrade", got)
+	}
+}
+
+func TestRefusalsInFlightAreBounded(t *testing.T) {
+	h := streamHandlers{opts: StreamOptions{MaxPerPod: 1}, open: new(atomic.Int64), refusing: make(chan struct{}, 1)}
+	h.refusing <- struct{}{} // the one allowed refusal is already in flight
+	r := gin.New()
+	r.GET("/", h.refuseFull)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" {
+		t.Errorf("past the bound: status %d, Retry-After %q; want 503 with Retry-After", w.Code, w.Header().Get("Retry-After"))
+	}
+}
+
+func TestConcurrentConnectsWithOneTicketOpenOneStreamAndHoldOneSeat(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{ConcurrentMax: 5}, 0)
+	tk, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
+	const n = 12
+	var wg sync.WaitGroup
+	var won atomic.Int32
+	conns := make(chan *websocket.Conn, n)
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if c, _, err := st.dial(t, "ticket="+tk, nil); err == nil {
+				won.Add(1)
+				conns <- c
+			}
+		}()
+	}
+	wg.Wait()
+	close(conns)
+	for c := range conns {
+		defer func() { _ = c.CloseNow() }()
+	}
+	if won.Load() != 1 {
+		t.Errorf("%d connects opened a stream, want exactly 1", won.Load())
+	}
+	waitFor(t, "the losers' seats to be given back", func() bool { return len(st.db.Fake(data.CollectionStreamLeases).Docs()) == 1 })
 }
 
 func TestACredentialStreamUsesItsOwnBucketNotItsOwners(t *testing.T) {
@@ -978,12 +1020,31 @@ type brokenInsert struct{ *fake.Collection }
 func (brokenInsert) InsertOne(context.Context, any) error { return errors.New("mongo down") }
 
 func TestRenewalsKeepAnOpenStreamsSeatAlive(t *testing.T) {
-	st := newStreamTable(t, StreamOptions{ConcurrentMax: 1, LeaseTTL: 100 * time.Millisecond, Heartbeat: 20 * time.Millisecond}, 0)
+	renewed := make(chan struct{}, 64)
+	st := newStreamTable(t, StreamOptions{ConcurrentMax: 1, LeaseTTL: 100 * time.Millisecond, Heartbeat: 20 * time.Millisecond,
+		afterRenew: func() {
+			select {
+			case renewed <- struct{}{}:
+			default:
+			}
+		}}, 0)
 	c, _ := st.open(t, "user-ok", "")
 	defer func() { _ = c.CloseNow() }()
 	for range 6 {
 		st.advance(80 * time.Millisecond) // each step is within one lease TTL of the last renewal
-		time.Sleep(60 * time.Millisecond) // lets a heartbeat renew
+		select {
+		case <-renewed: // a renewal after this step
+		case <-time.After(5 * time.Second):
+			t.Fatal("no renewal happened")
+		}
+		for len(renewed) > 0 { // wait for one that ran after the advance, not an earlier one
+			<-renewed
+		}
+		select {
+		case <-renewed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no renewal happened")
+		}
 	}
 	if _, code := st.open(t, "user-ok", ""); code != http.StatusTooManyRequests {
 		t.Errorf("after 480ms of renewals the seat should still be held; second stream = %d", code)

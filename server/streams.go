@@ -53,6 +53,10 @@ type StreamOptions struct {
 	Buffer int
 	// beforeWrite, when set by a test, runs before each event is written.
 	beforeWrite func()
+	// onServe, when set by a test, runs as serve starts, holding a pod slot.
+	onServe func()
+	// afterRenew, when set by a test, runs after each seat renewal attempt.
+	afterRenew func()
 	// ConcurrentMax is the most streams one user may hold (Services.Leases counts them, with
 	// seats lasting LeaseTTL unless renewed and kept Grace after a drop); MaxPerPod is this pod's
 	// cap, answered with close code 1013. Zero disables the cap.
@@ -119,13 +123,19 @@ type streamHandlers struct {
 	svc  Services
 	opts StreamOptions
 	open *atomic.Int64 // connections on this pod
+	// refusing bounds the refusals in flight (each holds a socket for the close handshake); nil is
+	// unbounded.
+	refusing chan struct{}
 }
+
+// maxRefusals is how many "pod full" closes may be in flight at once.
+const maxRefusals = 32
 
 // setupStreamHandlers registers POST /streams/tickets (user bearer only) on u, and GET /streams on
 // r: with ticket= it opens the stream for that ticket, with no ticket it needs the caller's bearer
 // (a user's, or an integration credential with the read scope) like every other route.
 func setupStreamHandlers(r *gin.Engine, u *gin.RouterGroup, s Services) {
-	h := streamHandlers{s, s.Stream, new(atomic.Int64)}
+	h := streamHandlers{svc: s, opts: s.Stream, open: new(atomic.Int64), refusing: make(chan struct{}, maxRefusals)}
 	u.POST("/streams/tickets", h.mint)
 	g := r.Group("", h.ticketGate, typedErrors(), authenticate(s.Credentials, authz.RequireAnyRole(s.Authz, constants.ServiceName, authz.RoleUser)))
 	g.Use(withOrigin(), withGate(s.Relations))
@@ -198,31 +208,24 @@ func (h streamHandlers) ticketGate(c *gin.Context) {
 		c.JSON(http.StatusForbidden, ErrorBody{Code: "origin_not_allowed", Message: "This origin may not open a stream.", CorrelationID: CorrelationID(c)})
 		return
 	}
-	// The caps are checked before the ticket is spent, so a refused connect leaves it redeemable.
+	ctx := c.Request.Context()
+	// Peek reads the ticket without spending it, so a junk ticket is a plain 401 (no upgrade, no
+	// socket held) and a refused connect leaves a real one redeemable.
+	claim, err := h.svc.Streams.Peek(ctx, ticket)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
 	release, ok := h.admit()
 	if !ok {
 		h.refuseFull(c)
 		return
 	}
 	defer release()
-	ctx := c.Request.Context()
-	claim, err := h.svc.Streams.Peek(ctx, ticket)
-	if err != nil {
-		writeError(c, err, nil)
-		return
-	}
 	a := serveArgs{
 		actor: claim.UserID, session: claim.SessionID, encounter: claim.EncounterID, clientID: claim.ClientID,
 		authorize: func(ctx context.Context) (data.Viewer, error) { return h.svc.Streams.View(ctx, claim) },
-	}
-	if a.seat, err = h.takeSeat(ctx, a); err != nil {
-		writeError(c, err, nil)
-		return
-	}
-	if _, err := h.svc.Streams.Redeem(ctx, ticket); err != nil { // lost a race for the ticket
-		h.release(a.seat, false)
-		writeError(c, err, nil)
-		return
+		redeem:    func(ctx context.Context) error { _, err := h.svc.Streams.Redeem(ctx, ticket); return err },
 	}
 	h.serve(c, a)
 }
@@ -265,11 +268,6 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 		return
 	}
 	defer release()
-	var err error
-	if a.seat, err = h.takeSeat(c.Request.Context(), a); err != nil {
-		writeError(c, err, nil)
-		return
-	}
 	h.serve(c, a)
 }
 
@@ -303,14 +301,22 @@ type serveArgs struct {
 	// guard runs on every heartbeat, besides the membership re-check; an error ends the stream.
 	guard func(context.Context) error
 	// credentialID is set when an integration credential opened the stream; its seats count in
-	// their own bucket. seat is the seat the caller took, which serve now owns and releases.
+	// their own bucket. seat is the seat serve takes and releases.
 	credentialID string
 	seat         seat
+	// redeem spends the ticket that opened the stream; nil for a bearer stream. It runs after the
+	// seat is taken, so a refused connect never spends it.
+	redeem func(context.Context) error
 }
 
-// serve opens a pending subscription, authorizes, grants, and upgrades. Everything that can fail
-// does so before the upgrade, as an ordinary HTTP error.
+// serve opens a pending subscription, authorizes, grants, takes a seat, spends the ticket (if any),
+// and upgrades. Everything that can fail does so before the upgrade, as an ordinary HTTP error.
+// The seat comes after authorization so a caller who may not see the scope costs the lease store
+// nothing, and the ticket after the seat so a refusal leaves it redeemable.
 func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
+	if hook := h.opts.onServe; hook != nil {
+		hook()
+	}
 	ctx := c.Request.Context()
 	released := false
 	defer func() {
@@ -330,6 +336,16 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 	if err != nil {
 		writeError(c, err, nil)
 		return
+	}
+	if a.seat, err = h.takeSeat(ctx, a); err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	if a.redeem != nil {
+		if err = a.redeem(ctx); err != nil { // lost a race for the ticket
+			writeError(c, err, nil)
+			return
+		}
 	}
 	heads, truncated, err := h.svc.Streams.Heads(ctx, v, a.encounter)
 	if err != nil {
@@ -369,7 +385,7 @@ type seat struct {
 // of their own stream. Over the cap is data.ErrStreamLimit; a store failure is
 // data.ErrStreamUnavailable and a new connect fails closed (streams already open stay up).
 func (h streamHandlers) takeSeat(ctx context.Context, a serveArgs) (seat, error) {
-	max, bucket := h.opts.ConcurrentMax, a.actor
+	max, bucket := h.opts.ConcurrentMax, "user:"+a.actor
 	if a.credentialID != "" {
 		max, bucket = h.opts.CredentialMax, "cred:"+a.credentialID
 	}
@@ -378,6 +394,9 @@ func (h streamHandlers) takeSeat(ctx context.Context, a serveArgs) (seat, error)
 	}
 	l := data.StreamLease{ID: randomHex(), Bucket: bucket, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
 	if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), max); err != nil {
+		if errors.Is(err, data.ErrStreamUnavailable) {
+			slog.WarnContext(ctx, "the stream seat store is unavailable; refusing a new stream", "error", err)
+		}
 		return seat{}, err
 	}
 	return seat{l, true}, nil
@@ -412,9 +431,21 @@ func (h streamHandlers) admit() (release func(), ok bool) {
 	}
 }
 
-// refuseFull accepts the upgrade and closes with 1013, since a browser cannot read the status of a
-// refused upgrade. It runs before the ticket is read, so the client keeps it.
+// refuseFull answers a holder of a real ticket (or an authenticated caller) on a full pod: it
+// accepts the upgrade and closes with 1013, since a browser cannot read the status of a refused
+// upgrade. The ticket was only peeked, so the client keeps it. Each refusal holds a socket for the
+// close handshake, so they are bounded; past the bound the answer is a plain 503.
 func (h streamHandlers) refuseFull(c *gin.Context) {
+	if h.refusing != nil {
+		select {
+		case h.refusing <- struct{}{}:
+			defer func() { <-h.refusing }()
+		default:
+			c.Header("Retry-After", "5")
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, ErrorBody{Code: "pod_full", Message: "This server is full; try again shortly.", CorrelationID: CorrelationID(c)})
+			return
+		}
+	}
 	conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{OriginPatterns: h.opts.AllowedOrigins})
 	if err != nil {
 		return
@@ -434,6 +465,8 @@ type connection struct {
 	sub  *stream.Subscription
 	v    data.Viewer
 	a    serveArgs
+
+	renewFailing bool
 }
 
 func (cl *connection) write(ctx context.Context, v any) error {
@@ -527,8 +560,13 @@ func (cl *connection) renew(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.heartbeat()/2)
 	defer cancel()
-	if err := cl.h.svc.Leases.Renew(ctx, cl.a.seat.lease, cl.h.opts.leaseTTL()); err != nil {
+	err := cl.h.svc.Leases.Renew(ctx, cl.a.seat.lease, cl.h.opts.leaseTTL())
+	if err != nil && !cl.renewFailing {
 		slog.WarnContext(ctx, "renewing a stream seat failed; it lapses if renewals keep failing", "seat", cl.a.seat.lease.ID, "error", err)
+	}
+	cl.renewFailing = err != nil // log the first failure of a run, not every heartbeat
+	if hook := cl.h.opts.afterRenew; hook != nil {
+		hook()
 	}
 }
 
