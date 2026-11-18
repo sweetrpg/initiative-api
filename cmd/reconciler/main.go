@@ -1,6 +1,6 @@
 // Command reconciler runs one OpenFGA tuple reconciliation pass and exits (PADR-0035, PADR-0038).
 // It authenticates to auth-api as an Auth0 machine-to-machine client and caches the token in Redis
-// (PADR-0041). Exit codes: 1 pass failed or Auth0/Redis failed, 2 missing configuration, 3 auth-api
+// (PADR-0041). Exit codes: 1 pass failed, Auth0/Redis failed, or the database stayed unreachable after retries, 2 missing configuration, 3 auth-api
 // rejected the token. Any non-zero exit shows on the CronJob and fires the alert.
 package main
 
@@ -29,7 +29,10 @@ func run() int {
 		return 2
 	}
 
-	database.SetupDatabase()
+	if err := connectWithRetry(liveDB(), dbConnectBudget); err != nil {
+		logging.Logger.Error("cannot reach the database", "error", err.Error())
+		return 1
+	}
 	defer database.TeardownDatabase()
 
 	// Under the CronJob's activeDeadlineSeconds (270); the last minute is reserved for mint
