@@ -56,7 +56,11 @@ func allowRelations(w http.ResponseWriter, r *http.Request) {
 func credRouterRel(t *testing.T, limit string, db store.Database, rel http.HandlerFunc, opts ...func(*Services)) (*gin.Engine, *domain.Credentials) {
 	t.Helper()
 	ent := func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"key":"initiative.integration_credentials","type":"limit","value":` + limit + `,"ttl_seconds":0}`))
+		value := limit
+		if r.URL.Query().Get("key") == domain.KeyMembersPerSession {
+			value = "20" // the roster limit has its own tests; this limit is for the other keys
+		}
+		_, _ = w.Write([]byte(`{"key":"initiative.integration_credentials","type":"limit","value":` + value + `,"ttl_seconds":0}`))
 	}
 	return credRouterEnt(t, db, rel, ent, opts...)
 }

@@ -85,6 +85,7 @@ func main() {
 	sessions.SetSink(hub)
 	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
+	sessions.MaxMembers = cfg.SessionMembersMax
 	svc := server.Services{
 		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(

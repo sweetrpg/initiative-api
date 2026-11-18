@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,9 @@ type Config struct {
 	// integration credentials, which cannot read it live. Past it the credential gets
 	// limits_not_synced until the owner opens the app.
 	OwnerEntitlementsMaxAge time.Duration
+	// SessionMembersMax is the maximum of a session's member limit: an entitled members_per_session
+	// above it has no effect (initiative-entitlement-gating, "Session member limit").
+	SessionMembersMax int
 }
 
 // defaultOwnerEntitlementsMaxAge is seven days.
@@ -70,6 +74,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	var errs []error
+	maxMembers := get(constants.SESSION_MEMBERS_MAX, strconv.Itoa(constants.DefaultSessionMembersMax))
+	if n, err := strconv.Atoi(maxMembers); err != nil || n < 1 {
+		errs = append(errs, fmt.Errorf("%s %q: must be a positive integer", constants.SESSION_MEMBERS_MAX, maxMembers))
+	} else {
+		c.SessionMembersMax = n
+	}
 	maxAge := get(constants.OWNER_ENTITLEMENTS_MAX_AGE, defaultOwnerEntitlementsMaxAge)
 	if d, err := time.ParseDuration(maxAge); err != nil || d <= 0 {
 		errs = append(errs, fmt.Errorf("%s %q: must be a positive duration such as 168h", constants.OWNER_ENTITLEMENTS_MAX_AGE, maxAge))
