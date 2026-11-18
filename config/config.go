@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,13 @@ type Config struct {
 	// SessionMembersMax is the maximum of a session's member limit: an entitled members_per_session
 	// above it has no effect (initiative-entitlement-gating, "Session member limit").
 	SessionMembersMax int
+	// StreamAllowedOrigins are the browser origins (host patterns) that may open an event stream; a
+	// request with no Origin header (a native client) is always allowed.
+	StreamAllowedOrigins []string
+	// StreamTicketTTL is how long a stream ticket can be redeemed; StreamMaxAge ends every stream
+	// after that long, so a revoked credential or a missed eviction cannot outlive it;
+	// StreamHeartbeat is the interval of the server's heartbeat frames.
+	StreamTicketTTL, StreamMaxAge, StreamHeartbeat time.Duration
 }
 
 // defaultOwnerEntitlementsMaxAge is seven days.
@@ -86,6 +94,38 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	} else {
 		c.OwnerEntitlementsMaxAge = d
 	}
+	for _, d := range []struct {
+		key      string
+		dst      *time.Duration
+		def      time.Duration
+		min, max time.Duration
+	}{
+		{constants.STREAM_TICKET_TTL, &c.StreamTicketTTL, constants.DefaultStreamTicketTTL, time.Second, constants.MaxStreamTicketTTL},
+		{constants.STREAM_MAX_AGE, &c.StreamMaxAge, constants.DefaultStreamMaxAge, time.Minute, 24 * time.Hour},
+		// The heartbeat is also how often a stream re-checks membership and credentials, so it
+		// bounds how long a revocation can go unseen.
+		{constants.STREAM_HEARTBEAT, &c.StreamHeartbeat, constants.DefaultStreamHeartbeat, time.Second, time.Minute},
+	} {
+		v := get(d.key, d.def.String())
+		if n, err := time.ParseDuration(v); err != nil || n < d.min || n > d.max {
+			errs = append(errs, fmt.Errorf("%s %q: must be a duration between %s and %s", d.key, v, d.min, d.max))
+		} else {
+			*d.dst = n
+		}
+	}
+	if origins := get(constants.STREAM_ALLOWED_ORIGINS, ""); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			if o = strings.TrimSpace(o); o == "*" {
+				errs = append(errs, fmt.Errorf("%s: wildcard origin is not allowed", constants.STREAM_ALLOWED_ORIGINS))
+			} else if matchesArbitraryHost(o) {
+				errs = append(errs, fmt.Errorf("%s %q: pattern would match any host", constants.STREAM_ALLOWED_ORIGINS, o))
+			} else if _, err := path.Match(o, ""); err != nil {
+				errs = append(errs, fmt.Errorf("%s %q: not a valid host pattern", constants.STREAM_ALLOWED_ORIGINS, o))
+			} else if o != "" {
+				c.StreamAllowedOrigins = append(c.StreamAllowedOrigins, o)
+			}
+		}
+	}
 	if _, _, err := net.SplitHostPort(c.BindAddress); err != nil {
 		errs = append(errs, fmt.Errorf("BIND_ADDRESS %q: %w", c.BindAddress, err))
 	}
@@ -123,4 +163,15 @@ func checkURL(key, value string, required bool) []error {
 		return []error{fmt.Errorf("%s %q: must be an absolute http(s) URL", key, value)}
 	}
 	return nil
+}
+
+// matchesArbitraryHost reports whether pattern matches hosts it does not name (such as "**" or
+// "*?*"), which would defeat the ban on a wildcard origin.
+func matchesArbitraryHost(pattern string) bool {
+	for _, host := range []string{"a.b", "zz.example.test", "q"} {
+		if ok, _ := path.Match(pattern, host); ok {
+			return true
+		}
+	}
+	return false
 }

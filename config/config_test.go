@@ -34,6 +34,12 @@ func TestLoadErrors(t *testing.T) {
 		env  map[string]string
 		want string
 	}{
+		{"ticket ttl above the row ttl", map[string]string{"STREAM_TICKET_TTL": "5m"}, "STREAM_TICKET_TTL"},
+		{"heartbeat too slow to bound revocation", map[string]string{"STREAM_HEARTBEAT": "10m"}, "STREAM_HEARTBEAT"},
+		{"wildcard stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "*"}, "wildcard"},
+		{"double star stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "**"}, "match any host"},
+		{"star question stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "*?*"}, "match any host"},
+		{"malformed stream origin pattern", map[string]string{"STREAM_ALLOWED_ORIGINS": "app[.example.test"}, "not a valid host pattern"},
 		{"bad bind address", map[string]string{"BIND_ADDRESS": "8000"}, "BIND_ADDRESS"},
 		{"bad log level", map[string]string{"LOG_LEVEL": "loud"}, "LOG_LEVEL"},
 		{"relative otlp endpoint", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "tempo:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
