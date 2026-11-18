@@ -420,7 +420,7 @@ func (r *Encounters) flip(ctx context.Context, filter, update bson.D) (int, erro
 		if err != nil {
 			return n, err
 		}
-		r.emitCommit(ctx, commitFlag, out)
+		r.emitCommit(ctx, commitFlag, nil, out)
 		n++
 	}
 }

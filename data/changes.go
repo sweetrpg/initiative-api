@@ -87,8 +87,12 @@ func originOf(ctx context.Context) Origin {
 // After.SessionID only for a release), so the audience of a release or delete is the session's.
 // OwnerID is the encounter's owner after the write.
 type Change struct {
-	Type        string
-	After       Encounter
+	Type  string
+	After Encounter
+	// Before is the document as it was just before the write, when the write path had it at the
+	// revision the write was made against; nil when unknown. A subscriber's view is compared before
+	// and after, so a change it cannot see produces no event for it.
+	Before      *Encounter
 	SessionID   string
 	OwnerID     string
 	CombatantID []string
@@ -109,10 +113,13 @@ type Sink interface {
 // startup; with none, commits emit nothing.
 func (r *Encounters) SetSink(s Sink) {
 	r.sink = s
-	r.commit = func(ctx context.Context, kind commitKind, after any) {
-		if e, ok := after.(*Encounter); ok {
-			r.emitCommit(ctx, kind, *e)
+	r.commit = func(ctx context.Context, kind commitKind, before, after any) {
+		e, ok := after.(*Encounter)
+		if !ok {
+			return
 		}
+		b, _ := before.(*Encounter)
+		r.emitCommit(ctx, kind, b, *e)
 	}
 }
 
@@ -125,11 +132,11 @@ const (
 	commitFlag
 )
 
-func (r *Encounters) emitCommit(ctx context.Context, kind commitKind, after Encounter) {
+func (r *Encounters) emitCommit(ctx context.Context, kind commitKind, before *Encounter, after Encounter) {
 	if r.sink == nil {
 		return
 	}
-	c := Change{After: after, SessionID: after.SessionID, OwnerID: after.OwnerUserID, Origin: originOf(ctx), At: r.now()}
+	c := Change{After: after, Before: before, SessionID: after.SessionID, OwnerID: after.OwnerUserID, Origin: originOf(ctx), At: r.now()}
 	switch kind {
 	case commitCreate:
 		c.Type = EventCreated

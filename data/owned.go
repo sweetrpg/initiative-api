@@ -38,12 +38,12 @@ type Owned[T any, P Doc[T]] struct {
 	exclude func(*T) bool
 	// commit, when set, is told about every successful create, write, soft delete and flag change
 	// with the stored document, so one place can announce them (see Encounters.SetSink).
-	commit func(ctx context.Context, kind commitKind, after any)
+	commit func(ctx context.Context, kind commitKind, before, after any)
 }
 
-func (r *Owned[T, P]) committed(ctx context.Context, kind commitKind, after *T) {
+func (r *Owned[T, P]) committed(ctx context.Context, kind commitKind, before, after *T) {
 	if r.commit != nil {
-		r.commit(ctx, kind, after)
+		r.commit(ctx, kind, before, after)
 	}
 }
 
@@ -119,7 +119,7 @@ func (r *Owned[T, P]) createWithID(ctx context.Context, ownerUserID, actingUserI
 	if err := r.mapDuplicate(r.c.InsertOne(ctx, doc)); err != nil {
 		return err
 	}
-	r.committed(ctx, commitCreate, (*T)(doc))
+	r.committed(ctx, commitCreate, nil, (*T)(doc))
 	return nil
 }
 
@@ -250,6 +250,21 @@ func (r *Owned[T, P]) updateBoth(ctx context.Context, ownerUserID, actingUserID,
 	return r.apply(ctx, ownerUserID, actingUserID, id, expectedRevision, merged)
 }
 
+// readBefore reads the document a revision-guarded write is about to change, for the event the
+// commit emits. It is kept only if it is at the revision the write is made against: the write
+// matches that revision or fails, so a kept document is exactly what the write changed. Anything
+// else (no sink, a miss, a concurrent edit) is nil, and the event is built without a before.
+func (r *Owned[T, P]) readBefore(ctx context.Context, owner, id string, expectedRevision int64) *T {
+	if r.commit == nil {
+		return nil
+	}
+	var b T
+	if err := r.c.FindOne(ctx, r.scopedID(owner, id), &b); err != nil || P(&b).GetMeta().Revision != expectedRevision {
+		return nil
+	}
+	return &b
+}
+
 func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id string, expectedRevision int64, set map[string]any) (T, error) {
 	var out T
 	id, ok := cleanID(id)
@@ -262,6 +277,7 @@ func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id s
 			bson.E{Key: "updated_at", Value: r.now()}, bson.E{Key: "updated_by", Value: actingUserID})},
 		{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}},
 	}
+	before := r.readBefore(ctx, ownerUserID, id, expectedRevision)
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &out)
 	if errors.Is(err, store.ErrNotFound) {
 		cur, cerr := r.classify(ctx, ownerUserID, id)
@@ -277,7 +293,7 @@ func (r *Owned[T, P]) apply(ctx context.Context, ownerUserID, actingUserID, id s
 		return cur, cerr
 	}
 	if err = r.mapDuplicate(err); err == nil {
-		r.committed(ctx, commitWrite, &out)
+		r.committed(ctx, commitWrite, before, &out)
 	}
 	return out, err
 }
@@ -314,7 +330,7 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 		_, err = r.classify(ctx, ownerUserID, id)
 	}
 	if err == nil {
-		r.committed(ctx, commitDelete, &discard)
+		r.committed(ctx, commitDelete, nil, &discard)
 	}
 	return err
 }

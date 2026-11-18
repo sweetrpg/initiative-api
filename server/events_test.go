@@ -137,7 +137,7 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 64)
 	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 64)
 	observer := hub.Subscribe(e.viewer(t, "user-three"), encE1, 64)
-	secrets := []string{`"hid"`, secretName, secretNote, `"initiative":`, `"health"`, `:31`}
+	secrets := []string{`"hid"`, secretName, secretNote, `"initiative":`, `"health"`, `:31`, `"revision"`}
 
 	for _, typ := range allEventTypes {
 		for _, ids := range [][]string{{"hid"}, {"hid", "orc"}, {"orc"}, nil} {
@@ -159,9 +159,11 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 			}
 		}
 	}
-	// The GM is told everything, hidden ids included.
-	if body := js(drain(gm)); !strings.Contains(body, `"hid"`) {
-		t.Errorf("the GM never saw the hidden combatant's id: %s", body)
+	// The GM is told everything, hidden ids included, and orders by revision.
+	for _, ev := range drain(gm) {
+		if ev.Revision < 1 || ev.ViewTag != "" {
+			t.Errorf("the GM's %s has revision %d and view_tag %q, want a revision and no view_tag", ev.Type, ev.Revision, ev.ViewTag)
+		}
 	}
 }
 
@@ -279,8 +281,8 @@ func TestTheClientIDReachesOnlyTheOriginatingUsersOwnStreams(t *testing.T) {
 	if p[0].Origin.Kind != "user" || p[0].Origin.ClientID != "" {
 		t.Errorf("another user's stream = %+v, want the kind and no client id", p[0].Origin)
 	}
-	if bus.count() != 1 || bus.events[0].Origin.ClientID != "" {
-		t.Errorf("the bus form carries a client id: %v", bus.events)
+	if bus.count() != 1 || bus.events[0].Origin.ClientID != "" || bus.events[0].Revision != 0 {
+		t.Errorf("the bus form carries a client id or a revision: %v", bus.events)
 	}
 }
 
@@ -455,5 +457,68 @@ func TestTheOriginOfAWriteIsTaggedFromTheClientHeaderAndTheCredential(t *testing
 	}
 	if integration.Kind != "integration" {
 		t.Errorf("a credential's write = %+v, want kind integration", integration)
+	}
+}
+
+// wireHub installs a hub as the table's sink and subscribes the GM, a player and an observer.
+func wireHub(t *testing.T, e eventTable) (gm, player, observer *stream.Subscription) {
+	t.Helper()
+	hub := stream.New(e.enc)
+	e.sink.next = hub
+	return hub.Subscribe(e.viewer(t, "user-ok"), encE1, 16), hub.Subscribe(e.viewer(t, "user-two"), encE1, 16), hub.Subscribe(e.viewer(t, "user-three"), encE1, 16)
+}
+
+func playerTag(t *testing.T, e eventTable) string {
+	t.Helper()
+	body := decodeBody(t, callAs(e.r, "user-two", "GET", encPath(e.sid, encE1), ""))
+	tag, _ := body[domain.FieldViewTag].(string)
+	return tag
+}
+
+func TestAHiddenOnlyEditProducesNoEventForPlayersAndObserversAndOneForTheGM(t *testing.T) {
+	e := newEventTable(t, nil)
+	joinAs(t, e.r, e.sid, "user-four", "co_gm")
+	gm, player, observer := wireHub(t, e)
+
+	// Controllers are GM-only data, and the hidden combatant is not in a player's view at all.
+	w := callAs(e.r, "user-ok", "PUT", controllersPath(e.sid, "hid"), `{"controller_user_ids":["u-4"],"revision":3}`)
+
+	if w.Code != 200 {
+		t.Fatalf("assign = %d %s", w.Code, w.Body)
+	}
+	if n := len(drain(player)) + len(drain(observer)); n != 0 {
+		t.Errorf("a player and an observer got %d events for an edit they cannot see; want none: no gap, no generic update", n)
+	}
+	got := drain(gm)
+	if len(got) != 1 || got[0].Type != data.EventControllers || got[0].Revision != 4 {
+		t.Fatalf("GM got %v, want one controllers.updated at revision 4", got)
+	}
+}
+
+func TestAVisibleEditProducesOneEventWithAChangedViewTagAndNoRevisionForThePlayer(t *testing.T) {
+	e := newEventTable(t, nil)
+	gm, player, observer := wireHub(t, e)
+	before := playerTag(t, e)
+
+	w := callAs(e.r, "user-ok", "PUT", controllersPath(e.sid, "orc"), `{"controller_user_ids":["u-2"],"revision":3}`)
+
+	if w.Code != 200 {
+		t.Fatalf("assign = %d %s", w.Code, w.Body)
+	}
+	got := drain(player)
+	if len(got) != 1 || got[0].Type != data.EventControllers || got[0].ViewTag == "" || got[0].ViewTag == before {
+		t.Fatalf("player got %v, want one controllers.updated whose view_tag differs from %q", got, before)
+	}
+	if got[0].ViewTag != playerTag(t, e) {
+		t.Errorf("the event's view_tag %q is not the tag of the player's view after the change %q", got[0].ViewTag, playerTag(t, e))
+	}
+	if strings.Contains(js(got[0]), `"revision"`) {
+		t.Errorf("a player's event carries a revision: %s", js(got[0]))
+	}
+	if n := len(drain(observer)); n != 0 {
+		t.Errorf("the observer, whose view did not change, got %d events", n)
+	}
+	if g := drain(gm); len(g) != 1 || g[0].Revision != 4 || g[0].ViewTag != "" {
+		t.Errorf("GM got %v, want one event with revision 4 and no view_tag", g)
 	}
 }

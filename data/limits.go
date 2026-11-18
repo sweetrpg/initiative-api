@@ -65,7 +65,7 @@ func (r *Owned[T, P]) SetInactive(ctx context.Context, owner, id string, inactiv
 		return ErrNotFound
 	}
 	if err == nil {
-		r.committed(ctx, commitFlag, &discard)
+		r.committed(ctx, commitFlag, nil, &discard)
 	}
 	return err
 }

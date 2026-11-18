@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/sweetrpg/initiative-api/data"
+	"github.com/sweetrpg/initiative-api/domain"
 )
 
 // emission is one committed change on its way to its subscribers. It renders the after-document
@@ -31,8 +32,16 @@ type viewKey struct {
 type viewInfo struct {
 	visible map[string]bool
 	current string
-	err     error
+	tag     string
+	// beforeTag is the tag of the view before the change; known is false when the write path had no
+	// before-document, and then the change cannot be shown to leave the view alone.
+	beforeTag string
+	known     bool
+	err       error
 }
+
+// unchanged reports whether the change left this viewer's view as it was.
+func (vi *viewInfo) unchanged() bool { return vi.err == nil && vi.known && vi.tag == vi.beforeTag }
 
 func newEmission(ctx context.Context, r Renderer, c data.Change) *emission {
 	return &emission{ctx: ctx, r: r, c: c, id: newEventID(), views: map[viewKey]*viewInfo{}}
@@ -61,6 +70,13 @@ func (em *emission) info(v data.Viewer) *viewInfo {
 			}
 		}
 		vi.current, _ = view["current_combatant_id"].(string)
+		vi.tag, _ = view[domain.FieldViewTag].(string)
+		if b := em.c.Before; b != nil {
+			if bv, berr := em.r.Render(em.ctx, *b, v); berr == nil {
+				vi.beforeTag, _ = bv[domain.FieldViewTag].(string)
+				vi.known = true
+			}
+		}
 	}
 	em.views[k] = vi
 	return vi
@@ -101,21 +117,30 @@ func (em *emission) forViewer(v data.Viewer) (Event, bool) {
 		if v.Level() != data.ViewGM {
 			return Event{}, false
 		}
-		return typed(ev, data.EventUpdated), true
+		ev = typed(ev, data.EventUpdated)
+		ev.Revision = c.After.Revision
+		return ev, true
 	case v.Level() == data.ViewGM:
 		return em.gmEvent(ev), true
 	}
-	if !idEvent(c.Type) && !stateEvent(c.Type) {
-		// Created, updated, deleted and released name no combatant, so nothing needs rendering (a
-		// released encounter no longer belongs to the viewer's session anyway).
+	if c.Type == data.EventCreated || c.Type == data.EventDeleted || c.Type == data.EventReleased {
+		// These name no combatant and say the encounter itself appeared or went (a released
+		// encounter no longer belongs to the viewer's session, so it is not rendered).
 		return typed(ev, c.Type), true
 	}
-	return em.filtered(ev, em.info(v)), true
+	vi := em.info(v)
+	if vi.unchanged() {
+		// A change the viewer cannot see: no event, no gap to explain, nothing to refetch.
+		return Event{}, false
+	}
+	ev.ViewTag = vi.tag
+	return em.filtered(ev, vi), true
 }
 
 func (em *emission) gmEvent(ev Event) Event {
 	c := em.c
 	ev = typed(ev, c.Type)
+	ev.Revision = c.After.Revision
 	switch {
 	case idEvent(c.Type):
 		if ids := ids(c); len(ids) > 0 {
@@ -172,8 +197,13 @@ func (em *emission) busEvent() (Event, bool) {
 	}
 	ev := base(em.c, em.id)
 	ev.Origin.ClientID = ""
-	if !idEvent(em.c.Type) && !stateEvent(em.c.Type) {
+	if em.c.Type == data.EventCreated || em.c.Type == data.EventDeleted || em.c.Type == data.EventReleased {
 		return typed(ev, em.c.Type), true
 	}
-	return em.filtered(ev, em.info(data.BusViewer(em.c.After.SessionID))), true
+	vi := em.info(data.BusViewer(em.c.After.SessionID))
+	if vi.unchanged() {
+		return Event{}, false
+	}
+	ev.ViewTag = vi.tag
+	return em.filtered(ev, vi), true
 }

@@ -56,12 +56,19 @@ func (r *Encounters) UpdateInSession(ctx context.Context, d Decision, id string,
 			{Key: "updated_at", Value: r.now()}, {Key: "updated_by", Value: d.actor}}},
 		{Key: "$inc", Value: bson.D{{Key: "revision", Value: 1}}},
 	}
+	var before *Encounter
+	if r.commit != nil {
+		var b Encounter
+		if r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "session_id", Value: d.session}, {Key: "deleted_at", Value: nil}}, &b) == nil && b.Revision == expectedRevision {
+			before = &b
+		}
+	}
 	err := r.c.FindOneAndUpdate(ctx, filter, update, &out)
 	if errors.Is(err, store.ErrNotFound) {
 		return r.classifyInSession(ctx, d, id)
 	}
 	if err == nil {
-		r.emitCommit(ctx, commitWrite, out)
+		r.emitCommit(ctx, commitWrite, before, out)
 	}
 	return out, err
 }
@@ -142,7 +149,8 @@ func (r *Encounters) scrubOne(ctx context.Context, d Decision, e Encounter, user
 		var after Encounter
 		err := r.c.FindOneAndUpdate(ctx, filter, update, &after)
 		if err == nil {
-			r.emit(ctx, Change{Type: EventControllers, After: after, SessionID: after.SessionID, OwnerID: after.OwnerUserID, CombatantID: controllerIDsChanged(e.Combatants, cs)})
+			was := e
+			r.emit(ctx, Change{Type: EventControllers, Before: &was, After: after, SessionID: after.SessionID, OwnerID: after.OwnerUserID, CombatantID: controllerIDsChanged(e.Combatants, cs)})
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return err

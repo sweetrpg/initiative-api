@@ -20,18 +20,24 @@ const Source = "initiative-api"
 // and, for turn and state changes, the status, round and current combatant id. A client that wants
 // the content fetches the encounter, so the content always passes through the view builder.
 type Event struct {
-	EventID     string         `json:"event_id"`
-	OccurredAt  time.Time      `json:"occurred_at"`
-	Source      string         `json:"source"`
-	EncounterID string         `json:"encounter_id"`
-	SessionID   string         `json:"session_id,omitempty"`
-	EntityType  string         `json:"entity_type"`
-	EntityID    string         `json:"entity_id"`
-	Action      string         `json:"action"`
-	Type        string         `json:"type"`
-	Revision    int64          `json:"revision"`
-	Origin      Origin         `json:"origin"`
-	Data        map[string]any `json:"data"`
+	EventID     string    `json:"event_id"`
+	OccurredAt  time.Time `json:"occurred_at"`
+	Source      string    `json:"source"`
+	EncounterID string    `json:"encounter_id"`
+	SessionID   string    `json:"session_id,omitempty"`
+	EntityType  string    `json:"entity_type"`
+	EntityID    string    `json:"entity_id"`
+	Action      string    `json:"action"`
+	Type        string    `json:"type"`
+	// Revision orders a GM's or co-GM's events. Other viewers never get it: the stored revision
+	// moves on every edit, hidden ones included, so it would show them edits they cannot see.
+	Revision int64 `json:"revision,omitempty"`
+	// ViewTag is, for every other viewer, the digest of the view the change left them with (the same
+	// value their encounter view carries). They order events by it and refetch when it differs from
+	// the one they hold; a change that leaves it unchanged produces no event for them at all.
+	ViewTag string         `json:"view_tag,omitempty"`
+	Origin  Origin         `json:"origin"`
+	Data    map[string]any `json:"data"`
 }
 
 // Origin tags the kind of writer and, to the originating user's own streams only, the client id
@@ -68,8 +74,8 @@ func base(c data.Change, id string) Event {
 		EventID: id, OccurredAt: c.At.UTC(), Source: Source,
 		EncounterID: c.After.ID, SessionID: c.SessionID,
 		EntityType: "encounter", EntityID: c.After.ID,
-		Revision: c.After.Revision, Origin: Origin{Kind: kind},
-		Data: map[string]any{},
+		Origin: Origin{Kind: kind},
+		Data:   map[string]any{},
 	}
 }
 
