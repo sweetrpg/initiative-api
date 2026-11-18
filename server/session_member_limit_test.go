@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -16,8 +15,8 @@ import (
 )
 
 // memberTable is a session run by user-ok (the GM) over an entitlements-api whose
-// members_per_session value is limit and which can be switched off. maxMembers, when set, is the
-// service-configured maximum of the member limit.
+// members_per_session value is limit and which can be switched off. maxMembers, when above zero, is
+// the service-configured maximum of the member limit instead of the test default of 20.
 type memberTable struct {
 	r     http.Handler
 	db    *fake.DB
@@ -79,15 +78,10 @@ type httpResult struct {
 	raw  string
 }
 
-func decodeBodyLoose(b []byte) map[string]any {
-	var out map[string]any
-	_ = json.Unmarshal(b, &out)
-	return out
-}
-
-func (m memberTable) approve(by, reqID, role string) *httpResult {
+func (m memberTable) approve(t *testing.T, by, reqID, role string) *httpResult {
+	t.Helper()
 	w := callAs(m.r, by, "POST", "/sessions/"+m.sid+"/requests/"+reqID+"/approve", `{"role":"`+role+`"}`)
-	return &httpResult{w.Code, decodeBodyLoose(w.Body.Bytes()), w.Body.String()}
+	return &httpResult{w.Code, decodeBody(t, w), w.Body.String()}
 }
 
 func (m memberTable) pending(t *testing.T) int {
@@ -107,8 +101,8 @@ func TestApprovingPastTheMemberLimitIsTheTypedEntitlementErrorAndTheRequestStays
 	m := newMemberTable(t, 2, 0)
 	a, b, c := m.request(t, "user-two"), m.request(t, "user-three"), m.request(t, "user-four")
 
-	one, two := m.approve("user-ok", a, "player"), m.approve("user-ok", b, "observer")
-	three := m.approve("user-ok", c, "player")
+	one, two := m.approve(t, "user-ok", a, "player"), m.approve(t, "user-ok", b, "observer")
+	three := m.approve(t, "user-ok", c, "player")
 
 	if one.code != 200 || two.code != 200 {
 		t.Fatalf("approvals under the limit = %d, %d (%s)", one.code, two.code, two.raw)
@@ -120,7 +114,7 @@ func TestApprovingPastTheMemberLimitIsTheTypedEntitlementErrorAndTheRequestStays
 		t.Errorf("%d requests pending, want the rejected one to stay pending", m.pending(t))
 	}
 	m.limit.Store(3)
-	if again := m.approve("user-ok", c, "player"); again.code != 200 {
+	if again := m.approve(t, "user-ok", c, "player"); again.code != 200 {
 		t.Errorf("approving after the limit rose = %d %s, want 200 for the request left pending", again.code, again.raw)
 	}
 }
@@ -129,13 +123,13 @@ func TestTheGMDoesNotCountTowardTheLimitAndCoGMsDo(t *testing.T) {
 	m := newMemberTable(t, 2, 0)
 	a, b := m.request(t, "user-four"), m.request(t, "user-two")
 
-	coGM := m.approve("user-ok", a, "co_gm")
-	player := m.approve("user-ok", b, "player")
+	coGM := m.approve(t, "user-ok", a, "co_gm")
+	player := m.approve(t, "user-ok", b, "player")
 
 	if coGM.code != 200 || player.code != 200 {
 		t.Fatalf("the GM plus a co-GM and a player under a limit of 2 = %d, %d (%s)", coGM.code, player.code, player.raw)
 	}
-	if third := m.approve("user-ok", m.request(t, "user-three"), "observer"); third.code != http.StatusForbidden {
+	if third := m.approve(t, "user-ok", m.request(t, "user-three"), "observer"); third.code != http.StatusForbidden {
 		t.Fatalf("a third non-GM member = %d %s, want 403: the co-GM and player fill a limit of 2", third.code, third.raw)
 	}
 }
@@ -144,8 +138,8 @@ func TestTheEntitledValueIsClampedToTheConfiguredMaximum(t *testing.T) {
 	m := newMemberTable(t, 50, 1)
 	a, b := m.request(t, "user-two"), m.request(t, "user-three")
 
-	first := m.approve("user-ok", a, "player")
-	second := m.approve("user-ok", b, "player")
+	first := m.approve(t, "user-ok", a, "player")
+	second := m.approve(t, "user-ok", b, "player")
 
 	if first.code != 200 || second.code != http.StatusForbidden || second.body["limit"] != float64(1) {
 		t.Fatalf("entitled 50, maximum 1: first = %d, second = %d %s; want 200 then 403 carrying limit 1", first.code, second.code, second.raw)
@@ -155,13 +149,13 @@ func TestTheEntitledValueIsClampedToTheConfiguredMaximum(t *testing.T) {
 func TestALimitThatFallsBelowTheRosterRemovesNobodyAndOnlyStopsAdditions(t *testing.T) {
 	m := newMemberTable(t, 5, 0)
 	for _, tok := range []string{"user-two", "user-three"} {
-		if r := m.approve("user-ok", m.request(t, tok), "player"); r.code != 200 {
+		if r := m.approve(t, "user-ok", m.request(t, tok), "player"); r.code != 200 {
 			t.Fatalf("approve %s = %d", tok, r.code)
 		}
 	}
 	m.limit.Store(1)
 
-	late := m.approve("user-ok", m.request(t, "user-four"), "player")
+	late := m.approve(t, "user-ok", m.request(t, "user-four"), "player")
 
 	if late.code != http.StatusForbidden {
 		t.Fatalf("approval with the limit below the roster = %d %s, want 403", late.code, late.raw)
@@ -176,11 +170,11 @@ func TestALimitThatFallsBelowTheRosterRemovesNobodyAndOnlyStopsAdditions(t *test
 func TestARetriedApprovalIsNotBlockedByTheLimitItsOwnMemberFills(t *testing.T) {
 	m := newMemberTable(t, 1, 0)
 	req := m.request(t, "user-two")
-	if first := m.approve("user-ok", req, "player"); first.code != 200 {
+	if first := m.approve(t, "user-ok", req, "player"); first.code != 200 {
 		t.Fatalf("approve = %d %s", first.code, first.raw)
 	}
 
-	retry := m.approve("user-ok", req, "player")
+	retry := m.approve(t, "user-ok", req, "player")
 
 	if retry.code != 200 {
 		t.Fatalf("retried approval at the limit = %d %s, want 200: the member already exists", retry.code, retry.raw)
@@ -190,12 +184,12 @@ func TestARetriedApprovalIsNotBlockedByTheLimitItsOwnMemberFills(t *testing.T) {
 func TestWithNoRecordedLimitAnApprovalFailsClosedWith503(t *testing.T) {
 	t.Run("a co-GM approving with no record", func(t *testing.T) {
 		m := newMemberTable(t, 5, 0)
-		if r := m.approve("user-ok", m.request(t, "user-four"), "co_gm"); r.code != 200 {
+		if r := m.approve(t, "user-ok", m.request(t, "user-four"), "co_gm"); r.code != 200 {
 			t.Fatalf("setup: %d", r.code)
 		}
 		m.setRecord(t, bson.D{{Key: "$unset", Value: bson.D{{Key: "owner_limits", Value: ""}, {Key: "owner_limits_at", Value: ""}}}})
 
-		r := m.approve("user-four", m.requestVia(t, "user-two", "user-four"), "player")
+		r := m.approve(t, "user-four", m.requestVia(t, "user-two", "user-four"), "player")
 
 		if r.code != http.StatusServiceUnavailable || r.body["code"] != "owner_entitlements_pending" {
 			t.Fatalf("= %d %s, want 503 owner_entitlements_pending", r.code, r.raw)
@@ -207,7 +201,7 @@ func TestWithNoRecordedLimitAnApprovalFailsClosedWith503(t *testing.T) {
 		m.setRecord(t, bson.D{{Key: "$unset", Value: bson.D{{Key: "owner_limits", Value: ""}, {Key: "owner_limits_at", Value: ""}}}})
 		m.down.Store(true)
 
-		r := m.approve("user-ok", req, "player")
+		r := m.approve(t, "user-ok", req, "player")
 
 		if r.code != http.StatusServiceUnavailable {
 			t.Fatalf("= %d %s, want 503", r.code, r.raw)
@@ -218,12 +212,12 @@ func TestWithNoRecordedLimitAnApprovalFailsClosedWith503(t *testing.T) {
 	})
 	t.Run("a co-GM relying on a record older than the maximum age", func(t *testing.T) {
 		m := newMemberTable(t, 5, 0)
-		if r := m.approve("user-ok", m.request(t, "user-four"), "co_gm"); r.code != 200 {
+		if r := m.approve(t, "user-ok", m.request(t, "user-four"), "co_gm"); r.code != 200 {
 			t.Fatalf("setup: %d", r.code)
 		}
 		m.setRecord(t, bson.D{{Key: "$set", Value: bson.D{{Key: "owner_limits_at", Value: time.Now().Add(-8 * 24 * time.Hour)}}}})
 
-		r := m.approve("user-four", m.requestVia(t, "user-two", "user-four"), "player")
+		r := m.approve(t, "user-four", m.requestVia(t, "user-two", "user-four"), "player")
 
 		if r.code != http.StatusServiceUnavailable {
 			t.Fatalf("= %d %s, want 503 for a stale record", r.code, r.raw)
@@ -233,12 +227,12 @@ func TestWithNoRecordedLimitAnApprovalFailsClosedWith503(t *testing.T) {
 
 func TestACoGMApprovesAgainstTheGMsRecordedLimit(t *testing.T) {
 	m := newMemberTable(t, 2, 0)
-	if r := m.approve("user-ok", m.request(t, "user-four"), "co_gm"); r.code != 200 {
+	if r := m.approve(t, "user-ok", m.request(t, "user-four"), "co_gm"); r.code != 200 {
 		t.Fatalf("setup: %d", r.code)
 	}
 
-	ok := m.approve("user-four", m.requestVia(t, "user-two", "user-four"), "player")
-	full := m.approve("user-four", m.requestVia(t, "user-three", "user-four"), "player")
+	ok := m.approve(t, "user-four", m.requestVia(t, "user-two", "user-four"), "player")
+	full := m.approve(t, "user-four", m.requestVia(t, "user-three", "user-four"), "player")
 
 	if ok.code != 200 || full.code != http.StatusForbidden || full.body["limit"] != float64(2) {
 		t.Fatalf("co-GM approvals = %d, %d %s; want 200 then 403 against the recorded limit of 2", ok.code, full.code, full.raw)

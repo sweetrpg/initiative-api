@@ -17,6 +17,10 @@ const (
 const (
 	ServiceName = "initiative-api"
 
+	// DefaultSessionMembersMax is the maximum of a session's member limit when SESSION_MEMBERS_MAX
+	// is unset; it matches the entitlements catalog's maximum for members_per_session.
+	DefaultSessionMembersMax = 20
+
 	// CorrelationHeader carries the request correlation ID in and out of the service.
 	CorrelationHeader = "X-Correlation-ID"
 )

@@ -74,7 +74,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	var errs []error
-	maxMembers := get(constants.SESSION_MEMBERS_MAX, "20")
+	maxMembers := get(constants.SESSION_MEMBERS_MAX, strconv.Itoa(constants.DefaultSessionMembersMax))
 	if n, err := strconv.Atoi(maxMembers); err != nil || n < 1 {
 		errs = append(errs, fmt.Errorf("%s %q: must be a positive integer", constants.SESSION_MEMBERS_MAX, maxMembers))
 	} else {
