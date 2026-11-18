@@ -179,5 +179,8 @@ func EnsureIndexes(ctx context.Context, db store.Database) error {
 			return fmt.Errorf("ensure indexes on %s: %w", s.Name, err)
 		}
 	}
+	if err := db.Collection(CollectionStreamTickets).EnsureIndexes(ctx, ticketIndexes); err != nil {
+		return fmt.Errorf("ensure indexes on %s: %w", CollectionStreamTickets, err)
+	}
 	return nil
 }

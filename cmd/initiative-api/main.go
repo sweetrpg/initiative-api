@@ -97,6 +97,8 @@ func main() {
 	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	sessions.MaxMembers = cfg.SessionMembersMax
+	streams := domain.NewStreams(db, sessions, encounters)
+	streams.TTL = cfg.StreamTicketTTL
 	svc := server.Services{
 		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(
@@ -117,6 +119,9 @@ func main() {
 		Sessions:       sessions,
 		ChangeRequests: domain.NewChangeRequests(db, encounters, sessions),
 		Relations:      relations.New(cfg.AuthAPIURL),
+		Hub:            hub,
+		Streams:        streams,
+		Stream:         server.StreamOptions{AllowedOrigins: cfg.StreamAllowedOrigins, MaxAge: cfg.StreamMaxAge, Heartbeat: cfg.StreamHeartbeat},
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc, pool), ReadHeaderTimeout: 10 * time.Second}
 
@@ -144,6 +149,7 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 	r := gin.New()
 	// Correlation runs first so the access log and every handler see the ID.
 	r.Use(server.Correlation())
+	r.Use(server.RedactTicket()) // before the access log, which would otherwise record the ticket
 	r.Use(sloggin.New(httpLogger))
 	r.Use(gin.Recovery())
 	r.Use(otelgin.Middleware(constants.ServiceName))

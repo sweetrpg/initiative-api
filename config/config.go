@@ -41,6 +41,13 @@ type Config struct {
 	// SessionMembersMax is the maximum of a session's member limit: an entitled members_per_session
 	// above it has no effect (initiative-entitlement-gating, "Session member limit").
 	SessionMembersMax int
+	// StreamAllowedOrigins are the browser origins (host patterns) that may open an event stream; a
+	// request with no Origin header (a native client) is always allowed.
+	StreamAllowedOrigins []string
+	// StreamTicketTTL is how long a stream ticket can be redeemed; StreamMaxAge ends every stream
+	// after that long, so a revoked credential or a missed eviction cannot outlive it;
+	// StreamHeartbeat is the interval of the server's heartbeat frames.
+	StreamTicketTTL, StreamMaxAge, StreamHeartbeat time.Duration
 }
 
 // defaultOwnerEntitlementsMaxAge is seven days.
@@ -85,6 +92,24 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		errs = append(errs, fmt.Errorf("%s %q: must be a positive duration such as 168h", constants.OWNER_ENTITLEMENTS_MAX_AGE, maxAge))
 	} else {
 		c.OwnerEntitlementsMaxAge = d
+	}
+	for key, dst := range map[string]*time.Duration{constants.STREAM_TICKET_TTL: &c.StreamTicketTTL, constants.STREAM_MAX_AGE: &c.StreamMaxAge, constants.STREAM_HEARTBEAT: &c.StreamHeartbeat} {
+		def := map[string]string{constants.STREAM_TICKET_TTL: "30s", constants.STREAM_MAX_AGE: "1h", constants.STREAM_HEARTBEAT: "20s"}[key]
+		v := get(key, def)
+		if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+			errs = append(errs, fmt.Errorf("%s %q: must be a positive duration such as %s", key, v, def))
+		} else {
+			*dst = d
+		}
+	}
+	if origins := get(constants.STREAM_ALLOWED_ORIGINS, ""); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			if o = strings.TrimSpace(o); o == "*" {
+				errs = append(errs, fmt.Errorf("%s: wildcard origin is not allowed", constants.STREAM_ALLOWED_ORIGINS))
+			} else if o != "" {
+				c.StreamAllowedOrigins = append(c.StreamAllowedOrigins, o)
+			}
+		}
 	}
 	if _, _, err := net.SplitHostPort(c.BindAddress); err != nil {
 		errs = append(errs, fmt.Errorf("BIND_ADDRESS %q: %w", c.BindAddress, err))
