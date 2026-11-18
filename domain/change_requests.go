@@ -248,7 +248,7 @@ func (s *ChangeRequests) Approve(ctx context.Context, actor, sessionID, encounte
 // maxApplyAttempts times.
 func (s *ChangeRequests) write(ctx context.Context, v data.Viewer, d data.Decision, req data.ChangeRequest, next []data.Combatant, enc data.Encounter) (data.Encounter, error) {
 	for attempt := 0; ; attempt++ {
-		updated, err := s.encounter.repo.UpdateInSession(ctx, d, enc.ID, enc.Revision, map[string]any{"combatants": next})
+		updated, err := s.encounter.repo.UpdateInSession(data.WithOp(ctx, data.EventCombatantUpdated, req.CombatantID), d, enc.ID, enc.Revision, map[string]any{"combatants": next})
 		if !errors.Is(err, data.ErrRevisionConflict) || attempt+1 == maxApplyAttempts {
 			return updated, err
 		}

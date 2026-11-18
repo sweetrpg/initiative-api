@@ -59,10 +59,13 @@ func (r *Owned[T, P]) SetInactive(ctx context.Context, owner, id string, inactiv
 	} else {
 		update = bson.D{{Key: "$unset", Value: bson.D{{Key: "inactive_at", Value: ""}}}}
 	}
-	var discard T
-	err := r.c.FindOneAndUpdate(ctx, r.scopedID(owner, id), update, &discard)
+	var after T
+	err := r.c.FindOneAndUpdate(ctx, r.scopedID(owner, id), update, &after)
 	if errors.Is(err, store.ErrNotFound) {
 		return ErrNotFound
+	}
+	if err == nil {
+		r.committed(ctx, commitFlag, nil, &after)
 	}
 	return err
 }

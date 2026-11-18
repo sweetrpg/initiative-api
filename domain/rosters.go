@@ -36,6 +36,9 @@ func NewRosters(db store.Database) *Rosters {
 	}
 }
 
+// SetSink installs the sink told of the encounters this service creates from a roster.
+func (s *Rosters) SetSink(k data.Sink) { s.encounters.SetSink(k) }
+
 func invalid(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", data.ErrInvalid, fmt.Sprintf(format, a...))
 }

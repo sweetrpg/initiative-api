@@ -63,6 +63,7 @@ func queuedTurn(st *data.EncounterState) (pos int, err error) {
 // first and starts the next round. The new current combatant's timed conditions lose one round,
 // and expire at zero.
 func (s *Encounters) Advance(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
+	ctx = data.WithOp(ctx, data.EventTurn)
 	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		pos, err := queuedTurn(st)
 		if err != nil {
@@ -82,6 +83,7 @@ func (s *Encounters) Advance(ctx context.Context, owner, actor, id string, rev i
 // the last and the previous round; it is rejected on the first turn of round 1. Conditions that
 // already ticked are not restored.
 func (s *Encounters) StepBack(ctx context.Context, owner, actor, id string, rev int64) (data.Encounter, error) {
+	ctx = data.WithOp(ctx, data.EventTurn)
 	return s.edit(ctx, owner, actor, id, rev, func(st *data.EncounterState, _ data.Encounter) error {
 		pos, err := queuedTurn(st)
 		if err != nil {

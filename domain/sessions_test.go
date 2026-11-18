@@ -896,3 +896,32 @@ func TestCreateAndJoinNeedNoRelationDecision(t *testing.T) {
 		t.Fatalf("join with no relation decision = %+v, %v; want a pending request", jr, err)
 	}
 }
+
+func TestTheMemberLimitClampsNegativeZeroAndAbsentRecords(t *testing.T) {
+	s := &Sessions{MaxMembers: 20}
+	for name, c := range map[string]struct {
+		record map[string]int
+		want   int
+		err    error
+	}{
+		"recorded zero":     {map[string]int{KeyMembersPerSession: 0}, 0, nil},
+		"recorded negative": {map[string]int{KeyMembersPerSession: -5}, 0, nil},
+		"above the maximum": {map[string]int{KeyMembersPerSession: 99}, 20, nil},
+		"absent key":        {map[string]int{}, 0, ErrOwnerLimitsUnknown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := s.memberLimit(data.Session{OwnerLimits: c.record}, data.RoleGM)
+			if got != c.want || !errors.Is(err, c.err) {
+				t.Errorf("limit = %d, %v; want %d, %v", got, err, c.want, c.err)
+			}
+		})
+	}
+}
+
+func TestAnUnconfiguredMemberMaximumFailsClosed(t *testing.T) {
+	s := &Sessions{}
+
+	if _, err := s.memberLimit(data.Session{OwnerLimits: map[string]int{KeyMembersPerSession: 5}}, data.RoleGM); err == nil {
+		t.Error("memberLimit with no configured maximum = nil, want an error")
+	}
+}

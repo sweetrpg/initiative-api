@@ -224,7 +224,11 @@ func gatedTableOn(t *testing.T, gmHas, coHas bool, limit int, wrap func(*fake.DB
 			_, _ = w.Write([]byte(`{"key":"` + domain.KeyGameSystemsExtra + `","type":"flag","value":` + strconv.FormatBool(has) + `,"ttl_seconds":0}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"key":"` + req.URL.Query().Get("key") + `","type":"limit","value":` + strconv.Itoa(limit) + `,"ttl_seconds":0}`))
+		value := limit
+		if req.URL.Query().Get("key") == domain.KeyMembersPerSession {
+			value = 20 // these tests are about the saved-encounters limit, not the roster
+		}
+		_, _ = w.Write([]byte(`{"key":"` + req.URL.Query().Get("key") + `","type":"limit","value":` + strconv.Itoa(value) + `,"ttl_seconds":0}`))
 	}
 	withLimits := func(svc *Services) {
 		svc.Limits = domain.NewLimits(domain.Kind{Name: "encounters", Key: domain.KeySavedEncounters, Repo: svc.Encounters.Items()})

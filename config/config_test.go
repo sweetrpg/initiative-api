@@ -41,6 +41,8 @@ func TestLoadErrors(t *testing.T) {
 		{"missing entitlements-api url", map[string]string{"ENTITLEMENTS_API_URL": " "}, "ENTITLEMENTS_API_URL: required"},
 		{"non-http users-api url", map[string]string{"USERS_API_URL": "ftp://users"}, "USERS_API_URL"},
 		{"unparsable max age", map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "week"}, "OWNER_ENTITLEMENTS_MAX_AGE"},
+		{"zero session members max", map[string]string{"SESSION_MEMBERS_MAX": "0"}, "SESSION_MEMBERS_MAX"},
+		{"non-numeric session members max", map[string]string{"SESSION_MEMBERS_MAX": "many"}, "SESSION_MEMBERS_MAX"},
 		{"zero max age", map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "0s"}, "OWNER_ENTITLEMENTS_MAX_AGE"},
 		{"wildcard origin", map[string]string{"ALLOWED_ORIGINS": "https://a.example,*"}, "wildcard"},
 	}
@@ -95,5 +97,16 @@ func TestLoadOwnerEntitlementsMaxAge(t *testing.T) {
 	c, err = Load(lookupFrom(withAuth(map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "36h"})))
 	if err != nil || c.OwnerEntitlementsMaxAge != 36*time.Hour {
 		t.Fatalf("set = %v, %v; want 36h", c.OwnerEntitlementsMaxAge, err)
+	}
+}
+
+func TestLoadSessionMembersMax(t *testing.T) {
+	c, err := Load(lookupFrom(withAuth(nil)))
+	if err != nil || c.SessionMembersMax != 20 {
+		t.Fatalf("default = %d, %v; want 20", c.SessionMembersMax, err)
+	}
+	c, err = Load(lookupFrom(withAuth(map[string]string{"SESSION_MEMBERS_MAX": "8"})))
+	if err != nil || c.SessionMembersMax != 8 {
+		t.Fatalf("set = %d, %v; want 8", c.SessionMembersMax, err)
 	}
 }

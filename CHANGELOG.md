@@ -1,4 +1,18 @@
 
+## 0.9.0 - 2026-11-18
+
+### Added
+- Emit one event per committed encounter change
+- Order non-GM events by view tag and drop changes they cannot see
+- Enforce the session member limit when approving a member
+
+
+### Fixed
+- Clamp the member limit at zero and keep one default maximum
+- Apply the review of the event emitter
+
+
+
 ## 0.8.0 - 2026-11-17
 
 ### Added
