@@ -954,7 +954,7 @@ func TestConcurrentConnectsWithOneTicketOpenOneStreamAndHoldOneSeat(t *testing.T
 	wg.Wait()
 	close(conns)
 	for c := range conns {
-		defer func() { _ = c.CloseNow() }()
+		t.Cleanup(func() { _ = c.CloseNow() })
 	}
 	if won.Load() != 1 {
 		t.Errorf("%d connects opened a stream, want exactly 1", won.Load())
