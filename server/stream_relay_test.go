@@ -8,6 +8,7 @@ import (
 
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/events/stream"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 func isClosed(s *stream.Subscription) bool {
@@ -190,4 +191,83 @@ func TestAFailedTailDegradesToLocalDeliveryAndResumesWithoutLosingRows(t *testin
 
 	waitFor(t, "the tail to resume", func() bool { return !b.relay.Degraded() && b.relay.Tailing() })
 	waitFor(t, "the row written during the outage", func() bool { return len(onB.C) > 0 })
+}
+
+func TestASecondGrantIsRefused(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	s := hub.Open(e.sid, "u-2", encE1, 4)
+	if err := s.Grant(e.viewer(t, "user-two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Grant(e.viewer(t, "user-two")); !errors.Is(err, stream.ErrGranted) {
+		t.Errorf("second Grant = %v, want ErrGranted", err)
+	}
+}
+
+func TestAPendingSubscriptionIsClosedAfterItsDeadline(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	hub.SetPendingTTL(30 * time.Millisecond)
+	pending := hub.Open(e.sid, "u-2", encE1, 4)
+	granted := hub.Open(e.sid, "u-3", encE1, 4)
+	if err := granted.Grant(e.viewer(t, "user-three")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the pending subscription to be closed", func() bool { return isClosed(pending) })
+	if isClosed(granted) {
+		t.Error("a granted subscription was closed by the pending deadline")
+	}
+	if err := pending.Grant(e.viewer(t, "user-two")); !errors.Is(err, stream.ErrEvicted) {
+		t.Errorf("Grant after the deadline = %v, want ErrEvicted", err)
+	}
+}
+
+func TestAnEvictionRowWithNoSessionEndsNothing(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-b")
+	owner := subscribe(pods[0].hub, ownerViewer(t, e), "", 4)
+	row := map[string]any{"_id": primitive.NewObjectID(), "pod": "pod-x", "kind": "evict", "at": time.Now(), "user_id": "u-1"}
+	if err := e.db.Collection(stream.FanoutCollection).InsertOne(context.Background(), row); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if isClosed(owner) {
+		t.Error("an eviction row with no session ended a private stream")
+	}
+}
+
+func TestAnEvictionWrittenDuringATransientOutageStillArrives(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a", "pod-b")
+	player := subscribe(pods[1].hub, e.viewer(t, "user-two"), encE1, 8)
+	gm := subscribe(pods[1].hub, e.viewer(t, "user-ok"), encE1, 8)
+
+	e.db.Fake(stream.FanoutCollection).BreakWatchers()
+	waitFor(t, "pod B to notice", pods[1].relay.Degraded)
+	pods[0].hub.Evict(e.sid, "u-2") // written while B's tail is down
+
+	waitFor(t, "the eviction written in the gap", func() bool { return isClosed(player) })
+	if isClosed(gm) {
+		t.Error("a transient outage ended an unrelated stream")
+	}
+	if n := pods[1].relay.GapEvictions(); n != 0 {
+		t.Errorf("a resumable outage ended every stream (%d gap evictions)", n)
+	}
+}
+
+func TestALostHistoryEndsEveryStreamBecauseEvictionsInTheGapAreUnknown(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-b") // one pod: the fake loses history for the first resume only
+	gm := subscribe(pods[0].hub, e.viewer(t, "user-ok"), encE1, 8)
+	player := subscribe(pods[0].hub, e.viewer(t, "user-two"), encE1, 8)
+
+	e.db.Fake(stream.FanoutCollection).LoseHistory()
+	e.db.Fake(stream.FanoutCollection).BreakWatchers()
+
+	waitFor(t, "every stream to end after the gap", func() bool { return isClosed(gm) && isClosed(player) })
+	if n := pods[0].relay.GapEvictions(); n != 1 {
+		t.Errorf("gap evictions = %d, want 1", n)
+	}
+	waitFor(t, "the tail to reopen", pods[0].relay.Tailing)
 }

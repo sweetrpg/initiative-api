@@ -51,7 +51,8 @@ type Collection struct {
 	// FindCalls records each Find's options, so tests can prove limits and sorts reach the query.
 	FindCalls []store.FindOptions
 
-	watchers []*cursor
+	watchers    []*cursor
+	lostHistory bool // the next resumed Watch fails with ErrHistoryLost
 }
 
 // Docs returns a copy of the stored documents.
@@ -616,6 +617,14 @@ func (c *Collection) wake() {
 	}
 }
 
+// LoseHistory makes the next Watch that asks to resume fail with store.ErrHistoryLost, as a token
+// older than the oplog does.
+func (c *Collection) LoseHistory() {
+	c.mu.Lock()
+	c.lostHistory = true
+	c.mu.Unlock()
+}
+
 // BreakWatchers ends every open Watch cursor with an error, as a dropped change stream does. A
 // Watch made after it works again.
 func (c *Collection) BreakWatchers() {
@@ -632,6 +641,10 @@ func (c *Collection) BreakWatchers() {
 func (c *Collection) Watch(_ context.Context, resume bson.Raw) (store.Cursor, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if len(resume) > 0 && c.lostHistory {
+		c.lostHistory = false
+		return nil, store.ErrHistoryLost
+	}
 	w := &cursor{c: c, ping: make(chan struct{}, 1), pos: len(c.docs)}
 	if len(resume) > 0 {
 		w.pos = int(resume.Lookup("i").Int32())

@@ -17,6 +17,9 @@ var (
 	ErrNotFound = errors.New("store: not found")
 	// ErrDuplicate means a unique index rejected the write.
 	ErrDuplicate = errors.New("store: duplicate key")
+	// ErrHistoryLost means a change stream cannot resume from its token: the history it needs aged
+	// out or the token is invalid.
+	ErrHistoryLost = errors.New("store: change stream history lost")
 )
 
 // FindOptions carries the query-layer sort, projection, and limit for Find.

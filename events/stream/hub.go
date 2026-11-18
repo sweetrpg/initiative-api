@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
 )
@@ -36,12 +37,27 @@ type Hub struct {
 	bus *busQueue
 	rel *Relay
 
+	pendingTTL time.Duration
+
 	dropped atomic.Int64 // events not delivered: full subscriber buffer closed, or full bus queue
 	emitted atomic.Int64
 }
 
+// PendingTTL is how long a subscription may wait for Grant before the hub closes it, so a transport
+// that never grants or closes one cannot leak it.
+const PendingTTL = 10 * time.Second
+
+// SetPendingTTL changes how long a pending subscription lives; it applies to later Opens.
+func (h *Hub) SetPendingTTL(d time.Duration) {
+	h.mu.Lock()
+	h.pendingTTL = d
+	h.mu.Unlock()
+}
+
 // New returns a hub that renders with r.
-func New(r Renderer) *Hub { return &Hub{r: r, sub: map[*Subscription]struct{}{}} }
+func New(r Renderer) *Hub {
+	return &Hub{r: r, sub: map[*Subscription]struct{}{}, pendingTTL: PendingTTL}
+}
 
 // Dropped is the number of events not delivered because a subscriber's buffer or the bus queue was
 // full.
@@ -66,12 +82,17 @@ type Subscription struct {
 	viewer      atomic.Pointer[data.Viewer] // nil until Grant
 	overflowed  atomic.Bool
 
-	mu     sync.Mutex // guards closed, granted, and every send on and close of C
+	mu     sync.Mutex // guards closed, the grant, and every send on and close of C
 	closed bool
+	timer  *time.Timer // ends a subscription never granted
 }
 
 // ErrEvicted means the subscription ended (evicted, closed, or overflowed) before Grant.
 var ErrEvicted = errors.New("stream: subscription ended before it was granted")
+
+// ErrGranted means Grant was called a second time: a viewer is fixed when first granted, so a
+// higher level cannot be swapped in without ending the subscription and authorizing again.
+var ErrGranted = errors.New("stream: subscription already granted")
 
 // ErrViewer means Grant was given a viewer that cannot stream: a zero one, one with no actor (such
 // as BusViewer), or one for a different actor or session than Open named.
@@ -81,28 +102,44 @@ var ErrViewer = errors.New("stream: viewer does not match the subscription")
 // encounters) with a buffer of buf events (at least 1). An empty encounterID follows every
 // encounter in the viewer's audience. A pending subscription receives nothing, but Evict already
 // reaches it, so an eviction that lands while the subscriber is being authorized is not lost:
-// authorize, then Grant. Close it if authorization fails.
+// authorize, then Grant. The transport must Close the subscription on every path that does not
+// end in Grant; one still pending after PendingTTL is closed by the hub.
 func (h *Hub) Open(sessionID, actor, encounterID string, buf int) *Subscription {
 	s := &Subscription{C: make(chan Event, max(buf, 1)), h: h, session: sessionID, actor: actor, encounterID: encounterID}
 	h.mu.Lock()
 	h.sub[s] = struct{}{}
+	ttl := h.pendingTTL
 	h.mu.Unlock()
+	if ttl > 0 {
+		s.mu.Lock()
+		s.timer = time.AfterFunc(ttl, func() {
+			if s.viewer.Load() == nil {
+				s.Close()
+			}
+		})
+		s.mu.Unlock()
+	}
 	return s
 }
 
 // Grant makes the subscription live for v, which the caller obtained by authorizing the actor
 // (data.Sessions.AuthorizeView or an owner viewer). It fails with ErrEvicted if the subscription
-// ended since Open, and with ErrViewer if v could not stream.
+// ended since Open, with ErrViewer if v could not stream, and with ErrGranted on a second call.
 func (s *Subscription) Grant(v data.Viewer) error {
-	if v.Level() == data.ViewNone || v.Actor() == "" || v.Actor() != s.actor || v.SessionID() != s.session {
-		return ErrViewer
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return ErrEvicted
 	}
-	s.viewer.Store(&v)
+	if v.Level() == data.ViewNone || v.Actor() == "" || v.Actor() != s.actor || v.SessionID() != s.session {
+		return ErrViewer
+	}
+	if !s.viewer.CompareAndSwap(nil, &v) {
+		return ErrGranted
+	}
+	if s.timer != nil {
+		s.timer.Stop()
+	}
 	return nil
 }
 
@@ -128,6 +165,9 @@ func (s *Subscription) Close() {
 	if !s.closed {
 		s.closed = true
 		close(s.C)
+		if s.timer != nil {
+			s.timer.Stop()
+		}
 	}
 	s.mu.Unlock()
 	s.h.mu.Lock()
@@ -153,6 +193,9 @@ func (h *Hub) Evict(sessionID, userID string) {
 }
 
 func (h *Hub) evictLocal(sessionID, userID string) {
+	if sessionID == "" {
+		return // an empty session would match every private subscription
+	}
 	h.mu.RLock()
 	var gone []*Subscription
 	for s := range h.sub {
@@ -166,6 +209,22 @@ func (h *Hub) evictLocal(sessionID, userID string) {
 	}
 }
 
+// evictAll closes every subscription, pending or live, and returns how many. The relay does it when
+// its tail restarts without a position, since evictions written in the gap are unknown: each client
+// reconnects and is authorized again.
+func (h *Hub) evictAll() int {
+	h.mu.RLock()
+	gone := make([]*Subscription, 0, len(h.sub))
+	for s := range h.sub {
+		gone = append(gone, s)
+	}
+	h.mu.RUnlock()
+	for _, s := range gone {
+		s.Close()
+	}
+	return len(gone)
+}
+
 // Emit implements data.Sink. It never blocks and never panics out: a failure to render or deliver
 // for one subscriber affects only that subscriber.
 func (h *Hub) Emit(ctx context.Context, c data.Change) {
@@ -174,7 +233,7 @@ func (h *Hub) Emit(ctx context.Context, c data.Change) {
 	h.deliverLocal(ctx, em)
 	h.publishToBus(ctx, em)
 	if r := h.relay(); r != nil {
-		r.publishChange(c)
+		r.publishChange(c, em.id)
 	}
 }
 
@@ -187,9 +246,13 @@ func (h *Hub) deliverLocal(ctx context.Context, em *emission) {
 
 // emitRemote delivers a change another pod committed to this pod's subscribers. The bus and the
 // relay are the originating pod's to feed, so neither runs here.
-func (h *Hub) emitRemote(ctx context.Context, c data.Change) {
+func (h *Hub) emitRemote(ctx context.Context, c data.Change, eventID string) {
 	h.emitted.Add(1)
-	h.deliverLocal(ctx, newEmission(ctx, h.r, c))
+	em := newEmission(ctx, h.r, c)
+	if eventID != "" {
+		em.id = eventID // the same id on every pod, so a client can recognize a duplicate
+	}
+	h.deliverLocal(ctx, em)
 }
 
 // deliver sends the event s may receive for the change, recovering from a panic so one

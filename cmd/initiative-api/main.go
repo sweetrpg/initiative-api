@@ -89,10 +89,8 @@ func main() {
 	encounters.SetSink(hub)
 	sessions.SetSink(hub)
 	sessions.SetEvictor(hub)
-	pod, _ := os.Hostname()
-	if pod == "" {
-		pod = primitive.NewObjectID().Hex() // a pod must never mistake another's rows for its own
-	}
+	host, _ := os.Hostname()
+	pod := host + "-" + primitive.NewObjectID().Hex() // unique per process: a pod never mistakes another's rows for its own
 	relay := hub.AttachRelay(fanout, pod, 1024)
 	relay.Run(context.Background())
 	defer relay.Stop()

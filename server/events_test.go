@@ -138,7 +138,7 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 64)
 	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 64)
 	observer := subscribe(hub, e.viewer(t, "user-three"), encE1, 64)
-	secrets := []string{`"hid"`, secretName, secretNote, `"initiative":`, `"health"`, `:31`, `"revision"`}
+	secrets := []string{`"hid"`, secretName, secretNote, `"initiative":`, `"health"`, `"current":31`, `"revision"`}
 
 	for _, typ := range allEventTypes {
 		for _, ids := range [][]string{{"hid"}, {"hid", "orc"}, {"orc"}, nil} {
@@ -152,7 +152,6 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 			t.Fatalf("%s received %d events, want one per change", name, len(evs))
 		}
 		for _, ev := range evs {
-			ev.OccurredAt = time.Time{} // a clock reading such as 14:42:31 must not look like a secret
 			body := js(ev)
 			for _, secret := range secrets {
 				if strings.Contains(body, secret) {

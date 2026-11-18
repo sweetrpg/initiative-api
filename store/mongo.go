@@ -110,7 +110,7 @@ func (m mongoCollection) Watch(ctx context.Context, resume bson.Raw) (Cursor, er
 	pipe := mongo.Pipeline{{{Key: "$match", Value: bson.D{{Key: "operationType", Value: "insert"}}}}}
 	cs, err := m.c.Watch(ctx, pipe, opts)
 	if err != nil {
-		return nil, err
+		return nil, watchError(err)
 	}
 	return mongoCursor{cs}, nil
 }
@@ -123,5 +123,15 @@ func (c mongoCursor) Doc() bson.Raw {
 	return d
 }
 func (c mongoCursor) Token() bson.Raw                 { return c.cs.ResumeToken() }
-func (c mongoCursor) Err() error                      { return c.cs.Err() }
+func (c mongoCursor) Err() error                      { return watchError(c.cs.Err()) }
 func (c mongoCursor) Close(ctx context.Context) error { return c.cs.Close(ctx) }
+
+// watchError marks the server's history-lost answers (ChangeStreamHistoryLost 286, ChangeStreamFatalError
+// 280) as ErrHistoryLost; any other error is transient and keeps its resume token.
+func watchError(err error) error {
+	var ce mongo.CommandError
+	if errors.As(err, &ce) && (ce.HasErrorCode(286) || ce.HasErrorCode(280)) {
+		return errors.Join(ErrHistoryLost, err)
+	}
+	return err
+}
