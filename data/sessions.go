@@ -302,6 +302,15 @@ func (r *Sessions) Member(ctx context.Context, d Decision, userID string) (Membe
 	return m, err
 }
 
+// CountMembers returns how many live members the session has besides its GM: co-GMs, players and
+// observers, the ones the member limit counts.
+func (r *Sessions) CountMembers(ctx context.Context, d Decision) (int64, error) {
+	if err := d.require(relView); err != nil {
+		return 0, err
+	}
+	return r.members.CountDocuments(ctx, append(sessionScope(d.session), bson.E{Key: "role", Value: bson.D{{Key: "$ne", Value: RoleGM}}}))
+}
+
 func byCreated(q Query) Query {
 	if len(q.Sort) == 0 {
 		q.Sort = []SortKey{{Field: "created_at"}}

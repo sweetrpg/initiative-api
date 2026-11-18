@@ -79,6 +79,7 @@ func main() {
 	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
+	sessions.MaxMembers = cfg.SessionMembersMax
 	svc := server.Services{
 		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(

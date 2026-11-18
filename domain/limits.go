@@ -14,7 +14,7 @@ const (
 	KeySavedRosters    = "initiative.saved_rosters"
 	KeySavedEncounters = "initiative.saved_encounters"
 	KeySessionsPerGM   = "initiative.sessions_per_gm"
-	// KeyMembersPerSession is recorded on each session; 7.12 enforces it.
+	// KeyMembersPerSession is recorded on each session and enforced when a member is approved.
 	KeyMembersPerSession = "initiative.members_per_session"
 )
 
