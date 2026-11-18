@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"testing"
@@ -17,10 +18,10 @@ var writeRouteEvents = map[string]string{
 	"POST /encounters":                                                data.EventCreated,
 	"PATCH /encounters/:id":                                           data.EventUpdated,
 	"DELETE /encounters/:id":                                          data.EventDeleted,
-	"POST /encounters/:id/combatants":                                 data.EventCombatantAd,
-	"PATCH /encounters/:id/combatants/:cid":                           data.EventCombatantUp,
-	"DELETE /encounters/:id/combatants/:cid":                          data.EventCombatantRm,
-	"POST /encounters/:id/combatants/:cid/restore":                    data.EventCombatantRs,
+	"POST /encounters/:id/combatants":                                 data.EventCombatantAdded,
+	"PATCH /encounters/:id/combatants/:cid":                           data.EventCombatantUpdated,
+	"DELETE /encounters/:id/combatants/:cid":                          data.EventCombatantRemoved,
+	"POST /encounters/:id/combatants/:cid/restore":                    data.EventCombatantRestored,
 	"POST /encounters/:id/start":                                      data.EventStarted,
 	"POST /encounters/:id/advance":                                    data.EventTurn,
 	"POST /encounters/:id/back":                                       data.EventTurn,
@@ -29,7 +30,7 @@ var writeRouteEvents = map[string]string{
 	"POST /rosters/:id/encounters":                                    data.EventCreated,
 	"POST /sessions/:id/encounters":                                   data.EventCreated,
 	"PUT /sessions/:id/encounters/:eid/combatants/:cid/controllers":   data.EventControllers,
-	"POST /sessions/:id/encounters/:eid/change-requests/:rid/approve": data.EventCombatantUp,
+	"POST /sessions/:id/encounters/:eid/change-requests/:rid/approve": data.EventCombatantUpdated,
 	"DELETE /sessions/:id":                                            data.EventReleased,
 	"DELETE /sessions/:id/members/:user":                              data.EventControllers,
 	"POST /sessions/:id/leave":                                        data.EventControllers,
@@ -70,9 +71,6 @@ func TestEveryEncounterWriteRouteEmitsItsEvent(t *testing.T) {
 	}
 
 	for key, want := range writeRouteEvents {
-		if want == "-" {
-			continue
-		}
 		t.Run(key, func(t *testing.T) {
 			scenario, ok := routeScenarios[key]
 			if !ok {
@@ -90,12 +88,17 @@ func TestEveryEncounterWriteRouteEmitsItsEvent(t *testing.T) {
 			tbl.sink.mu.Lock()
 			got := append([]data.Change(nil), tbl.sink.changes[before:]...)
 			tbl.sink.mu.Unlock()
-			for _, c := range got {
-				if c.Type == want {
-					return
+			if want == "-" {
+				if len(got) != 0 {
+					t.Fatalf("%s is classified as changing no encounter but emitted %v", key, changeTypes(got))
 				}
+				return
 			}
-			t.Fatalf("%s emitted %d changes %v, none of type %s", key, len(got), changeTypes(got), want)
+			// Exactly one event per committed change: one for each encounter the request changed
+			// (the fixture has one encounter in the session).
+			if len(got) != 1 || got[0].Type != want {
+				t.Fatalf("%s emitted %v, want exactly one %s", key, changeTypes(got), want)
+			}
 		})
 	}
 }
@@ -129,6 +132,105 @@ func started(t *testing.T, tbl eventTable, id string, rev func() string) {
 }
 
 var routeScenarios = map[string]func(*testing.T, eventTable) routeCall{
+	// Routes that change no encounter must emit nothing.
+	"POST /encounters/:id/save-as-roster": func(t *testing.T, tbl eventTable) routeCall {
+		id, _, _ := privateEncounter(t, tbl)
+		return routeCall{"user-ok", "POST", "/encounters/" + id + "/save-as-roster", `{"name":"S"}`}
+	},
+	"POST /sessions/:id/encounters/:eid/change-requests/:rid/reject": func(t *testing.T, tbl eventTable) routeCall {
+		setPC(t, tbl.db, tbl.sid, func(*data.Encounter) {})
+		_, req := submit(t, tbl.r, "user-two", tbl.sid, "pc", `{"health":{"hp":4}}`)
+		return routeCall{"user-ok", "POST", crPath(tbl.sid, idOf(req), "reject"), `{"reason":"no"}`}
+	},
+	"POST /sessions/:id/encounters/:eid/combatants/:cid/change-requests": func(t *testing.T, tbl eventTable) routeCall {
+		setPC(t, tbl.db, tbl.sid, func(*data.Encounter) {})
+		return routeCall{"user-two", "POST", encPath(tbl.sid, encE1) + "/combatants/pc/change-requests", `{"health":{"hp":4}}`}
+	},
+	"DELETE /admin/credentials/:id": func(t *testing.T, tbl eventTable) routeCall {
+		id, _ := issue(t, tbl.r, "user-ok", `["read"]`)
+		return routeCall{"admin-ok", "DELETE", "/admin/credentials/" + id, `{"reason":"leaked"}`}
+	},
+	"POST /admin/credentials/reopen": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"admin-ok", "POST", "/admin/credentials/reopen", ""}
+	},
+	"POST /credentials": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"user-ok", "POST", "/credentials", `{"label":"foundry","scopes":["read"]}`}
+	},
+	"POST /credentials/:id/revoke": func(t *testing.T, tbl eventTable) routeCall {
+		id, _ := issue(t, tbl.r, "user-ok", `["read"]`)
+		return routeCall{"user-ok", "POST", "/credentials/" + id + "/revoke", ""}
+	},
+	"POST /rosters": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"user-ok", "POST", "/rosters", `{"name":"R"}`}
+	},
+	"PATCH /rosters/:id": func(t *testing.T, tbl eventTable) routeCall {
+		id := newRoster(t, tbl.r, "user-ok", `{"name":"R"}`)["id"].(string)
+		return routeCall{"user-ok", "PATCH", "/rosters/" + id, `{"revision":1,"name":"R2"}`}
+	},
+	"DELETE /rosters/:id": func(t *testing.T, tbl eventTable) routeCall {
+		id := newRoster(t, tbl.r, "user-ok", `{"name":"R"}`)["id"].(string)
+		return routeCall{"user-ok", "DELETE", "/rosters/" + id + "?revision=1", ""}
+	},
+	"POST /rosters/:id/characters": func(t *testing.T, tbl eventTable) routeCall {
+		id := newRoster(t, tbl.r, "user-ok", `{"name":"R"}`)["id"].(string)
+		return routeCall{"user-ok", "POST", "/rosters/" + id + "/characters", `{"revision":1,"name":"Orc","kind":"adversary"}`}
+	},
+	"PUT /rosters/:id/characters/:cid": func(t *testing.T, tbl eventTable) routeCall {
+		r := newRoster(t, tbl.r, "user-ok", `{"name":"R","characters":[{"name":"C","kind":"pc"}]}`)
+		cid := r["characters"].([]any)[0].(map[string]any)["id"].(string)
+		return routeCall{"user-ok", "PUT", "/rosters/" + r["id"].(string) + "/characters/" + cid, `{"revision":1,"name":"C2","kind":"pc"}`}
+	},
+	"DELETE /rosters/:id/characters/:cid": func(t *testing.T, tbl eventTable) routeCall {
+		r := newRoster(t, tbl.r, "user-ok", `{"name":"R","characters":[{"name":"C","kind":"pc"}]}`)
+		cid := r["characters"].([]any)[0].(map[string]any)["id"].(string)
+		return routeCall{"user-ok", "DELETE", "/rosters/" + r["id"].(string) + "/characters/" + cid + "?revision=1", ""}
+	},
+	"POST /sessions": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"user-three", "POST", "/sessions", `{"name":"Other"}`}
+	},
+	"PATCH /sessions/:id": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"user-ok", "PATCH", "/sessions/" + tbl.sid, `{"name":"Renamed","revision":1}`}
+	},
+	"POST /sessions/:id/invites": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"user-ok", "POST", "/sessions/" + tbl.sid + "/invites", ""}
+	},
+	"DELETE /sessions/:id/invites/:invite": func(t *testing.T, tbl eventTable) routeCall {
+		inv := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/sessions/"+tbl.sid+"/invites", ""))
+		return routeCall{"user-ok", "DELETE", "/sessions/" + tbl.sid + "/invites/" + inv["id"].(string), ""}
+	},
+	"DELETE /sessions/:id/blocks/:user": func(t *testing.T, tbl eventTable) routeCall {
+		callAs(tbl.r, "user-ok", "POST", "/sessions/"+tbl.sid+"/blocks", `{"user_id":"u-9"}`)
+		return routeCall{"user-ok", "DELETE", "/sessions/" + tbl.sid + "/blocks/u-9", ""}
+	},
+	"POST /sessions/join": func(t *testing.T, tbl eventTable) routeCall {
+		code := inviteCode(t, tbl.r, "user-ok", tbl.sid)
+		return routeCall{"user-four", "POST", "/sessions/join", `{"code":"` + code + `"}`}
+	},
+	"POST /sessions/:id/requests/:request/approve": func(t *testing.T, tbl eventTable) routeCall {
+		code := inviteCode(t, tbl.r, "user-ok", tbl.sid)
+		req := decodeBody(t, callAs(tbl.r, "user-four", "POST", "/sessions/join", `{"code":"`+code+`"}`))
+		return routeCall{"user-ok", "POST", "/sessions/" + tbl.sid + "/requests/" + req["id"].(string) + "/approve", `{"role":"player"}`}
+	},
+	"POST /sessions/:id/requests/:request/reject": func(t *testing.T, tbl eventTable) routeCall {
+		code := inviteCode(t, tbl.r, "user-ok", tbl.sid)
+		req := decodeBody(t, callAs(tbl.r, "user-four", "POST", "/sessions/join", `{"code":"`+code+`"}`))
+		return routeCall{"user-ok", "POST", "/sessions/" + tbl.sid + "/requests/" + req["id"].(string) + "/reject", `{"reason":"no"}`}
+	},
+	"POST /themes": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"user-ok", "POST", "/themes", themeBody("A")}
+	},
+	"PATCH /themes/:id": func(t *testing.T, tbl eventTable) routeCall {
+		id := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/themes", themeBody("A")))["id"].(string)
+		return routeCall{"user-ok", "PATCH", "/themes/" + id, `{"revision":1,"name":"B"}`}
+	},
+	"DELETE /themes/:id": func(t *testing.T, tbl eventTable) routeCall {
+		id := decodeBody(t, callAs(tbl.r, "user-ok", "POST", "/themes", themeBody("A")))["id"].(string)
+		return routeCall{"user-ok", "DELETE", "/themes/" + id + "?revision=1", ""}
+	},
+	"PUT /entitlements/active/:kind": func(t *testing.T, tbl eventTable) routeCall {
+		return routeCall{"user-ok", "PUT", "/entitlements/active/encounters", `{"ids":[]}`}
+	},
+
 	"POST /encounters": func(t *testing.T, _ eventTable) routeCall {
 		return routeCall{"user-ok", "POST", "/encounters", `{"name":"N","game_system_id":"` + data.DefaultSystemID + `"}`}
 	},
@@ -211,4 +313,9 @@ var routeScenarios = map[string]func(*testing.T, eventTable) routeCall{
 	"PATCH /sessions/:id/members/:user": func(t *testing.T, tbl eventTable) routeCall {
 		return routeCall{"user-ok", "PATCH", "/sessions/" + tbl.sid + "/members/u-2", `{"role":"observer"}`}
 	},
+}
+
+func themeBody(name string) string {
+	b, _ := json.Marshal(theme(name))
+	return string(b)
 }

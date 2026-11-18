@@ -38,7 +38,7 @@ type Owned[T any, P Doc[T]] struct {
 	exclude func(*T) bool
 	// commit, when set, is told about every successful create, write, soft delete and flag change
 	// with the stored document, so one place can announce them (see Encounters.SetSink).
-	commit func(ctx context.Context, kind commitKind, before, after any)
+	commit func(ctx context.Context, kind commitKind, before, after *T)
 }
 
 func (r *Owned[T, P]) committed(ctx context.Context, kind commitKind, before, after *T) {
@@ -323,14 +323,14 @@ func (r *Owned[T, P]) SoftDelete(ctx context.Context, ownerUserID, actingUserID,
 	if !ok {
 		return ErrNotFound
 	}
-	var discard T
+	var after T
 	filter := append(r.scopedID(ownerUserID, id), bson.E{Key: "revision", Value: expectedRevision})
-	err := r.c.FindOneAndUpdate(ctx, filter, update, &discard)
+	err := r.c.FindOneAndUpdate(ctx, filter, update, &after)
 	if errors.Is(err, store.ErrNotFound) {
 		_, err = r.classify(ctx, ownerUserID, id)
 	}
 	if err == nil {
-		r.committed(ctx, commitDelete, nil, &discard)
+		r.committed(ctx, commitDelete, nil, &after)
 	}
 	return err
 }

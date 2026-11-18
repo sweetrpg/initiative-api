@@ -83,6 +83,7 @@ func main() {
 	defer hub.Close()
 	encounters.SetSink(hub)
 	sessions.SetSink(hub)
+	sessions.SetEvictor(hub)
 	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	sessions.MaxMembers = cfg.SessionMembersMax

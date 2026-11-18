@@ -120,6 +120,7 @@ type Sessions struct {
 	// value above it has no effect. NewSessions sets the default; zero (a Sessions built by hand)
 	// fails every member addition closed.
 	MaxMembers int
+	evictor    Evictor
 	now        func() time.Time
 }
 
@@ -367,12 +368,15 @@ func (s *Sessions) Delete(ctx context.Context, actor, id string, rev int64) erro
 	if resumed && errors.Is(endErr, relations.ErrDenied) {
 		endErr = nil
 	}
-	return errors.Join(
+	err = errors.Join(
 		endErr,
 		s.repo.DropSession(ctx, d),
 		s.changes.CancelSession(ctx, d),
 		s.enc.ReleaseSession(ctx, d),
 	)
+	// After the release, so the table hears each encounter leave the session before its streams end.
+	s.evict(d.SessionID(), "")
+	return err
 }
 
 func hashCode(code string) string {
@@ -629,6 +633,9 @@ func (s *Sessions) SetRole(ctx context.Context, actor, id, user, role string) (d
 	if err != nil {
 		return data.Member{}, err
 	}
+	// Close the streams opened under the old role first: a demoted co-GM must not hear another event
+	// that carries a hidden combatant's id, including the scrub's own.
+	s.evict(d.SessionID(), user)
 	if role == data.RoleObserver {
 		s.scrubControllers(ctx, d, user)
 	}
@@ -651,6 +658,7 @@ func (s *Sessions) Remove(ctx context.Context, actor, id, user string) error {
 	if err := s.repo.RemoveMember(ctx, d, user); err != nil {
 		return err
 	}
+	s.evict(d.SessionID(), user)
 	s.scrubControllers(ctx, d, user)
 	s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	return nil
@@ -668,6 +676,7 @@ func (s *Sessions) Leave(ctx context.Context, actor, id string) error {
 	if err := s.repo.RemoveMember(ctx, d, actor); err != nil {
 		return err
 	}
+	s.evict(d.SessionID(), actor)
 	s.scrubControllers(ctx, d, actor)
 	s.syncRevoke(ctx, m.Role, d.SessionID(), actor, m.Role)
 	return nil
@@ -697,6 +706,7 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	}
 	switch err := s.repo.RemoveMember(ctx, d, user); {
 	case err == nil:
+		s.evict(d.SessionID(), user)
 		s.scrubControllers(ctx, d, user)
 		s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	case !errors.Is(err, data.ErrNotFound):
@@ -721,6 +731,22 @@ func (s *Sessions) Blocks(ctx context.Context, actor, id string, q data.Query) (
 		return data.Page[data.Block]{}, err
 	}
 	return s.repo.Blocks(ctx, d, q)
+}
+
+// Evictor disconnects open streams. *stream.Hub implements it.
+type Evictor interface {
+	// Evict closes userID's streams in the session, or everyone's when userID is empty.
+	Evict(sessionID, userID string)
+}
+
+// SetEvictor installs the evictor told when a member loses or changes access (removed, left,
+// blocked, role changed) or the session is deleted, so their open streams end at once.
+func (s *Sessions) SetEvictor(e Evictor) { s.evictor = e }
+
+func (s *Sessions) evict(sessionID, userID string) {
+	if s.evictor != nil {
+		s.evictor.Evict(sessionID, userID)
+	}
 }
 
 // SetSink installs the sink told of the encounter changes sessions make: controller scrubs and the

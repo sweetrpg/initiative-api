@@ -19,8 +19,26 @@ type emission struct {
 	c   data.Change
 	id  string
 
+	// The tracker definition is looked up once per emission (after, and before only if the game
+	// system changed), so fan-out does no per-viewer reads.
+	afterDef, beforeDef   []data.TrackerField
+	afterOnce, beforeOnce sync.Once
+
 	mu    sync.Mutex
 	views map[viewKey]*viewInfo
+}
+
+func (em *emission) defAfter() []data.TrackerField {
+	em.afterOnce.Do(func() { em.afterDef = em.r.Definition(em.ctx, em.c.After) })
+	return em.afterDef
+}
+
+func (em *emission) defBefore() []data.TrackerField {
+	if em.c.Before == nil || em.c.Before.GameSystemID == em.c.After.GameSystemID {
+		return em.defAfter()
+	}
+	em.beforeOnce.Do(func() { em.beforeDef = em.r.Definition(em.ctx, *em.c.Before) })
+	return em.beforeDef
 }
 
 type viewKey struct {
@@ -58,7 +76,7 @@ func (em *emission) info(v data.Viewer) *viewInfo {
 		return vi
 	}
 	vi := &viewInfo{visible: map[string]bool{}}
-	view, err := em.r.Render(em.ctx, em.c.After, v)
+	view, err := domain.BuildView(em.c.After, em.defAfter(), v)
 	if err != nil {
 		vi.err = err
 		slog.WarnContext(em.ctx, "rendering an encounter for an event subscriber failed; sending it without ids", "encounter", em.c.After.ID, "error", err)
@@ -72,7 +90,7 @@ func (em *emission) info(v data.Viewer) *viewInfo {
 		vi.current, _ = view["current_combatant_id"].(string)
 		vi.tag, _ = view[domain.FieldViewTag].(string)
 		if b := em.c.Before; b != nil {
-			if bv, berr := em.r.Render(em.ctx, *b, v); berr == nil {
+			if bv, berr := domain.BuildView(*b, em.defBefore(), v); berr == nil {
 				vi.beforeTag, _ = bv[domain.FieldViewTag].(string)
 				vi.known = true
 			}
@@ -85,7 +103,7 @@ func (em *emission) info(v data.Viewer) *viewInfo {
 // idEvent reports whether t names changed combatants.
 func idEvent(t string) bool {
 	switch t {
-	case data.EventCombatantAd, data.EventCombatantUp, data.EventCombatantRm, data.EventCombatantRs, data.EventControllers:
+	case data.EventCombatantAdded, data.EventCombatantUpdated, data.EventCombatantRemoved, data.EventCombatantRestored, data.EventControllers:
 		return true
 	}
 	return false

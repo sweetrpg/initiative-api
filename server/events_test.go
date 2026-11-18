@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -127,7 +128,7 @@ func js(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 var allEventTypes = []string{
 	data.EventCreated, data.EventUpdated, data.EventDeleted, data.EventReleased, data.EventStarted, data.EventEnded, data.EventReset,
-	data.EventTurn, data.EventCombatantAd, data.EventCombatantUp, data.EventCombatantRm, data.EventCombatantRs, data.EventControllers,
+	data.EventTurn, data.EventCombatantAdded, data.EventCombatantUpdated, data.EventCombatantRemoved, data.EventCombatantRestored, data.EventControllers,
 }
 
 func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T) {
@@ -172,15 +173,15 @@ func TestAPlayerSeesTheVisibleIdsOfAChangeThatAlsoTouchedAHiddenOne(t *testing.T
 	hub := stream.New(e.enc)
 	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
 
-	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUp, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid", "orc"}, At: time.Now()})
-	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUp, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid"}, At: time.Now()})
+	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid", "orc"}, At: time.Now()})
+	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid"}, At: time.Now()})
 	hub.Emit(context.Background(), data.Change{Type: data.EventTurn, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
 	got := drain(player)
 
 	if len(got) != 3 {
 		t.Fatalf("%d events", len(got))
 	}
-	if ids, _ := got[0].Data["combatant_ids"].([]string); got[0].Type != data.EventCombatantUp || len(ids) != 1 || ids[0] != "orc" {
+	if ids, _ := got[0].Data["combatant_ids"].([]string); got[0].Type != data.EventCombatantUpdated || len(ids) != 1 || ids[0] != "orc" {
 		t.Errorf("mixed change = %s %v, want combatant.updated for orc only", got[0].Type, got[0].Data)
 	}
 	if got[1].Type != data.EventUpdated || len(got[1].Data) != 0 {
@@ -210,7 +211,7 @@ func TestAGMOnlyChangeReachesOnlyTheGMAndNeverTheBus(t *testing.T) {
 	if len(drain(player)) != 0 || len(drain(observer)) != 0 {
 		t.Error("a lock or inactive change reached a player or observer")
 	}
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // nothing to poll for: the assertion is that nothing arrives
 	if bus.count() != 0 {
 		t.Error("a GM-only change was published to the bus")
 	}
@@ -238,27 +239,77 @@ func (b *captureBus) Publish(ctx context.Context, ev stream.Event) error {
 
 func (b *captureBus) count() int { b.mu.Lock(); defer b.mu.Unlock(); return len(b.events) }
 
-type failingRenderer struct{}
-
-func (failingRenderer) Render(context.Context, data.Encounter, data.Viewer) (domain.EncounterView, error) {
-	return nil, errors.New("no system definition")
-}
-
 func TestAnEventFailsClosedWhenAViewerCannotBeRendered(t *testing.T) {
 	e := newEventTable(t, nil)
-	hub := stream.New(failingRenderer{})
+	hub := stream.New(e.enc)
 	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
 	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
+	// A document the view builder refuses for the player's session: BuildView returns ErrNoView.
+	odd := e.encounter(t)
+	odd.SessionID = "5f00000000000000000000bb"
 
-	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUp, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid", "orc"}, At: time.Now()})
+	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: odd, SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid", "orc"}, At: time.Now()})
 
 	p := drain(player)
 	if len(p) != 1 || p[0].Type != data.EventUpdated || len(p[0].Data) != 0 || strings.Contains(js(p), "orc") {
 		t.Fatalf("player got %v, want the generic encounter.updated with no ids, never the unfiltered event", p)
 	}
-	if g := drain(gm); len(g) != 1 || g[0].Type != data.EventCombatantUp {
+	if g := drain(gm); len(g) != 1 || g[0].Type != data.EventCombatantUpdated {
 		t.Errorf("the GM, who needs no rendering, got %v", g)
 	}
+}
+
+type panickingRenderer struct{}
+
+func (panickingRenderer) Definition(context.Context, data.Encounter) []data.TrackerField {
+	panic("definition lookup blew up")
+}
+
+func TestOneSubscribersFailureDoesNotCostTheOthersTheEvent(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(panickingRenderer{})
+	bus := &captureBus{}
+	hub.AttachBus(bus, 8)
+	defer hub.Close()
+	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8) // needs a rendering, which panics
+	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)      // needs none
+
+	hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
+
+	if len(drain(gm)) != 1 {
+		t.Error("the GM lost the event because another subscriber's delivery panicked")
+	}
+	if len(drain(player)) != 0 {
+		t.Error("the player whose delivery panicked still got something")
+	}
+	eventually(t, func() bool { return bus.count() == 1 }, "the bus lost the event too")
+}
+
+type panickingSink struct{}
+
+func (panickingSink) Emit(context.Context, data.Change) { panic("sink blew up") }
+
+func TestASinkThatPanicsNeverFailsAWriteThatCommitted(t *testing.T) {
+	e := newEventTableLimit(t, "50", func(*domain.Encounters) data.Sink { return panickingSink{} })
+
+	w := callAs(e.r, "user-ok", "POST", "/encounters", `{"name":"N","game_system_id":"`+data.DefaultSystemID+`"}`)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create with a panicking sink = %d %s, want the committed write to succeed", w.Code, w.Body)
+	}
+}
+
+// eventually polls cond for up to two seconds.
+func eventually(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal(msg)
 }
 
 func TestTheClientIDReachesOnlyTheOriginatingUsersOwnStreams(t *testing.T) {
@@ -272,7 +323,7 @@ func TestTheClientIDReachesOnlyTheOriginatingUsersOwnStreams(t *testing.T) {
 	origin := data.Origin{Kind: data.OriginUser, ClientID: "ios-7.f", ActorID: "u-1"}
 
 	hub.Emit(context.Background(), data.Change{Type: data.EventTurn, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", Origin: origin, At: time.Now()})
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, func() bool { return bus.count() == 1 }, "the bus never got the event")
 
 	g, p := drain(gm), drain(player)
 	if g[0].Origin.Kind != "user" || g[0].Origin.ClientID != "ios-7.f" {
@@ -338,12 +389,12 @@ type countingRenderer struct {
 	n     atomic.Int64
 }
 
-func (c *countingRenderer) Render(ctx context.Context, enc data.Encounter, v data.Viewer) (domain.EncounterView, error) {
+func (c *countingRenderer) Definition(ctx context.Context, enc data.Encounter) []data.TrackerField {
 	c.n.Add(1)
-	return c.inner.Render(ctx, enc, v)
+	return c.inner.Definition(ctx, enc)
 }
 
-func TestAnEventIsRenderedOncePerDistinctViewNotOncePerSubscriber(t *testing.T) {
+func TestADefinitionIsLookedUpOncePerEmissionNotOncePerSubscriber(t *testing.T) {
 	e := newEventTable(t, nil)
 	cr := &countingRenderer{inner: e.enc}
 	hub := stream.New(cr)
@@ -353,10 +404,10 @@ func TestAnEventIsRenderedOncePerDistinctViewNotOncePerSubscriber(t *testing.T) 
 		hub.Subscribe(e.viewer(t, "user-two"), encE1, 4)   // the same player shares one
 	}
 
-	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUp, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"orc"}, At: time.Now()})
+	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"orc"}, At: time.Now()})
 
-	if n := cr.n.Load(); n != 2 {
-		t.Fatalf("%d renderings for 5 GMs, 5 observers and 5 copies of one player, want 2 (observer, player)", n)
+	if n := cr.n.Load(); n != 1 {
+		t.Fatalf("%d definition lookups for 5 GMs, 5 observers and 5 copies of one player, want 1: the writer's request does no per-viewer reads", n)
 	}
 }
 
@@ -520,5 +571,223 @@ func TestAVisibleEditProducesOneEventWithAChangedViewTagAndNoRevisionForThePlaye
 	}
 	if g := drain(gm); len(g) != 1 || g[0].Revision != 4 || g[0].ViewTag != "" {
 		t.Errorf("GM got %v, want one event with revision 4 and no view_tag", g)
+	}
+}
+
+func TestClosingSubscribersWhileEventsAreEmittedNeverStopsDeliveryToTheRest(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	keeper := hub.Subscribe(e.viewer(t, "user-three"), encE1, 4096)
+	var closers []*stream.Subscription
+	for i := 0; i < 40; i++ {
+		closers = append(closers, hub.Subscribe(e.viewer(t, "user-two"), encE1, 4096))
+	}
+	const emits = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for _, s := range closers {
+			s.Close()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < emits; i++ {
+			hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
+		}
+	}()
+	wg.Wait()
+
+	if n := len(drain(keeper)); n != emits {
+		t.Errorf("the open subscriber got %d of %d events: a closed subscriber must not abort delivery to the others", n, emits)
+	}
+}
+
+func TestLosingAccessEndsTheMembersOpenStreamsAtOnce(t *testing.T) {
+	acts := map[string]func(e eventTable) int{
+		"removed": func(e eventTable) int {
+			return callAs(e.r, "user-ok", "DELETE", "/sessions/"+e.sid+"/members/u-2", "").Code
+		},
+		"left": func(e eventTable) int { return callAs(e.r, "user-two", "POST", "/sessions/"+e.sid+"/leave", "").Code },
+		"blocked": func(e eventTable) int {
+			return callAs(e.r, "user-ok", "POST", "/sessions/"+e.sid+"/blocks", `{"user_id":"u-2"}`).Code
+		},
+		"re-roled": func(e eventTable) int {
+			return callAs(e.r, "user-ok", "PATCH", "/sessions/"+e.sid+"/members/u-2", `{"role":"observer"}`).Code
+		},
+	}
+	closed := func(s *stream.Subscription) bool {
+		select {
+		case _, ok := <-s.C:
+			return !ok
+		default:
+			return false
+		}
+	}
+	for name, act := range acts {
+		t.Run(name, func(t *testing.T) {
+			e := newEventTable(t, nil)
+			hub := stream.New(e.enc)
+			e.ses.SetEvictor(hub)
+			player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
+			gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
+
+			if code := act(e); code >= 300 {
+				t.Fatalf("%s = %d", name, code)
+			}
+
+			if !closed(player) || closed(gm) {
+				t.Errorf("player stream closed = %v, GM stream closed = %v; want only the player's closed", closed(player), closed(gm))
+			}
+		})
+	}
+}
+
+func TestDeletingTheSessionEndsEveryStreamOfIt(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	e.ses.SetEvictor(hub)
+	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
+	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
+
+	if w := deleteSession(e.r, "user-ok", e.sid, "1"); w.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", w.Code, w.Body)
+	}
+
+	for name, s := range map[string]*stream.Subscription{"player": player, "gm": gm} {
+		for range s.C { // any release events arrive first, then the channel ends
+		}
+		if _, ok := <-s.C; ok {
+			t.Errorf("%s stream still open after the session was deleted", name)
+		}
+	}
+}
+
+func TestConcurrentEmitsOnASlowSubscriberNeverSendOnAClosedChannel(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	slow := hub.Subscribe(e.viewer(t, "user-three"), encE1, 1)
+	other := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 4096)
+	enc := e.encounter(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: enc, SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
+			}
+		}()
+	}
+	wg.Wait()
+
+	if !slow.Overflowed() {
+		t.Error("the size-1 subscriber was never closed for falling behind")
+	}
+	if n := len(drain(other)); n != 16*50 {
+		t.Errorf("the healthy subscriber got %d of %d events: a writer's panic must not abort the fan-out", n, 16*50)
+	}
+}
+
+func TestSessionScopedSubscriptionsHearOfANewEncounterAndOwnerScopedOnesOfAPrivateOne(t *testing.T) {
+	e := newEventTableLimit(t, "50", nil)
+	hub := stream.New(e.enc)
+	e.sink.next = hub
+	gm := hub.Subscribe(e.viewer(t, "user-ok"), "", 16)
+	player := hub.Subscribe(e.viewer(t, "user-two"), "", 16)
+	owner := hub.Subscribe(ownerViewer(t, e), "", 16)
+
+	if w := callAs(e.r, "user-ok", "POST", "/sessions/"+e.sid+"/encounters", newSessionEncounter); w.Code != http.StatusCreated {
+		t.Fatalf("create in session = %d %s", w.Code, w.Body)
+	}
+	if w := callAs(e.r, "user-ok", "POST", "/encounters", `{"name":"P","game_system_id":"`+data.DefaultSystemID+`"}`); w.Code != http.StatusCreated {
+		t.Fatalf("create private = %d %s", w.Code, w.Body)
+	}
+
+	for name, sub := range map[string]*stream.Subscription{"GM": gm, "player": player} {
+		got := drain(sub)
+		if len(got) != 1 || got[0].Type != data.EventCreated || got[0].SessionID != e.sid {
+			t.Errorf("%s got %v, want the one encounter.created of the session", name, got)
+		}
+	}
+	if got := drain(owner); len(got) != 1 || got[0].Type != data.EventCreated || got[0].SessionID != "" {
+		t.Errorf("the owner's private subscription got %v, want only the private encounter's creation", got)
+	}
+}
+
+func ownerViewer(t *testing.T, e eventTable) data.Viewer {
+	t.Helper()
+	_, v, err := data.NewEncounters(e.db).LoadOwnedView(context.Background(), "u-1", privateIDFor(t, e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// privateIDFor makes a private encounter (before any subscription exists) just to obtain an owner
+// viewer for u-1.
+func privateIDFor(t *testing.T, e eventTable) string {
+	t.Helper()
+	enc := newEncounter(t, e.r, "user-ok", `{"name":"seed","game_system_id":"`+data.DefaultSystemID+`"}`)
+	return enc["id"].(string)
+}
+
+func TestARemovedPlayerAndADemotedCoGMReceiveNothingAfterwards(t *testing.T) {
+	e := newEventTable(t, nil)
+	joinAs(t, e.r, e.sid, "user-four", "co_gm")
+	hub := stream.New(e.enc)
+	e.sink.next = hub
+	e.ses.SetEvictor(hub)
+	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 16)
+	coGM := hub.Subscribe(coGMViewer(t, e), encE1, 16)
+
+	if w := callAs(e.r, "user-ok", "DELETE", "/sessions/"+e.sid+"/members/u-2", ""); w.Code >= 300 {
+		t.Fatalf("remove = %d %s", w.Code, w.Body)
+	}
+	drain(coGM) // the scrub's controllers.updated reached the co-GM, who was still a co-GM
+	if w := callAs(e.r, "user-ok", "PATCH", "/sessions/"+e.sid+"/members/u-4", `{"role":"observer"}`); w.Code != 200 {
+		t.Fatalf("demote = %d %s", w.Code, w.Body)
+	}
+	callAs(e.r, "user-ok", "PUT", controllersPath(e.sid, "hid"), `{"controller_user_ids":[],"revision":`+strconv.Itoa(int(gmRevision(t, e.r, e.sid)))+`}`)
+
+	for name, sub := range map[string]*stream.Subscription{"removed player": player, "demoted co-GM": coGM} {
+		if got := drain(sub); len(got) != 0 {
+			t.Errorf("%s still received %v, including the scrub's own events", name, got)
+		}
+		if _, open := <-sub.C; open {
+			t.Errorf("%s's subscription was left open", name)
+		}
+	}
+}
+
+// coGMViewer is the session viewer of the co-GM user-four (u-4).
+func coGMViewer(t *testing.T, e eventTable) data.Viewer {
+	t.Helper()
+	ctx := data.WithGate(context.Background(), relations.New(e.rel.URL), "user-four")
+	v, err := e.ses.Viewer(ctx, "u-4", e.sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func TestASecondBusAttachReplacesTheFirstAndPrivateEncountersAreNotPublished(t *testing.T) {
+	e := newEventTableLimit(t, "50", nil)
+	hub := stream.New(e.enc)
+	e.sink.next = hub
+	first, second := &captureBus{}, &captureBus{}
+	hub.AttachBus(first, 8)
+	hub.AttachBus(second, 8)
+	defer hub.Close()
+
+	callAs(e.r, "user-ok", "POST", "/encounters", `{"name":"P","game_system_id":"`+data.DefaultSystemID+`"}`)
+	callAs(e.r, "user-ok", "POST", "/sessions/"+e.sid+"/encounters", newSessionEncounter)
+
+	eventually(t, func() bool { return second.count() == 1 }, "the replacement bus never got the session event")
+	time.Sleep(20 * time.Millisecond)
+	if first.count() != 0 || second.count() != 1 {
+		t.Errorf("first bus got %d, second got %d; want 0 and exactly 1 (the private encounter is not published)", first.count(), second.count())
 	}
 }

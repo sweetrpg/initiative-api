@@ -2,6 +2,7 @@ package data
 
 import (
 	"context"
+	"log/slog"
 	"regexp"
 	"time"
 )
@@ -9,19 +10,19 @@ import (
 // Event types an encounter commit can produce. The default for a write whose caller named none is
 // EventUpdated, which carries no ids, so an unannotated write is safe: subscribers refetch.
 const (
-	EventCreated     = "encounter.created"
-	EventUpdated     = "encounter.updated"
-	EventDeleted     = "encounter.deleted"
-	EventReleased    = "encounter.released"
-	EventStarted     = "encounter.started"
-	EventEnded       = "encounter.ended"
-	EventReset       = "encounter.reset"
-	EventTurn        = "turn.advanced"
-	EventCombatantAd = "combatant.added"
-	EventCombatantUp = "combatant.updated"
-	EventCombatantRm = "combatant.removed"
-	EventCombatantRs = "combatant.restored"
-	EventControllers = "controllers.updated"
+	EventCreated           = "encounter.created"
+	EventUpdated           = "encounter.updated"
+	EventDeleted           = "encounter.deleted"
+	EventReleased          = "encounter.released"
+	EventStarted           = "encounter.started"
+	EventEnded             = "encounter.ended"
+	EventReset             = "encounter.reset"
+	EventTurn              = "turn.advanced"
+	EventCombatantAdded    = "combatant.added"
+	EventCombatantUpdated  = "combatant.updated"
+	EventCombatantRemoved  = "combatant.removed"
+	EventCombatantRestored = "combatant.restored"
+	EventControllers       = "controllers.updated"
 )
 
 // Origin says who made a change, so a client can recognise the echo of its own write. The actor
@@ -96,15 +97,17 @@ type Change struct {
 	SessionID   string
 	OwnerID     string
 	CombatantID []string
-	// GMOnly marks a write only the owner or GM may hear of: a limit or entitlement flag changed
-	// (lock, inactive). It never reaches players, co-GMs' bus consumers, or the bus.
+	// GMOnly marks a change only GM-level viewers may hear of: a limit or entitlement flag (lock,
+	// inactive) changed. It never reaches a player or observer, and never the bus.
 	GMOnly bool
 	Origin Origin
 	At     time.Time
 }
 
-// Sink receives every committed encounter change, in commit order per caller, after the write has
-// succeeded. Emit must not block and must not fail the write; it recovers from its own errors.
+// Sink receives every committed encounter change after the write has succeeded. Emit must not
+// block. Changes made by concurrent writers can reach the sink out of commit order, so clients
+// order what they receive by the revision (GM and co-GM) or the view_tag (everyone else) in each
+// event, not by arrival.
 type Sink interface {
 	Emit(ctx context.Context, c Change)
 }
@@ -113,13 +116,8 @@ type Sink interface {
 // startup; with none, commits emit nothing.
 func (r *Encounters) SetSink(s Sink) {
 	r.sink = s
-	r.commit = func(ctx context.Context, kind commitKind, before, after any) {
-		e, ok := after.(*Encounter)
-		if !ok {
-			return
-		}
-		b, _ := before.(*Encounter)
-		r.emitCommit(ctx, kind, b, *e)
+	r.commit = func(ctx context.Context, kind commitKind, before, after *Encounter) {
+		r.emitCommit(ctx, kind, before, *after)
 	}
 }
 
@@ -148,6 +146,17 @@ func (r *Encounters) emitCommit(ctx context.Context, kind commitKind, before *En
 		o := opOf(ctx)
 		c.Type, c.CombatantID = o.typ, o.ids
 	}
+	r.deliver(ctx, c)
+}
+
+// deliver hands c to the sink. A sink that panics must never fail a write that already
+// committed, so the panic is recovered and logged.
+func (r *Encounters) deliver(ctx context.Context, c Change) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.ErrorContext(ctx, "an encounter event sink panicked", "encounter", c.After.ID, "type", c.Type, "panic", p)
+		}
+	}()
 	r.sink.Emit(ctx, c)
 }
 
@@ -158,5 +167,5 @@ func (r *Encounters) emit(ctx context.Context, c Change) {
 		return
 	}
 	c.Origin, c.At = originOf(ctx), r.now()
-	r.sink.Emit(ctx, c)
+	r.deliver(ctx, c)
 }
