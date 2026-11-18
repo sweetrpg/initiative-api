@@ -701,12 +701,13 @@ func (s *Sessions) Block(ctx context.Context, actor, id, user string) error {
 	if err := s.repo.AddBlock(ctx, d, user); err != nil {
 		return err
 	}
+	// The block alone ends access, so streams close now, not only if the removal below succeeds.
+	s.evict(d.SessionID(), user)
 	if err := s.repo.DropRequest(ctx, d, user); err != nil {
 		return err
 	}
 	switch err := s.repo.RemoveMember(ctx, d, user); {
 	case err == nil:
-		s.evict(d.SessionID(), user)
 		s.scrubControllers(ctx, d, user)
 		s.syncRevoke(ctx, am.Role, d.SessionID(), user, t.Role)
 	case !errors.Is(err, data.ErrNotFound):

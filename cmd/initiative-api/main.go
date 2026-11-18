@@ -33,6 +33,7 @@ import (
 	"github.com/sweetrpg/initiative-api/server"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
@@ -59,6 +60,10 @@ func main() {
 	if err := data.EnsureIndexes(idxCtx, db); err != nil {
 		log.Fatalf("indexes: %v", err)
 	}
+	fanout := db.Collection(stream.FanoutCollection)
+	if err := fanout.EnsureIndexes(idxCtx, stream.FanoutIndexes); err != nil {
+		log.Fatalf("fan-out indexes: %v", err)
+	}
 	idxCancel()
 
 	themes, err := domain.NewThemes(db)
@@ -84,6 +89,11 @@ func main() {
 	encounters.SetSink(hub)
 	sessions.SetSink(hub)
 	sessions.SetEvictor(hub)
+	host, _ := os.Hostname()
+	pod := host + "-" + primitive.NewObjectID().Hex() // unique per process: a pod never mistakes another's rows for its own
+	relay := hub.AttachRelay(fanout, pod, 1024)
+	relay.Run(context.Background())
+	defer relay.Stop()
 	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	sessions.MaxMembers = cfg.SessionMembersMax

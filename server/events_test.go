@@ -135,10 +135,10 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
 	enc := e.encounter(t) // the hidden adversary "hid" is the current turn
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 64)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 64)
-	observer := hub.Subscribe(e.viewer(t, "user-three"), encE1, 64)
-	secrets := []string{`"hid"`, secretName, secretNote, `"initiative":`, `"health"`, `:31`, `"revision"`}
+	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 64)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 64)
+	observer := subscribe(hub, e.viewer(t, "user-three"), encE1, 64)
+	secrets := []string{`"hid"`, secretName, secretNote, `"initiative":`, `"health"`, `"current":31`, `"revision"`}
 
 	for _, typ := range allEventTypes {
 		for _, ids := range [][]string{{"hid"}, {"hid", "orc"}, {"orc"}, nil} {
@@ -171,7 +171,7 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 func TestAPlayerSeesTheVisibleIdsOfAChangeThatAlsoTouchedAHiddenOne(t *testing.T) {
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
 
 	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid", "orc"}, At: time.Now()})
 	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid"}, At: time.Now()})
@@ -198,9 +198,9 @@ func TestAGMOnlyChangeReachesOnlyTheGMAndNeverTheBus(t *testing.T) {
 	bus := &captureBus{}
 	hub.AttachBus(bus, 8)
 	defer hub.Close()
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
-	observer := hub.Subscribe(e.viewer(t, "user-three"), encE1, 8)
+	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 8)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
+	observer := subscribe(hub, e.viewer(t, "user-three"), encE1, 8)
 
 	hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, GMOnly: true, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
 
@@ -242,8 +242,8 @@ func (b *captureBus) count() int { b.mu.Lock(); defer b.mu.Unlock(); return len(
 func TestAnEventFailsClosedWhenAViewerCannotBeRendered(t *testing.T) {
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
+	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 8)
 	// A document the view builder refuses for the player's session: BuildView returns ErrNoView.
 	odd := e.encounter(t)
 	odd.SessionID = "5f00000000000000000000bb"
@@ -271,8 +271,8 @@ func TestOneSubscribersFailureDoesNotCostTheOthersTheEvent(t *testing.T) {
 	bus := &captureBus{}
 	hub.AttachBus(bus, 8)
 	defer hub.Close()
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8) // needs a rendering, which panics
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)      // needs none
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8) // needs a rendering, which panics
+	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 8)      // needs none
 
 	hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
 
@@ -318,8 +318,8 @@ func TestTheClientIDReachesOnlyTheOriginatingUsersOwnStreams(t *testing.T) {
 	bus := &captureBus{}
 	hub.AttachBus(bus, 8)
 	defer hub.Close()
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
+	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 8)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
 	origin := data.Origin{Kind: data.OriginUser, ClientID: "ios-7.f", ActorID: "u-1"}
 
 	hub.Emit(context.Background(), data.Change{Type: data.EventTurn, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", Origin: origin, At: time.Now()})
@@ -340,9 +340,9 @@ func TestTheClientIDReachesOnlyTheOriginatingUsersOwnStreams(t *testing.T) {
 func TestASubscriberThatFallsBehindIsClosedAndOthersAreUnaffected(t *testing.T) {
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
-	slow := hub.Subscribe(e.viewer(t, "user-two"), encE1, 1)
-	fast := hub.Subscribe(e.viewer(t, "user-three"), encE1, 8)
-	other := hub.Subscribe(e.viewer(t, "user-three"), "5f00000000000000000000e2", 8) // another encounter
+	slow := subscribe(hub, e.viewer(t, "user-two"), encE1, 1)
+	fast := subscribe(hub, e.viewer(t, "user-three"), encE1, 8)
+	other := subscribe(hub, e.viewer(t, "user-three"), "5f00000000000000000000e2", 8) // another encounter
 
 	for i := 0; i < 3; i++ {
 		hub.Emit(context.Background(), data.Change{Type: data.EventUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
@@ -365,7 +365,7 @@ func TestABusThatBlocksOrFailsNeverHoldsUpTheWriterOrTheStream(t *testing.T) {
 	bus := &captureBus{block: make(chan struct{}), err: errors.New("broker down")}
 	hub.AttachBus(bus, 1)
 	defer hub.Close()
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 16)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 16)
 
 	start := time.Now()
 	for i := 0; i < 10; i++ {
@@ -399,9 +399,9 @@ func TestADefinitionIsLookedUpOncePerEmissionNotOncePerSubscriber(t *testing.T) 
 	cr := &countingRenderer{inner: e.enc}
 	hub := stream.New(cr)
 	for i := 0; i < 5; i++ {
-		hub.Subscribe(e.viewer(t, "user-ok"), encE1, 4)    // GM: needs no rendering
-		hub.Subscribe(e.viewer(t, "user-three"), encE1, 4) // observers share one
-		hub.Subscribe(e.viewer(t, "user-two"), encE1, 4)   // the same player shares one
+		subscribe(hub, e.viewer(t, "user-ok"), encE1, 4)    // GM: needs no rendering
+		subscribe(hub, e.viewer(t, "user-three"), encE1, 4) // observers share one
+		subscribe(hub, e.viewer(t, "user-two"), encE1, 4)   // the same player shares one
 	}
 
 	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"orc"}, At: time.Now()})
@@ -454,8 +454,8 @@ func TestADeletedSessionsEventsReachItsSubscribersEvenThoughTheEncounterLeftTheS
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
 	e.sink.next = hub
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
+	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 8)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
 
 	w := callAs(e.r, "user-ok", "DELETE", "/sessions/"+e.sid+"?revision=1", "")
 
@@ -516,7 +516,7 @@ func wireHub(t *testing.T, e eventTable) (gm, player, observer *stream.Subscript
 	t.Helper()
 	hub := stream.New(e.enc)
 	e.sink.next = hub
-	return hub.Subscribe(e.viewer(t, "user-ok"), encE1, 16), hub.Subscribe(e.viewer(t, "user-two"), encE1, 16), hub.Subscribe(e.viewer(t, "user-three"), encE1, 16)
+	return subscribe(hub, e.viewer(t, "user-ok"), encE1, 16), subscribe(hub, e.viewer(t, "user-two"), encE1, 16), subscribe(hub, e.viewer(t, "user-three"), encE1, 16)
 }
 
 func playerTag(t *testing.T, e eventTable) string {
@@ -577,10 +577,10 @@ func TestAVisibleEditProducesOneEventWithAChangedViewTagAndNoRevisionForThePlaye
 func TestClosingSubscribersWhileEventsAreEmittedNeverStopsDeliveryToTheRest(t *testing.T) {
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
-	keeper := hub.Subscribe(e.viewer(t, "user-three"), encE1, 4096)
+	keeper := subscribe(hub, e.viewer(t, "user-three"), encE1, 4096)
 	var closers []*stream.Subscription
 	for i := 0; i < 40; i++ {
-		closers = append(closers, hub.Subscribe(e.viewer(t, "user-two"), encE1, 4096))
+		closers = append(closers, subscribe(hub, e.viewer(t, "user-two"), encE1, 4096))
 	}
 	const emits = 200
 	var wg sync.WaitGroup
@@ -630,8 +630,8 @@ func TestLosingAccessEndsTheMembersOpenStreamsAtOnce(t *testing.T) {
 			e := newEventTable(t, nil)
 			hub := stream.New(e.enc)
 			e.ses.SetEvictor(hub)
-			player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
-			gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
+			player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
+			gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 8)
 
 			if code := act(e); code >= 300 {
 				t.Fatalf("%s = %d", name, code)
@@ -648,8 +648,8 @@ func TestDeletingTheSessionEndsEveryStreamOfIt(t *testing.T) {
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
 	e.ses.SetEvictor(hub)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 8)
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 8)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
+	gm := subscribe(hub, e.viewer(t, "user-ok"), encE1, 8)
 
 	if w := deleteSession(e.r, "user-ok", e.sid, "1"); w.Code != http.StatusNoContent {
 		t.Fatalf("delete = %d %s", w.Code, w.Body)
@@ -667,8 +667,8 @@ func TestDeletingTheSessionEndsEveryStreamOfIt(t *testing.T) {
 func TestConcurrentEmitsOnASlowSubscriberNeverSendOnAClosedChannel(t *testing.T) {
 	e := newEventTable(t, nil)
 	hub := stream.New(e.enc)
-	slow := hub.Subscribe(e.viewer(t, "user-three"), encE1, 1)
-	other := hub.Subscribe(e.viewer(t, "user-ok"), encE1, 4096)
+	slow := subscribe(hub, e.viewer(t, "user-three"), encE1, 1)
+	other := subscribe(hub, e.viewer(t, "user-ok"), encE1, 4096)
 	enc := e.encounter(t)
 
 	var wg sync.WaitGroup
@@ -695,9 +695,9 @@ func TestSessionScopedSubscriptionsHearOfANewEncounterAndOwnerScopedOnesOfAPriva
 	e := newEventTableLimit(t, "50", nil)
 	hub := stream.New(e.enc)
 	e.sink.next = hub
-	gm := hub.Subscribe(e.viewer(t, "user-ok"), "", 16)
-	player := hub.Subscribe(e.viewer(t, "user-two"), "", 16)
-	owner := hub.Subscribe(ownerViewer(t, e), "", 16)
+	gm := subscribe(hub, e.viewer(t, "user-ok"), "", 16)
+	player := subscribe(hub, e.viewer(t, "user-two"), "", 16)
+	owner := subscribe(hub, ownerViewer(t, e), "", 16)
 
 	if w := callAs(e.r, "user-ok", "POST", "/sessions/"+e.sid+"/encounters", newSessionEncounter); w.Code != http.StatusCreated {
 		t.Fatalf("create in session = %d %s", w.Code, w.Body)
@@ -740,8 +740,8 @@ func TestARemovedPlayerAndADemotedCoGMReceiveNothingAfterwards(t *testing.T) {
 	hub := stream.New(e.enc)
 	e.sink.next = hub
 	e.ses.SetEvictor(hub)
-	player := hub.Subscribe(e.viewer(t, "user-two"), encE1, 16)
-	coGM := hub.Subscribe(coGMViewer(t, e), encE1, 16)
+	player := subscribe(hub, e.viewer(t, "user-two"), encE1, 16)
+	coGM := subscribe(hub, coGMViewer(t, e), encE1, 16)
 
 	if w := callAs(e.r, "user-ok", "DELETE", "/sessions/"+e.sid+"/members/u-2", ""); w.Code >= 300 {
 		t.Fatalf("remove = %d %s", w.Code, w.Body)
@@ -790,4 +790,13 @@ func TestASecondBusAttachReplacesTheFirstAndPrivateEncountersAreNotPublished(t *
 	if first.count() != 0 || second.count() != 1 {
 		t.Errorf("first bus got %d, second got %d; want 0 and exactly 1 (the private encounter is not published)", first.count(), second.count())
 	}
+}
+
+// subscribe opens and grants a subscription for v, as the transport does after authorizing.
+func subscribe(hub *stream.Hub, v data.Viewer, encounterID string, buf int) *stream.Subscription {
+	s := hub.Open(v.SessionID(), v.Actor(), encounterID, buf)
+	if err := s.Grant(v); err != nil {
+		panic(err)
+	}
+	return s
 }

@@ -5,6 +5,7 @@ package fake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -49,6 +50,9 @@ type Collection struct {
 	Indexes []store.IndexSpec
 	// FindCalls records each Find's options, so tests can prove limits and sorts reach the query.
 	FindCalls []store.FindOptions
+
+	watchers    []*cursor
+	lostHistory bool // the next resumed Watch fails with ErrHistoryLost
 }
 
 // Docs returns a copy of the stored documents.
@@ -86,6 +90,7 @@ func (c *Collection) InsertOne(_ context.Context, doc any) error {
 		return store.ErrDuplicate
 	}
 	c.docs = append(c.docs, m)
+	c.wake()
 	return nil
 }
 
@@ -601,3 +606,90 @@ func matchOp(have any, o bson.E, pattern, opts string) (bool, error) {
 	}
 	return false, fmt.Errorf("fake: unsupported operator %s", o.Key)
 }
+
+// wake tells every watcher a document arrived. Callers hold c.mu.
+func (c *Collection) wake() {
+	for _, w := range c.watchers {
+		select {
+		case w.ping <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// LoseHistory makes the next Watch that asks to resume fail with store.ErrHistoryLost, as a token
+// older than the oplog does.
+func (c *Collection) LoseHistory() {
+	c.mu.Lock()
+	c.lostHistory = true
+	c.mu.Unlock()
+}
+
+// BreakWatchers ends every open Watch cursor with an error, as a dropped change stream does. A
+// Watch made after it works again.
+func (c *Collection) BreakWatchers() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, w := range c.watchers {
+		w.broken = true
+	}
+	c.wake()
+}
+
+// Watch tails inserts. The resume token is the number of documents seen, so a resumed cursor
+// replays what was inserted while it was down.
+func (c *Collection) Watch(_ context.Context, resume bson.Raw) (store.Cursor, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(resume) > 0 && c.lostHistory {
+		c.lostHistory = false
+		return nil, store.ErrHistoryLost
+	}
+	w := &cursor{c: c, ping: make(chan struct{}, 1), pos: len(c.docs)}
+	if len(resume) > 0 {
+		w.pos = int(resume.Lookup("i").Int32())
+	}
+	c.watchers = append(c.watchers, w)
+	return w, nil
+}
+
+type cursor struct {
+	c      *Collection
+	ping   chan struct{}
+	pos    int
+	broken bool // guarded by c.mu
+	doc    bson.Raw
+	err    error
+}
+
+func (w *cursor) Next(ctx context.Context) bool {
+	for {
+		w.c.mu.Lock()
+		switch {
+		case w.broken:
+			w.err = errors.New("fake: watch broken")
+			w.c.mu.Unlock()
+			return false
+		case w.pos < len(w.c.docs):
+			w.doc, w.err = bson.Marshal(w.c.docs[w.pos])
+			w.pos++
+			w.c.mu.Unlock()
+			return w.err == nil
+		}
+		w.c.mu.Unlock()
+		select {
+		case <-w.ping:
+		case <-ctx.Done():
+			w.err = ctx.Err()
+			return false
+		}
+	}
+}
+
+func (w *cursor) Doc() bson.Raw { return w.doc }
+func (w *cursor) Token() bson.Raw {
+	t, _ := bson.Marshal(bson.D{{Key: "i", Value: int32(w.pos)}})
+	return t
+}
+func (w *cursor) Err() error                  { return w.err }
+func (w *cursor) Close(context.Context) error { return nil }
