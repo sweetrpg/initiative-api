@@ -52,8 +52,10 @@ func (r *StreamTickets) Mint(ctx context.Context, t StreamTicket) error {
 	return r.c.InsertOne(ctx, t)
 }
 
-// Redeem spends the ticket whose hash is id: it finds the row, then deletes it, and only the caller
-// whose delete succeeds gets it, so a ticket opens one stream even when two pods are asked at once.
+// Redeem spends the ticket whose hash is id: it finds the row, then deletes it by _id and requires
+// that the delete removed one row. Two redeems can both find the row, but only one delete removes
+// it (the other reports ErrNotFound, which store.DeleteOne raises on a deleted count of zero), so a
+// ticket opens one stream even when two pods are asked at once.
 // A ticket older than maxAge, unknown, or already spent is ErrNotFound.
 func (r *StreamTickets) Redeem(ctx context.Context, id string, maxAge time.Duration) (StreamTicket, error) {
 	var t StreamTicket
