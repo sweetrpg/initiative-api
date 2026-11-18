@@ -25,6 +25,7 @@ var (
 type Encounters struct {
 	*Owned[Encounter, *Encounter]
 	systems *SystemRepo
+	sink    Sink
 }
 
 // NewEncounters builds the encounter repository for db.
@@ -419,6 +420,7 @@ func (r *Encounters) flip(ctx context.Context, filter, update bson.D) (int, erro
 		if err != nil {
 			return n, err
 		}
+		r.emitCommit(ctx, commitFlag, nil, out)
 		n++
 	}
 }

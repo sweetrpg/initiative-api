@@ -38,6 +38,12 @@ func (v Viewer) SessionID() string { return v.session }
 // Level returns what the viewer may see.
 func (v Viewer) Level() ViewLevel { return v.level }
 
+// BusViewer is the viewer the platform-bus form of an event is rendered for: observer level, no
+// actor, bound to the session of the encounter being rendered ("" for a private encounter). It
+// grants no read: nothing can load an encounter with it, it only lets the view builder decide what
+// an unprivileged consumer may be told about a document already in memory.
+func BusViewer(sessionID string) Viewer { return Viewer{session: sessionID, level: ViewObserver} }
+
 // ownerViewer is the viewer for a private encounter the caller owns.
 func ownerViewer(owner string) Viewer { return Viewer{actor: owner, level: ViewGM} }
 

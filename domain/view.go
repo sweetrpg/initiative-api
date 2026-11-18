@@ -380,18 +380,21 @@ func (s *Encounters) ViewsForSession(ctx context.Context, v data.Viewer, limit i
 // render looks up the encounter's tracker definition and builds the view. A system with no
 // definition leaves the status out; it never widens what is shown.
 func (s *Encounters) render(ctx context.Context, enc data.Encounter, v data.Viewer) (EncounterView, error) {
-	var def []data.TrackerField
+	return BuildView(enc, s.Definition(ctx, enc), v)
+}
+
+// Definition returns the tracker fields of enc's game system, or none when they cannot be had. The
+// only thing the definition adds to a view is the coarse health status, so a lookup failure must
+// not turn a write that already committed into a 500: it is logged and the status is left out.
+func (s *Encounters) Definition(ctx context.Context, enc data.Encounter) []data.TrackerField {
 	sys, err := s.systems.GetOrDefault(ctx, enc.GameSystemID)
 	switch {
 	case err == nil:
-		def = sys.Fields
+		return sys.Fields
 	case !errors.Is(err, data.ErrNotFound):
-		// The only thing the definition adds is the coarse health status. A lookup failure must not
-		// turn a write that already committed into a 500, so the status is left out and the failure
-		// logged.
 		slog.WarnContext(ctx, "game system lookup failed while building a view; omitting health status", "system", enc.GameSystemID, "error", err)
 	}
-	return BuildView(enc, def, v)
+	return nil
 }
 
 // ViewsOwned renders one page of the owner's private encounters.
