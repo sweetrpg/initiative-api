@@ -38,7 +38,10 @@ func (m mongoCollection) InsertOne(ctx context.Context, doc any) error {
 }
 
 func (m mongoCollection) FindOne(ctx context.Context, filter bson.D, out any) error {
-	return mapErr(m.c.FindOne(ctx, filter).Decode(out))
+	_, err := retryRead(ctx, "find_one", func() (struct{}, error) {
+		return struct{}{}, m.c.FindOne(ctx, filter).Decode(out)
+	})
+	return mapErr(err)
 }
 
 func (m mongoCollection) Find(ctx context.Context, filter bson.D, opts FindOptions, out any) error {
@@ -52,11 +55,14 @@ func (m mongoCollection) Find(ctx context.Context, filter bson.D, opts FindOptio
 	if opts.Limit > 0 {
 		fo.SetLimit(opts.Limit)
 	}
-	cur, err := m.c.Find(ctx, filter, fo)
-	if err != nil {
-		return mapErr(err)
-	}
-	return mapErr(cur.All(ctx, out))
+	_, err := retryRead(ctx, "find", func() (struct{}, error) {
+		cur, err := m.c.Find(ctx, filter, fo)
+		if err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, cur.All(ctx, out)
+	})
+	return mapErr(err)
 }
 
 func (m mongoCollection) FindOneAndUpdate(ctx context.Context, filter, update bson.D, out any) error {
@@ -81,7 +87,7 @@ func (m mongoCollection) DeleteOne(ctx context.Context, filter bson.D) error {
 }
 
 func (m mongoCollection) CountDocuments(ctx context.Context, filter bson.D) (int64, error) {
-	n, err := m.c.CountDocuments(ctx, filter)
+	n, err := retryRead(ctx, "count", func() (int64, error) { return m.c.CountDocuments(ctx, filter) })
 	return n, mapErr(err)
 }
 
