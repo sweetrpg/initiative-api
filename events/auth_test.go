@@ -121,3 +121,24 @@ func TestStartFailsWhenTheBrokerIsUnreachable(t *testing.T) {
 		t.Fatal("Start succeeded with no broker")
 	}
 }
+
+func TestALostConnectionIsCountedAndAClosedOneEndsTheProcessUnlessWeStoppedIt(t *testing.T) {
+	c := New(nil, nil)
+	var closed int
+	c.OnClosed = func() { closed++ }
+	c.onDisconnect(errors.New("eof"))
+	c.onDisconnect(errors.New("eof"))
+	if c.Disconnects() != 2 {
+		t.Errorf("disconnects = %d, want 2", c.Disconnects())
+	}
+	c.onClosed()
+	if closed != 1 {
+		t.Errorf("OnClosed ran %d times after the connection closed for good, want 1", closed)
+	}
+	c.Stop() // a deliberate close is not a failure
+	c.onDisconnect(errors.New("eof"))
+	c.onClosed()
+	if closed != 1 || c.Disconnects() != 2 {
+		t.Errorf("after Stop: OnClosed=%d disconnects=%d, want both unchanged", closed, c.Disconnects())
+	}
+}

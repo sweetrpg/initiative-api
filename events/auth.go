@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -88,7 +89,46 @@ type Consumer struct {
 	Stream, Filter string
 	conn           *nats.Conn
 	cc             jetstream.ConsumeContext
+
+	// OnClosed runs when the NATS connection is lost for good (reconnect attempts exhausted), not
+	// when Stop closes it. A consumer that is gone while the process stays up would leave denies
+	// unapplied (PADR-0039), so the caller should end the process and let the platform restart it.
+	OnClosed    func()
+	stopping    atomic.Bool
+	disconnects atomic.Int64
 }
+
+// Reconnect policy: retry every ReconnectWait for MaxReconnects tries (about two minutes), then the
+// connection closes for good and OnClosed runs.
+const (
+	reconnectWait = 2 * time.Second
+	maxReconnects = 60
+)
+
+func (c *Consumer) onDisconnect(err error) {
+	if c.stopping.Load() {
+		return
+	}
+	n := c.disconnects.Add(1)
+	slog.Warn("lost the connection to NATS; auth events are not being applied until it returns", "disconnects", n, "error", err)
+}
+
+func (c *Consumer) onReconnect() {
+	slog.Info("reconnected to NATS", "disconnects", c.disconnects.Load())
+}
+
+func (c *Consumer) onClosed() {
+	if c.stopping.Load() {
+		return
+	}
+	slog.Error("the NATS connection is closed for good; auth events can no longer be applied", "disconnects", c.disconnects.Load())
+	if c.OnClosed != nil {
+		c.OnClosed()
+	}
+}
+
+// Disconnects counts the times the connection to NATS was lost since Start.
+func (c *Consumer) Disconnects() int64 { return c.disconnects.Load() }
 
 // New builds a consumer. The gate must start closed.
 func New(rev Revoker, gate Gate) *Consumer {
@@ -99,10 +139,23 @@ func New(rev Revoker, gate Gate) *Consumer {
 // consumer has drained what was pending, and stays closed when the consumer fell behind the
 // stream's retention (until an administrator's reconcile reopens it).
 func (c *Consumer) Start(ctx context.Context, natsURL, durable string) error {
+	err := c.start(ctx, natsURL, durable)
+	if err != nil {
+		c.Stop() // a failed attempt must not leave a connection (and its handlers) behind for the retry
+	}
+	return err
+}
+
+func (c *Consumer) start(ctx context.Context, natsURL, durable string) error {
 	if durable == "" {
 		durable = defaultDurable
 	}
-	opts := []nats.Option{nats.Name(durable)}
+	opts := []nats.Option{
+		nats.Name(durable), nats.ReconnectWait(reconnectWait), nats.MaxReconnects(maxReconnects),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) { c.onDisconnect(err) }),
+		nats.ReconnectHandler(func(*nats.Conn) { c.onReconnect() }),
+		nats.ClosedHandler(func(*nats.Conn) { c.onClosed() }),
+	}
 	if creds := os.Getenv("NATS_CREDS"); creds != "" {
 		opts = append(opts, nats.UserCredentials(creds))
 	} else if user := os.Getenv("NATS_USER"); user != "" {
@@ -192,6 +245,7 @@ func (c *Consumer) openWhenCaughtUp(ctx context.Context, cons jetstream.Consumer
 
 // Stop halts consumption and closes the connection.
 func (c *Consumer) Stop() {
+	c.stopping.Store(true)
 	if c.cc != nil {
 		c.cc.Stop()
 	}

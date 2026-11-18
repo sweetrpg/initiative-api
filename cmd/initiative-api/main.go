@@ -30,6 +30,7 @@ import (
 	"github.com/sweetrpg/initiative-api/events/stream"
 	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/server"
+	"github.com/sweetrpg/initiative-api/startup"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -50,19 +51,26 @@ func main() {
 	tracing.SetupTracing(constants.ServiceName)
 	defer tracing.TeardownTracing()
 
-	database.SetupDatabase() // reads the MongoDB connection settings from the environment
+	// Reads the MongoDB connection settings from the environment; waits out a brief resolver or
+	// network failure instead of crashing the pod.
+	retry := startup.DefaultPolicy()
+	if err := startup.ConnectDatabase(retry); err != nil {
+		log.Fatalf("database: %v", err)
+	}
 	defer database.TeardownDatabase()
 	db := store.MongoDatabase{DB: database.Db}
 
-	idxCtx, idxCancel := context.WithTimeout(context.Background(), time.Minute)
-	if err := data.EnsureIndexes(idxCtx, db); err != nil {
+	fanout := db.Collection(stream.FanoutCollection)
+	if err := startup.Do("create indexes", retry, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := data.EnsureIndexes(ctx, db); err != nil {
+			return err
+		}
+		return fanout.EnsureIndexes(ctx, stream.FanoutIndexes)
+	}); err != nil {
 		log.Fatalf("indexes: %v", err)
 	}
-	fanout := db.Collection(stream.FanoutCollection)
-	if err := fanout.EnsureIndexes(idxCtx, stream.FanoutIndexes); err != nil {
-		log.Fatalf("fan-out indexes: %v", err)
-	}
-	idxCancel()
 
 	themes, err := domain.NewThemes(db)
 	if err != nil {
@@ -74,8 +82,12 @@ func main() {
 	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
 		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
 	} else {
-		consumer := events.New(creds, creds)
-		if err := consumer.Start(context.Background(), natsURL, os.Getenv("NATS_DURABLE_NAME")); err != nil {
+		var consumer *events.Consumer
+		if err := startup.Do("start the auth-event consumer", retry, func() error {
+			consumer = events.New(creds, creds)
+			consumer.OnClosed = func() { os.Exit(1) } // a dead consumer must not leave a live API
+			return consumer.Start(context.Background(), natsURL, os.Getenv("NATS_DURABLE_NAME"))
+		}); err != nil {
 			log.Fatalf("auth events: %v", err)
 		}
 		defer consumer.Stop()

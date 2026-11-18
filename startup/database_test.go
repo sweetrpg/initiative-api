@@ -1,4 +1,4 @@
-package main
+package startup
 
 import (
 	"context"
@@ -25,9 +25,9 @@ type script struct {
 	slept     []time.Duration
 }
 
-func (s *script) conn() dbConn {
-	return dbConn{
-		setup: func() error {
+func (s *script) conn() DB {
+	return DB{
+		Setup: func() error {
 			i := s.setups
 			s.setups++
 			if i < len(s.setupErrs) {
@@ -35,7 +35,7 @@ func (s *script) conn() dbConn {
 			}
 			return nil
 		},
-		ping: func(context.Context) error {
+		Ping: func(context.Context) error {
 			i := s.pings
 			s.pings++
 			if i < len(s.pingErrs) {
@@ -43,16 +43,22 @@ func (s *script) conn() dbConn {
 			}
 			return nil
 		},
-		teardown: func() { s.teardowns++ },
-		sleep:    func(d time.Duration) { s.slept = append(s.slept, d) },
+		Teardown: func() { s.teardowns++ },
 	}
+}
+
+func (s *script) policy(budget time.Duration) Policy {
+	p := DefaultPolicy()
+	p.Budget = budget
+	p.Sleep = func(d time.Duration) { s.slept = append(s.slept, d) }
+	return p
 }
 
 var errDNS = errors.New(`error parsing uri: lookup _mongodb._tcp.cluster0.example.test on 10.0.0.10:53: read udp: i/o timeout`)
 
 func TestAResolveFailureIsRetriedWithBackoffUntilItSucceeds(t *testing.T) {
 	s := &script{setupErrs: []error{errDNS, errDNS, errDNS}}
-	if err := connectWithRetry(s.conn(), time.Minute); err != nil {
+	if err := ConnectDB(s.conn(), s.policy(time.Minute)); err != nil {
 		t.Fatalf("connect = %v, want success on the fourth try", err)
 	}
 	if s.setups != 4 || len(s.slept) != 3 {
@@ -65,7 +71,7 @@ func TestAResolveFailureIsRetriedWithBackoffUntilItSucceeds(t *testing.T) {
 
 func TestAnUnreachableServerIsCaughtByThePingAndTheClientIsClosedBeforeTheRetry(t *testing.T) {
 	s := &script{pingErrs: []error{errors.New("server selection timeout")}}
-	if err := connectWithRetry(s.conn(), time.Minute); err != nil {
+	if err := ConnectDB(s.conn(), s.policy(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if s.teardowns != 1 || s.setups != 2 {
@@ -78,8 +84,8 @@ func TestTheRetriesStopWhenTheBudgetIsSpentAndTheLastErrorIsReturned(t *testing.
 	for i := range s.setupErrs {
 		s.setupErrs[i] = errDNS
 	}
-	err := connectWithRetry(s.conn(), 20*time.Second)
-	if err == nil || !errors.Is(err, errDNS) || !strings.Contains(err.Error(), "not reachable") {
+	err := ConnectDB(s.conn(), s.policy(20*time.Second))
+	if err == nil || !errors.Is(err, errDNS) || !strings.Contains(err.Error(), "failed after") {
 		t.Fatalf("err = %v, want the unreachable error wrapping the last failure", err)
 	}
 	var total time.Duration
@@ -97,8 +103,8 @@ func TestTheRetriesStopWhenTheBudgetIsSpentAndTheLastErrorIsReturned(t *testing.
 func TestAnAuthenticationFailureGetsTwoTriesNotTheWholeBudget(t *testing.T) {
 	bad := errors.New("(AuthenticationFailed) Authentication failed.")
 	s := &script{setupErrs: []error{bad, bad, bad, bad}}
-	err := connectWithRetry(s.conn(), time.Minute)
-	if err == nil || !strings.Contains(err.Error(), "authentication failed after 2 tries") {
+	err := ConnectDB(s.conn(), s.policy(time.Minute))
+	if err == nil || !strings.Contains(err.Error(), "after 2 tries") {
 		t.Fatalf("err = %v", err)
 	}
 	if s.setups != 2 {
