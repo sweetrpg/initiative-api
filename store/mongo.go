@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -91,8 +92,36 @@ func (m mongoCollection) EnsureIndexes(ctx context.Context, specs []IndexSpec) e
 		if len(s.Partial) > 0 {
 			o.SetPartialFilterExpression(s.Partial)
 		}
+		if s.ExpireAfter > 0 {
+			o.SetExpireAfterSeconds(int32(s.ExpireAfter / time.Second))
+		}
 		models = append(models, mongo.IndexModel{Keys: s.Keys, Options: o})
 	}
 	_, err := m.c.Indexes().CreateMany(ctx, models)
 	return mapErr(err)
 }
+
+// Watch tails the collection's inserts with a change stream (a replica set is required).
+func (m mongoCollection) Watch(ctx context.Context, resume bson.Raw) (Cursor, error) {
+	opts := options.ChangeStream()
+	if len(resume) > 0 {
+		opts.SetResumeAfter(resume)
+	}
+	pipe := mongo.Pipeline{{{Key: "$match", Value: bson.D{{Key: "operationType", Value: "insert"}}}}}
+	cs, err := m.c.Watch(ctx, pipe, opts)
+	if err != nil {
+		return nil, err
+	}
+	return mongoCursor{cs}, nil
+}
+
+type mongoCursor struct{ cs *mongo.ChangeStream }
+
+func (c mongoCursor) Next(ctx context.Context) bool { return c.cs.Next(ctx) }
+func (c mongoCursor) Doc() bson.Raw {
+	d, _ := c.cs.Current.Lookup("fullDocument").DocumentOK()
+	return d
+}
+func (c mongoCursor) Token() bson.Raw                 { return c.cs.ResumeToken() }
+func (c mongoCursor) Err() error                      { return c.cs.Err() }
+func (c mongoCursor) Close(ctx context.Context) error { return c.cs.Close(ctx) }

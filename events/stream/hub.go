@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"sync"
@@ -33,6 +34,7 @@ type Hub struct {
 	mu  sync.RWMutex
 	sub map[*Subscription]struct{}
 	bus *busQueue
+	rel *Relay
 
 	dropped atomic.Int64 // events not delivered: full subscriber buffer closed, or full bus queue
 	emitted atomic.Int64
@@ -48,33 +50,60 @@ func (h *Hub) Dropped() int64 { return h.dropped.Load() }
 // Emitted is the number of committed changes the hub has handled.
 func (h *Hub) Emitted() int64 { return h.emitted.Load() }
 
-// Subscription is one connection's feed. Its viewer proves what the subscriber may see; the
-// subscriber must already have been authorized for it (data.Sessions.AuthorizeView or an owner
-// viewer). With an encounter id it follows that encounter; with none it follows every encounter
-// the viewer's audience hears of (a session's, or an owner's private ones), which is how
-// encounter.created reaches anyone, since a new encounter has no subscribers of its own. The
-// transport that carries it (5.2) decides which a connection asks for. C is closed when the
-// subscription ends: by Close, by Evict, or by the hub when the subscriber falls behind.
+// Subscription is one connection's feed. It is made pending by Open, receives nothing until Grant
+// gives it the viewer proving what the subscriber may see, and ends by Close, by Evict, or when the
+// hub finds the subscriber behind. With an encounter id it follows that encounter; with none it
+// follows every encounter the viewer's audience hears of (a session's, or an owner's private
+// ones), which is how encounter.created reaches anyone, since a new encounter has no subscribers
+// of its own. C is closed when the subscription ends.
 type Subscription struct {
 	C chan Event
 
 	h           *Hub
-	viewer      data.Viewer
+	session     string // fixed by Open; the audience Evict matches, before and after Grant
+	actor       string
 	encounterID string
+	viewer      atomic.Pointer[data.Viewer] // nil until Grant
 	overflowed  atomic.Bool
 
-	mu     sync.Mutex // guards closed and every send on and close of C
+	mu     sync.Mutex // guards closed, granted, and every send on and close of C
 	closed bool
 }
 
-// Subscribe registers a subscription with a buffer of buf events (at least 1). An empty
-// encounterID follows every encounter in the viewer's audience.
-func (h *Hub) Subscribe(v data.Viewer, encounterID string, buf int) *Subscription {
-	s := &Subscription{C: make(chan Event, max(buf, 1)), h: h, viewer: v, encounterID: encounterID}
+// ErrEvicted means the subscription ended (evicted, closed, or overflowed) before Grant.
+var ErrEvicted = errors.New("stream: subscription ended before it was granted")
+
+// ErrViewer means Grant was given a viewer that cannot stream: a zero one, one with no actor (such
+// as BusViewer), or one for a different actor or session than Open named.
+var ErrViewer = errors.New("stream: viewer does not match the subscription")
+
+// Open registers a pending subscription of actor in the session ("" for an owner's private
+// encounters) with a buffer of buf events (at least 1). An empty encounterID follows every
+// encounter in the viewer's audience. A pending subscription receives nothing, but Evict already
+// reaches it, so an eviction that lands while the subscriber is being authorized is not lost:
+// authorize, then Grant. Close it if authorization fails.
+func (h *Hub) Open(sessionID, actor, encounterID string, buf int) *Subscription {
+	s := &Subscription{C: make(chan Event, max(buf, 1)), h: h, session: sessionID, actor: actor, encounterID: encounterID}
 	h.mu.Lock()
 	h.sub[s] = struct{}{}
 	h.mu.Unlock()
 	return s
+}
+
+// Grant makes the subscription live for v, which the caller obtained by authorizing the actor
+// (data.Sessions.AuthorizeView or an owner viewer). It fails with ErrEvicted if the subscription
+// ended since Open, and with ErrViewer if v could not stream.
+func (s *Subscription) Grant(v data.Viewer) error {
+	if v.Level() == data.ViewNone || v.Actor() == "" || v.Actor() != s.actor || v.SessionID() != s.session {
+		return ErrViewer
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrEvicted
+	}
+	s.viewer.Store(&v)
+	return nil
 }
 
 // send delivers ev without blocking. C is only ever sent on and closed under mu, so a send never
@@ -109,15 +138,25 @@ func (s *Subscription) Close() {
 // Overflowed reports whether the hub closed the subscription because its buffer was full.
 func (s *Subscription) Overflowed() bool { return s.overflowed.Load() }
 
-// Evict closes every subscription of userID on the session, or of everyone on it when userID is
-// empty. The subscription's viewer is fixed
-// when it is made, so a user who is removed, blocked, leaves, or changes role must lose it: the
+// Evict closes every subscription (pending or live) of userID on the session, or of everyone on it
+// when userID is empty, here and on the other pods (see Relay). A subscription's viewer is fixed
+// when it is granted, so a user who is removed, blocked, leaves, or changes role must lose it: the
 // client reconnects and is authorized again, at its new level or not at all.
 func (h *Hub) Evict(sessionID, userID string) {
+	if sessionID == "" {
+		return // an empty session would match every private subscription
+	}
+	h.evictLocal(sessionID, userID)
+	if r := h.relay(); r != nil {
+		r.publishEvict(sessionID, userID)
+	}
+}
+
+func (h *Hub) evictLocal(sessionID, userID string) {
 	h.mu.RLock()
 	var gone []*Subscription
 	for s := range h.sub {
-		if s.viewer.SessionID() == sessionID && (userID == "" || s.viewer.Actor() == userID) {
+		if s.session == sessionID && (userID == "" || s.actor == userID) {
 			gone = append(gone, s)
 		}
 	}
@@ -132,10 +171,25 @@ func (h *Hub) Evict(sessionID, userID string) {
 func (h *Hub) Emit(ctx context.Context, c data.Change) {
 	h.emitted.Add(1)
 	em := newEmission(ctx, h.r, c)
-	for _, s := range h.snapshot(c.After.ID) {
+	h.deliverLocal(ctx, em)
+	h.publishToBus(ctx, em)
+	if r := h.relay(); r != nil {
+		r.publishChange(c)
+	}
+}
+
+// deliverLocal sends the change to this pod's subscribers.
+func (h *Hub) deliverLocal(ctx context.Context, em *emission) {
+	for _, s := range h.snapshot(em.c.After.ID) {
 		h.deliver(ctx, em, s)
 	}
-	h.publishToBus(ctx, em)
+}
+
+// emitRemote delivers a change another pod committed to this pod's subscribers. The bus and the
+// relay are the originating pod's to feed, so neither runs here.
+func (h *Hub) emitRemote(ctx context.Context, c data.Change) {
+	h.emitted.Add(1)
+	h.deliverLocal(ctx, newEmission(ctx, h.r, c))
 }
 
 // deliver sends the event s may receive for the change, recovering from a panic so one
@@ -146,10 +200,14 @@ func (h *Hub) deliver(ctx context.Context, em *emission, s *Subscription) {
 			slog.ErrorContext(ctx, "delivering an encounter event to a subscriber panicked", "panic", r)
 		}
 	}()
-	if !inAudience(s.viewer, em.c) {
+	v := s.viewer.Load()
+	if v == nil {
+		return // pending
+	}
+	if !inAudience(*v, em.c) {
 		return
 	}
-	ev, ok := em.forViewer(s.viewer)
+	ev, ok := em.forViewer(*v)
 	if !ok {
 		return
 	}

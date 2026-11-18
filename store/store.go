@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -31,6 +32,9 @@ type IndexSpec struct {
 	Keys    bson.D
 	Unique  bool
 	Partial bson.D
+	// ExpireAfter makes the index a TTL index on its single key: documents expire that long after
+	// the time the key holds. Zero means no expiry.
+	ExpireAfter time.Duration
 }
 
 // Collection is one MongoDB collection. Filters and updates are bson documents built from
@@ -55,4 +59,36 @@ type Collection interface {
 // Database hands out collections by name.
 type Database interface {
 	Collection(name string) Collection
+}
+
+// Watcher is implemented by collections that can be tailed for inserted documents (a MongoDB
+// change stream). Use Watch to reach it from a Collection.
+type Watcher interface {
+	// Watch returns a cursor over documents inserted from now on, or after the position resume names
+	// (a token from Cursor.Token).
+	Watch(ctx context.Context, resume bson.Raw) (Cursor, error)
+}
+
+// Cursor is a tail of inserted documents.
+type Cursor interface {
+	// Next waits for the next inserted document; false means the cursor ended (see Err).
+	Next(ctx context.Context) bool
+	// Doc is the document Next found.
+	Doc() bson.Raw
+	// Token is the resume position after the document Next found.
+	Token() bson.Raw
+	Err() error
+	Close(ctx context.Context) error
+}
+
+// ErrNoWatch means the collection cannot be tailed.
+var ErrNoWatch = errors.New("store: collection cannot be watched")
+
+// Watch tails c for inserts, or returns ErrNoWatch when c does not support it.
+func Watch(ctx context.Context, c Collection, resume bson.Raw) (Cursor, error) {
+	w, ok := c.(Watcher)
+	if !ok {
+		return nil, ErrNoWatch
+	}
+	return w.Watch(ctx, resume)
 }
