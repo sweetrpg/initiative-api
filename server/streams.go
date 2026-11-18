@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -9,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -50,6 +53,13 @@ type StreamOptions struct {
 	Buffer int
 	// beforeWrite, when set by a test, runs before each event is written.
 	beforeWrite func()
+	// ConcurrentMax is the most streams one user may hold (Services.Leases counts them, with
+	// seats lasting LeaseTTL unless renewed and kept Grace after a drop); MaxPerPod is this pod's
+	// cap, answered with close code 1013. Zero disables the cap.
+	ConcurrentMax, MaxPerPod int
+	LeaseTTL, Grace          time.Duration
+	// Pod names this pod on its seats.
+	Pod string
 }
 
 func (o StreamOptions) buffer() int {
@@ -57,6 +67,13 @@ func (o StreamOptions) buffer() int {
 		return o.Buffer
 	}
 	return streamBuffer
+}
+
+func (o StreamOptions) leaseTTL() time.Duration {
+	if o.LeaseTTL > 0 {
+		return o.LeaseTTL
+	}
+	return time.Minute
 }
 
 func (o StreamOptions) maxAge() time.Duration {
@@ -101,13 +118,14 @@ func RedactTicket() gin.HandlerFunc {
 type streamHandlers struct {
 	svc  Services
 	opts StreamOptions
+	open *atomic.Int64 // connections on this pod
 }
 
 // setupStreamHandlers registers POST /streams/tickets (user bearer only) on u, and GET /streams on
 // r: with ticket= it opens the stream for that ticket, with no ticket it needs the caller's bearer
 // (a user's, or an integration credential with the read scope) like every other route.
 func setupStreamHandlers(r *gin.Engine, u *gin.RouterGroup, s Services) {
-	h := streamHandlers{s, s.Stream}
+	h := streamHandlers{s, s.Stream, new(atomic.Int64)}
 	u.POST("/streams/tickets", h.mint)
 	g := r.Group("", h.ticketGate, typedErrors(), authenticate(s.Credentials, authz.RequireAnyRole(s.Authz, constants.ServiceName, authz.RoleUser)))
 	g.Use(withOrigin(), withGate(s.Relations))
@@ -276,13 +294,28 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		writeError(c, err, nil)
 		return
 	}
+	full := h.opts.MaxPerPod > 0 && h.open.Add(1) > int64(h.opts.MaxPerPod)
+	if h.opts.MaxPerPod > 0 {
+		defer h.open.Add(-1)
+	}
+	lease, err := h.acquire(ctx, a, full)
+	if err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	defer h.release(lease, a)
 	conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{OriginPatterns: h.opts.AllowedOrigins})
 	if err != nil {
 		return // Accept has answered
 	}
 	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(readLimit) // clients send nothing but control frames
-	cl := &connection{h: h, conn: conn, sub: sub, v: v, a: a}
+	if full {
+		// A browser cannot read the status of a refused upgrade, so a full pod says so on the socket.
+		_ = conn.Close(websocket.StatusTryAgainLater, "pod full")
+		return
+	}
+	cl := &connection{h: h, conn: conn, sub: sub, v: v, a: a, lease: lease}
 	if err := cl.hello(ctx, heads, truncated); err != nil {
 		return
 	}
@@ -294,12 +327,42 @@ type headFrame struct {
 	domain.Head
 }
 
+// acquire takes the user's seat for the stream (none when no lease store is configured, or when
+// the pod is full, which is answered on the socket instead).
+func (h streamHandlers) acquire(ctx context.Context, a serveArgs, full bool) (string, error) {
+	if h.svc.Leases == nil || h.opts.ConcurrentMax <= 0 || full {
+		return "", nil
+	}
+	id := randomHex()
+	l := data.StreamLease{ID: id, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
+	return id, h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), h.opts.ConcurrentMax)
+}
+
+// release keeps a dropped client's seat for the grace period.
+func (h streamHandlers) release(id string, a serveArgs) {
+	if id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.svc.Leases.Release(ctx, id, a.clientID, h.opts.Grace); err != nil {
+		slog.Warn("releasing a stream seat failed; it lapses on its own", "error", err)
+	}
+}
+
+func randomHex() string {
+	b := make([]byte, 12)
+	_, _ = cryptorand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 type connection struct {
-	h    streamHandlers
-	conn *websocket.Conn
-	sub  *stream.Subscription
-	v    data.Viewer
-	a    serveArgs
+	lease string
+	h     streamHandlers
+	conn  *websocket.Conn
+	sub   *stream.Subscription
+	v     data.Viewer
+	a     serveArgs
 }
 
 func (cl *connection) write(ctx context.Context, v any) error {
@@ -373,6 +436,11 @@ func (cl *connection) run(ctx context.Context) {
 			select {
 			case pings <- struct{}{}:
 			default:
+			}
+			if cl.lease != "" {
+				if err := cl.h.svc.Leases.Renew(ctx, cl.lease, cl.h.opts.leaseTTL()); err != nil {
+					slog.WarnContext(ctx, "renewing a stream seat failed; it lapses if renewals keep failing", "error", err)
+				}
 			}
 		case <-maxAge.C:
 			_ = cl.conn.Close(CloseMaxAge, "maximum connection age")

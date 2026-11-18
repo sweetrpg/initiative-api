@@ -57,6 +57,8 @@ func newStreamTable(t *testing.T, opts StreamOptions, ticketTTL time.Duration) s
 		svc.Streams.TTL = ticketTTL
 		svc.Streams.SetClock(func() time.Time { return time.Unix(0, st.clock.Load()) })
 		svc.Stream = opts
+		svc.Leases = data.NewStreamLeases(captured)
+		svc.Leases.SetClock(func() time.Time { return time.Unix(0, st.clock.Load()) })
 		st.hub, st.streams, st.svc = hub, svc.Streams, svc
 	}
 	t.Cleanup(func() { routerHook = nil })
@@ -755,5 +757,82 @@ func TestADemotedMembersTicketServesTheLowerLevel(t *testing.T) {
 	want := strings.Trim(callAs(st.r, "user-three", "GET", "/sessions/"+st.sid+"/encounters/"+encE1, "").Header().Get("ETag"), `"`)
 	if head["view_tag"] != want || want == "" {
 		t.Errorf("head view_tag = %v, want the observer's %q", head["view_tag"], want)
+	}
+}
+
+// open connects a GM stream with a fresh ticket and reads its hello.
+func (st streamTable) open(t *testing.T, token, extra string) (*websocket.Conn, int) {
+	t.Helper()
+	tk, _ := st.ticket(t, token, `{"session_id":"`+st.sid+`"`+extra+`}`)
+	c, resp, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		if resp == nil {
+			t.Fatalf("dial failed without a response: %v", err)
+		}
+		return nil, resp.StatusCode
+	}
+	frame(t, c)
+	return c, http.StatusSwitchingProtocols
+}
+
+func TestAUserCannotHoldMoreStreamsThanTheCapAndASeatFreesWhenAStreamCloses(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{ConcurrentMax: 2}, 0)
+	a, _ := st.open(t, "user-ok", "")
+	st.open(t, "user-ok", "")
+	if _, code := st.open(t, "user-ok", ""); code != http.StatusTooManyRequests {
+		t.Fatalf("third stream = %d, want 429", code)
+	}
+	if n := len(st.db.Fake(data.CollectionStreamLeases).Docs()); n != 2 {
+		t.Errorf("the refused stream left a seat behind: %d rows, want 2", n)
+	}
+	if _, code := st.open(t, "user-two", ""); code != http.StatusSwitchingProtocols {
+		t.Errorf("another user's stream = %d, want it unaffected by the cap", code)
+	}
+	_ = a.Close(websocket.StatusNormalClosure, "")
+	waitFor(t, "the seat to free", func() bool { _, code := st.open(t, "user-ok", ""); return code == http.StatusSwitchingProtocols })
+}
+
+func TestADroppedClientKeepsItsSeatForTheGraceAndOthersCannotTakeIt(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{ConcurrentMax: 1, Grace: time.Minute}, 0)
+	c, _ := st.open(t, "user-ok", `,"client_id":"web-1"`)
+	_ = c.CloseNow()
+	waitFor(t, "the seat to be marked dropped", func() bool {
+		for _, d := range st.db.Fake(data.CollectionStreamLeases).Docs() {
+			if d["dropped"] == true {
+				return true
+			}
+		}
+		return false
+	})
+	if _, code := st.open(t, "user-ok", `,"client_id":"web-2"`); code != http.StatusTooManyRequests {
+		t.Errorf("another client during the grace = %d, want 429", code)
+	}
+	if _, code := st.open(t, "user-ok", `,"client_id":"web-1"`); code != http.StatusSwitchingProtocols {
+		t.Errorf("the same client reconnecting = %d, want it to keep its seat", code)
+	}
+}
+
+func TestASeatThatIsNotRenewedLapses(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{ConcurrentMax: 1, LeaseTTL: 100 * time.Millisecond, Heartbeat: time.Hour}, 0)
+	st.open(t, "user-ok", "") // a pod that crashed here would leave this seat behind
+	if _, code := st.open(t, "user-ok", ""); code != http.StatusTooManyRequests {
+		t.Fatalf("second stream = %d, want 429 while the seat is live", code)
+	}
+	st.advance(150 * time.Millisecond)
+	if _, code := st.open(t, "user-ok", ""); code != http.StatusSwitchingProtocols {
+		t.Errorf("after the lease lapsed = %d, want a free seat", code)
+	}
+}
+
+func TestAFullPodAnswersOnTheSocketWith1013(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{MaxPerPod: 1}, 0)
+	st.open(t, "user-ok", "")
+	tk, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatalf("a full pod should accept the upgrade and say so: %v", err)
+	}
+	if got := closeCode(c); got != websocket.StatusTryAgainLater {
+		t.Errorf("close code = %d, want 1013", got)
 	}
 }

@@ -87,6 +87,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "entitlements_unavailable", Message: "Entitlements are temporarily unavailable. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnauthorized):
 		return ErrorBody{Code: "unauthorized", Message: "Your session is not valid."}, http.StatusUnauthorized
+	case errors.Is(err, data.ErrStreamLimit):
+		return ErrorBody{Code: "too_many_streams", Message: "You have too many open event streams. Close one and try again."}, http.StatusTooManyRequests
 	case errors.Is(err, domain.ErrTicketInvalid):
 		return ErrorBody{Code: "ticket_invalid", Message: "The stream ticket is not valid. Request a new one."}, http.StatusUnauthorized
 	case errors.Is(err, domain.ErrChangeStale):
