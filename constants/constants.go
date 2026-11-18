@@ -1,6 +1,8 @@
 // Package constants holds service-wide names and environment variable keys.
 package constants
 
+import "time"
+
 // Environment variable names.
 const (
 	LOG_LEVEL                   = "LOG_LEVEL"
@@ -11,6 +13,10 @@ const (
 	ALLOWED_ORIGINS             = "ALLOWED_ORIGINS"
 	OWNER_ENTITLEMENTS_MAX_AGE  = "OWNER_ENTITLEMENTS_MAX_AGE"
 	SESSION_MEMBERS_MAX         = "SESSION_MEMBERS_MAX"
+	STREAM_ALLOWED_ORIGINS      = "STREAM_ALLOWED_ORIGINS"
+	STREAM_TICKET_TTL           = "STREAM_TICKET_TTL"
+	STREAM_MAX_AGE              = "STREAM_MAX_AGE"
+	STREAM_HEARTBEAT            = "STREAM_HEARTBEAT"
 )
 
 // Value constants.
@@ -23,4 +29,12 @@ const (
 
 	// CorrelationHeader carries the request correlation ID in and out of the service.
 	CorrelationHeader = "X-Correlation-ID"
+)
+
+// Event stream defaults. MaxStreamTicketTTL is fixed by the ticket rows' TTL index.
+const (
+	DefaultStreamTicketTTL = 30 * time.Second
+	MaxStreamTicketTTL     = 2 * time.Minute
+	DefaultStreamMaxAge    = time.Hour
+	DefaultStreamHeartbeat = 20 * time.Second
 )
