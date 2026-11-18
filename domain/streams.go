@@ -34,6 +34,9 @@ func NewStreams(db store.Database, sessions *Sessions, enc *Encounters) *Streams
 	return &Streams{tickets: data.NewStreamTickets(db), sessions: sessions, enc: enc}
 }
 
+// SetClock replaces the clock ticket ages are read from (tests).
+func (s *Streams) SetClock(now func() time.Time) { s.tickets.SetClock(now) }
+
 func (s *Streams) ttl() time.Duration {
 	if s.TTL > 0 {
 		return s.TTL
@@ -188,9 +191,13 @@ type Head struct {
 	ViewTag     string `json:"view_tag,omitempty"`
 }
 
+// MaxHeads is the most heads a stream opens with; more is reported as truncated in hello, and the
+// client lists the rest over REST.
+const MaxHeads = 100
+
 // Heads returns the head of each encounter in v's scope (or of encounterID only), built from the
 // same views the REST reads return.
-func (s *Streams) Heads(ctx context.Context, v data.Viewer, encounterID string) ([]Head, error) {
+func (s *Streams) Heads(ctx context.Context, v data.Viewer, encounterID string) ([]Head, bool, error) {
 	var views []EncounterView
 	var err error
 	switch {
@@ -200,7 +207,7 @@ func (s *Streams) Heads(ctx context.Context, v data.Viewer, encounterID string) 
 			views = []EncounterView{one}
 		}
 	case v.SessionID() != "":
-		views, err = s.enc.ViewsForSession(ctx, v, 100)
+		views, err = s.enc.ViewsForSession(ctx, v, MaxHeads+1)
 	case encounterID != "":
 		var one EncounterView
 		if one, err = s.enc.ViewOwned(ctx, v.Actor(), encounterID); err == nil {
@@ -208,12 +215,16 @@ func (s *Streams) Heads(ctx context.Context, v data.Viewer, encounterID string) 
 		}
 	default:
 		var page data.Page[EncounterView]
-		if page, err = s.enc.ViewsOwned(ctx, v.Actor(), data.Query{Limit: 100}); err == nil {
+		if page, err = s.enc.ViewsOwned(ctx, v.Actor(), data.Query{Limit: MaxHeads + 1}); err == nil {
 			views = page.Items
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	truncated := len(views) > MaxHeads
+	if truncated {
+		views = views[:MaxHeads]
 	}
 	out := make([]Head, 0, len(views))
 	for _, view := range views {
@@ -223,5 +234,5 @@ func (s *Streams) Heads(ctx context.Context, v data.Viewer, encounterID string) 
 		h.ViewTag, _ = view[FieldViewTag].(string)
 		out = append(out, h)
 	}
-	return out, nil
+	return out, truncated, nil
 }

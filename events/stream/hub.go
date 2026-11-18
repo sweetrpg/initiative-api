@@ -194,6 +194,13 @@ func (s *Subscription) expire() {
 	s.unregister()
 }
 
+// Ended reports whether the subscription has been closed (evicted, overflowed, or closed).
+func (s *Subscription) Ended() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
 // Overflowed reports whether the hub closed the subscription because its buffer was full.
 func (s *Subscription) Overflowed() bool { return s.overflowed.Load() }
 

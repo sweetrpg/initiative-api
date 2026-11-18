@@ -15,7 +15,11 @@ const CollectionStreamTickets = "stream_tickets"
 
 // ticketRowTTL is the TTL index on a ticket row. MongoDB removes expired rows about once a minute,
 // so Redeem checks the age itself; the index only keeps the collection small.
-const ticketRowTTL = 2 * time.Minute
+const ticketRowTTL = MaxTicketTTL
+
+// MaxTicketTTL is the longest a ticket may be configured to live: the row's TTL index is fixed at
+// this, and a longer lifetime would find the row already removed.
+const MaxTicketTTL = 2 * time.Minute
 
 var ticketIndexes = []store.IndexSpec{{Name: "at_ttl", Keys: bson.D{{Key: "at", Value: 1}}, ExpireAfter: ticketRowTTL}}
 
@@ -42,6 +46,9 @@ type StreamTickets struct {
 func NewStreamTickets(db store.Database) *StreamTickets {
 	return &StreamTickets{c: db.Collection(CollectionStreamTickets), now: time.Now}
 }
+
+// SetClock replaces the clock the ticket ages are read from (tests).
+func (r *StreamTickets) SetClock(now func() time.Time) { r.now = now }
 
 // Mint stores t (its ID already the hash of the ticket handed to the caller).
 func (r *StreamTickets) Mint(ctx context.Context, t StreamTicket) error {

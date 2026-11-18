@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -25,7 +26,10 @@ const (
 	CloseMembershipChanged websocket.StatusCode = 4002 // access changed or ended; reconnect to find out
 	CloseSlowConsumer      websocket.StatusCode = 4003 // the client fell behind; reconnect and refetch
 	CloseMaxAge            websocket.StatusCode = 4004 // the connection reached its maximum age
-	streamBuffer                                = 64   // events buffered per connection
+	maxGuardErrors                              = 3
+	checkTimeout                                = 5 * time.Second
+	readLimit                                   = 1024
+	streamBuffer                                = 64 // events buffered per connection
 	writeTimeout                                = 10 * time.Second
 	pongTimeout                                 = 60 * time.Second
 	ticketQuery                                 = "ticket"
@@ -67,6 +71,7 @@ func RedactTicket() gin.HandlerFunc {
 				c.Set(ticketKey, t)
 				q.Del(ticketQuery)
 				c.Request.URL.RawQuery = q.Encode()
+				c.Request.RequestURI = c.Request.URL.RequestURI() // Recovery and tracing read this one
 			}
 		}
 		c.Next()
@@ -134,8 +139,12 @@ func (o StreamOptions) originAllowed(r *http.Request) bool {
 // chain. The ticket stands in for a bearer the browser cannot send on an upgrade.
 func (h streamHandlers) ticketGate(c *gin.Context) {
 	ticket := c.GetString(ticketKey)
-	if ticket == "" {
-		ticket = c.Query(ticketQuery) // RedactTicket not installed
+	if ticket == "" && c.Request.URL.Query().Has(ticketQuery) {
+		// RedactTicket was not installed ahead of the access log: refuse rather than serve a
+		// request whose ticket may already be in a log. Wiring bug, not a client error.
+		slog.ErrorContext(c.Request.Context(), "a stream ticket arrived but RedactTicket is not installed; refusing")
+		c.AbortWithStatusJSON(http.StatusInternalServerError, ErrorBody{Code: "internal", Message: "Something went wrong.", CorrelationID: CorrelationID(c)})
+		return
 	}
 	if ticket == "" {
 		c.Next()
@@ -174,14 +183,29 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 	if client == "" {
 		client = c.GetHeader(clientIDHeader)
 	}
+	if !data.ValidClientID(client) {
+		client = "" // ignored, never rejected, like the origin of a write
+	}
 	a := serveArgs{actor: actor, session: session, encounter: enc, clientID: client}
 	a.authorize = func(ctx context.Context) (data.Viewer, error) {
 		return h.svc.Streams.BearerView(ctx, actor, session, enc)
 	}
 	if id, ok := c.Get(credentialContextKey); ok {
+		// Live answers false for a revoked credential. A store error keeps the stream until it has
+		// failed maxGuardErrors checks in a row, then closes it as revoked: fail closed, but not on
+		// one blip. The bound on a missed revocation is then maxGuardErrors heartbeats.
+		var failed int
 		a.guard = func(ctx context.Context) error {
-			if live, err := h.svc.Credentials.Live(ctx, id.(string)); err == nil && !live {
+			live, err := h.svc.Credentials.Live(ctx, id.(string))
+			switch {
+			case err != nil:
+				if failed++; failed >= maxGuardErrors {
+					return errCredentialRevoked
+				}
+			case !live:
 				return errCredentialRevoked
+			default:
+				failed = 0
 			}
 			return nil
 		}
@@ -215,7 +239,7 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		writeError(c, err, nil)
 		return
 	}
-	heads, err := h.svc.Streams.Heads(ctx, v, a.encounter)
+	heads, truncated, err := h.svc.Streams.Heads(ctx, v, a.encounter)
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -225,8 +249,9 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		return // Accept has answered
 	}
 	defer func() { _ = conn.CloseNow() }()
+	conn.SetReadLimit(readLimit) // clients send nothing but control frames
 	cl := &connection{h: h, conn: conn, sub: sub, v: v, a: a}
-	if err := cl.hello(ctx, heads); err != nil {
+	if err := cl.hello(ctx, heads, truncated); err != nil {
 		return
 	}
 	cl.run(ctx)
@@ -258,11 +283,11 @@ func (cl *connection) write(ctx context.Context, v any) error {
 // hello sends the hello frame and one head frame per encounter in scope. They carry only what the
 // viewer's own views carry: the scope they asked for and each visible encounter's revision (GM) or
 // view tag.
-func (cl *connection) hello(ctx context.Context, heads []domain.Head) error {
+func (cl *connection) hello(ctx context.Context, heads []domain.Head, truncated bool) error {
 	opts := cl.h.opts
 	if err := cl.write(ctx, gin.H{
 		"type": "hello", "session_id": cl.a.session, "encounter_id": cl.a.encounter, "client_id": cl.a.clientID,
-		"heartbeat_seconds": int(opts.heartbeat().Seconds()), "max_age_seconds": int(opts.maxAge().Seconds()),
+		"heartbeat_seconds": int(opts.heartbeat().Seconds()), "max_age_seconds": int(opts.maxAge().Seconds()), "heads_truncated": truncated,
 	}); err != nil {
 		return err
 	}
@@ -295,20 +320,24 @@ func (cl *connection) run(ctx context.Context) {
 				}
 				return
 			}
+			if cl.sub.Ended() { // evicted: what is still buffered must not be written
+				continue
+			}
 			if cl.write(ctx, ev) != nil {
 				return
 			}
 		case <-tick.C:
+			// Check first, so a revoked connection gets no further frame.
+			if code, why := cl.check(ctx); code != 0 {
+				_ = cl.conn.Close(code, why)
+				return
+			}
 			if cl.write(ctx, gin.H{"type": "heartbeat"}) != nil {
 				return
 			}
 			select {
 			case pings <- struct{}{}:
 			default:
-			}
-			if code, why := cl.check(ctx); code != 0 {
-				_ = cl.conn.Close(code, why)
-				return
 			}
 		case <-maxAge.C:
 			_ = cl.conn.Close(CloseMaxAge, "maximum connection age")
@@ -319,9 +348,12 @@ func (cl *connection) run(ctx context.Context) {
 	}
 }
 
-// check re-reads what the stream was authorized on. A failed read keeps the stream (it is
-// fail-open here: the bound on a missed eviction is the maximum age, and the next check retries).
+// check re-reads what the stream was authorized on. A failed membership read keeps the stream (the
+// next check retries; the maximum age bounds a persistent failure). A credential's failed reads
+// close it after maxGuardErrors in a row.
 func (cl *connection) check(ctx context.Context) (websocket.StatusCode, string) {
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout) // a hung store must not stall delivery
+	defer cancel()
 	if cl.a.guard != nil {
 		if err := cl.a.guard(ctx); errors.Is(err, errCredentialRevoked) {
 			return CloseCredentialRevoked, "credential revoked"

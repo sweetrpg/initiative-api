@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/constants"
+	"github.com/sweetrpg/initiative-api/data"
 )
 
 // Config is the validated runtime configuration.
@@ -93,19 +95,31 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	} else {
 		c.OwnerEntitlementsMaxAge = d
 	}
-	for key, dst := range map[string]*time.Duration{constants.STREAM_TICKET_TTL: &c.StreamTicketTTL, constants.STREAM_MAX_AGE: &c.StreamMaxAge, constants.STREAM_HEARTBEAT: &c.StreamHeartbeat} {
-		def := map[string]string{constants.STREAM_TICKET_TTL: "30s", constants.STREAM_MAX_AGE: "1h", constants.STREAM_HEARTBEAT: "20s"}[key]
-		v := get(key, def)
-		if d, err := time.ParseDuration(v); err != nil || d <= 0 {
-			errs = append(errs, fmt.Errorf("%s %q: must be a positive duration such as %s", key, v, def))
+	for _, d := range []struct {
+		key      string
+		dst      *time.Duration
+		def      string
+		min, max time.Duration
+	}{
+		{constants.STREAM_TICKET_TTL, &c.StreamTicketTTL, "30s", time.Second, data.MaxTicketTTL},
+		{constants.STREAM_MAX_AGE, &c.StreamMaxAge, "1h", time.Minute, 24 * time.Hour},
+		// The heartbeat is also how often a stream re-checks membership and credentials, so it
+		// bounds how long a revocation can go unseen.
+		{constants.STREAM_HEARTBEAT, &c.StreamHeartbeat, "20s", time.Second, time.Minute},
+	} {
+		v := get(d.key, d.def)
+		if n, err := time.ParseDuration(v); err != nil || n < d.min || n > d.max {
+			errs = append(errs, fmt.Errorf("%s %q: must be a duration between %s and %s", d.key, v, d.min, d.max))
 		} else {
-			*dst = d
+			*d.dst = n
 		}
 	}
 	if origins := get(constants.STREAM_ALLOWED_ORIGINS, ""); origins != "" {
 		for _, o := range strings.Split(origins, ",") {
 			if o = strings.TrimSpace(o); o == "*" {
 				errs = append(errs, fmt.Errorf("%s: wildcard origin is not allowed", constants.STREAM_ALLOWED_ORIGINS))
+			} else if _, err := path.Match(o, ""); err != nil {
+				errs = append(errs, fmt.Errorf("%s %q: not a valid host pattern", constants.STREAM_ALLOWED_ORIGINS, o))
 			} else if o != "" {
 				c.StreamAllowedOrigins = append(c.StreamAllowedOrigins, o)
 			}
