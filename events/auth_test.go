@@ -3,7 +3,9 @@ package events
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -122,23 +124,106 @@ func TestStartFailsWhenTheBrokerIsUnreachable(t *testing.T) {
 	}
 }
 
-func TestALostConnectionIsCountedAndAClosedOneEndsTheProcessUnlessWeStoppedIt(t *testing.T) {
-	c := New(nil, nil)
-	var closed int
-	c.OnClosed = func() { closed++ }
+type memGate struct {
+	mu     sync.Mutex
+	closed int
+	opened int
+}
+
+func (g *memGate) Open(context.Context) (bool, error) {
+	g.mu.Lock()
+	g.opened++
+	g.mu.Unlock()
+	return true, nil
+}
+func (g *memGate) Pause()                      { g.mu.Lock(); g.closed++; g.mu.Unlock() }
+func (g *memGate) Close(context.Context) error { g.mu.Lock(); g.closed++; g.mu.Unlock(); return nil }
+func (g *memGate) counts() (int, int)          { g.mu.Lock(); defer g.mu.Unlock(); return g.closed, g.opened }
+
+func outageConsumer(g *memGate, now *time.Time, behind bool) (*Consumer, *int) {
+	c := New(nil, g)
+	c.MaxDisconnect = 10 * time.Minute
+	c.now = func() time.Time { return *now }
+	caught := new(int)
+	c.behind = func(context.Context) (bool, error) { return behind, nil }
+	c.catchUp = func(context.Context) { *caught++; _, _ = g.Open(context.Background()) }
+	return c, caught
+}
+
+func TestAnOutagePastTheLimitClosesTheGateButAShortOneDoesNot(t *testing.T) {
+	g := &memGate{}
+	now := time.Unix(1000, 0)
+	c, _ := outageConsumer(g, &now, false)
+	ctx := context.Background()
 	c.onDisconnect(errors.New("eof"))
-	c.onDisconnect(errors.New("eof"))
-	if c.Disconnects() != 2 {
-		t.Errorf("disconnects = %d, want 2", c.Disconnects())
+	now = now.Add(9 * time.Minute)
+	c.checkOutage(ctx)
+	if closed, _ := g.counts(); closed != 0 {
+		t.Fatalf("gate closed after 9m of a 10m limit")
 	}
-	c.onClosed()
-	if closed != 1 {
-		t.Errorf("OnClosed ran %d times after the connection closed for good, want 1", closed)
+	now = now.Add(2 * time.Minute)
+	c.checkOutage(ctx)
+	c.checkOutage(ctx) // once per outage
+	if closed, _ := g.counts(); closed != 1 {
+		t.Errorf("gate closed %d times after 11m, want once", closed)
 	}
-	c.Stop() // a deliberate close is not a failure
+}
+
+func TestAReconnectInsideRetentionReopensTheGateAfterCatchUp(t *testing.T) {
+	g := &memGate{}
+	now := time.Unix(1000, 0)
+	c, caught := outageConsumer(g, &now, false)
 	c.onDisconnect(errors.New("eof"))
-	c.onClosed()
-	if closed != 1 || c.Disconnects() != 2 {
-		t.Errorf("after Stop: OnClosed=%d disconnects=%d, want both unchanged", closed, c.Disconnects())
+	now = now.Add(11 * time.Minute)
+	c.checkOutage(context.Background())
+	c.resync(context.Background())
+	if *caught != 1 {
+		t.Errorf("catch-up ran %d times, want 1", *caught)
+	}
+	if _, opened := g.counts(); opened != 1 {
+		t.Errorf("gate opened %d times, want 1", opened)
+	}
+	if c.DownFor() == 0 {
+		t.Log("onReconnect clears the clock") // resync alone does not
+	}
+}
+
+func TestAReconnectAfterRetentionOvertookTheConsumerLeavesTheGateClosed(t *testing.T) {
+	g := &memGate{}
+	now := time.Unix(1000, 0)
+	c, caught := outageConsumer(g, &now, true)
+	c.onDisconnect(errors.New("eof"))
+	now = now.Add(11 * time.Minute)
+	c.checkOutage(context.Background())
+	c.resync(context.Background())
+	if _, opened := g.counts(); opened != 0 || *caught != 0 {
+		t.Errorf("opened=%d catchups=%d, want the gate left closed until a reconcile", opened, *caught)
+	}
+}
+
+func TestAPermanentCloseOfTheConnectionClosesTheGateNotTheProcess(t *testing.T) {
+	g := &memGate{}
+	now := time.Unix(1000, 0)
+	c, _ := outageConsumer(g, &now, false)
+	c.onClosed(context.Background())
+	if closed, _ := g.counts(); closed != 1 {
+		t.Errorf("gate closed %d times, want 1", closed)
+	}
+	c.Stop()
+	c.onClosed(context.Background())
+	if closed, _ := g.counts(); closed != 1 {
+		t.Error("a deliberate Stop closed the gate")
+	}
+}
+
+func TestStartAgainstNoServerFailsAndLeavesNoConnection(t *testing.T) {
+	c := New(nil, &memGate{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.Start(ctx, "nats://127.0.0.1:1", ""); err == nil {
+		t.Fatal("Start succeeded with no server")
+	}
+	if c.conn != nil && !c.conn.IsClosed() {
+		t.Error("a failed Start left its connection open")
 	}
 }

@@ -25,7 +25,7 @@ func LiveDB() DB {
 			// SetupDatabase panics on a connect or resolve failure.
 			defer func() {
 				if r := recover(); r != nil {
-					err = fmt.Errorf("%v", r)
+					err = redacted("", fmt.Errorf("%v", r)) // a URL parse panic carries the connection string
 				}
 			}()
 			database.SetupDatabase()

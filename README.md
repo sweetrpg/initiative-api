@@ -32,6 +32,7 @@ make run
 | `SESSION_MEMBERS_MAX` | `20` | maximum of a session's member limit; an entitled `members_per_session` above it has no effect; positive integer |
 | `STREAM_ALLOWED_ORIGINS` | unset | comma-separated host patterns a browser `Origin` may match to open an event stream (no `Origin` is always allowed; `*` is rejected); CORS `ALLOWED_ORIGINS` still applies first, so a cross-origin stream client must be in both lists |
 | `STREAM_TICKET_TTL`, `STREAM_MAX_AGE`, `STREAM_HEARTBEAT` | `30s`, `1h`, `20s` | stream ticket lifetime, maximum connection age, heartbeat and membership re-check interval; Go durations: ticket TTL 1s-2m, max age 1m-24h, heartbeat 1s-1m (it is also how often a stream re-checks membership and credentials) |
+| `CREDENTIAL_EVENTS_MAX_DISCONNECT` | `10m` | how long NATS may be unreachable before integration credentials answer 503 (the rest of the API keeps serving); they reopen after the consumer reconnects and catches up; 30s-1h |
 | `OWNER_ENTITLEMENTS_MAX_AGE` | `168h` | how long a recorded owner entitlement serves integration credentials; positive Go duration |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASS` | `REDIS_HOST` required | rate-limit counters; the service stops at startup without `REDIS_HOST` |
 | `RATE_LIMIT_STANDARD`, `RATE_LIMIT_STANDARD_WINDOW_SECONDS`, `RATE_LIMIT_CHEAP`, `RATE_LIMIT_CHEAP_WINDOW_SECONDS` | api-core defaults | per-client budgets (PADR-0036) |

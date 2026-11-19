@@ -50,7 +50,9 @@ func (s *script) conn() DB {
 func (s *script) policy(budget time.Duration) Policy {
 	p := DefaultPolicy()
 	p.Budget = budget
-	p.Sleep = func(d time.Duration) { s.slept = append(s.slept, d) }
+	now := time.Unix(1000, 0)
+	p.Now = func() time.Time { return now }
+	p.Sleep = func(d time.Duration) { s.slept = append(s.slept, d); now = now.Add(d) }
 	return p
 }
 
@@ -109,5 +111,20 @@ func TestAnAuthenticationFailureGetsTwoTriesNotTheWholeBudget(t *testing.T) {
 	}
 	if s.setups != 2 {
 		t.Errorf("setups = %d, want 2", s.setups)
+	}
+}
+
+func TestAnUnparsableURIFromTheEnvironmentIsAnErrorWithNoPasswordNotAPanic(t *testing.T) {
+	t.Setenv("DB_URI", "mongodb://appuser:s3cretpw@host:notaport/db")
+	var slept []time.Duration
+	p := DefaultPolicy()
+	p.Budget = time.Second
+	p.Sleep = func(d time.Duration) { slept = append(slept, d) }
+	err := ConnectDatabase(p)
+	if err == nil {
+		t.Fatal("a bad URI connected")
+	}
+	if strings.Contains(err.Error(), "s3cretpw") {
+		t.Errorf("the error carries the password: %v", err)
 	}
 }

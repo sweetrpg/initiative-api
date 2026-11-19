@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -61,7 +62,7 @@ func main() {
 	db := store.MongoDatabase{DB: database.Db}
 
 	fanout := db.Collection(stream.FanoutCollection)
-	if err := startup.Do("create indexes", retry, func() error {
+	if err := startup.Do("create indexes", startup.IndexPolicy(retry), func() error { // a conflicting index never resolves by waiting
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := data.EnsureIndexes(ctx, db); err != nil {
@@ -79,18 +80,32 @@ func main() {
 	creds := domain.NewCredentials(db)
 	// Credentials stay off (503) until the auth-event consumer is bound and caught up, so a deny
 	// published while the service was down is applied before any secret authenticates (PADR-0039).
+	// The consumer starts in the background, so the rest of the API does not wait on NATS; if NATS
+	// stays unreachable past CREDENTIAL_EVENTS_MAX_DISCONNECT the gate closes again.
 	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
 		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
 	} else {
-		var consumer *events.Consumer
-		if err := startup.Do("start the auth-event consumer", retry, func() error {
-			consumer = events.New(creds, creds)
-			consumer.OnClosed = func() { os.Exit(1) } // a dead consumer must not leave a live API
-			return consumer.Start(context.Background(), natsURL, os.Getenv("NATS_DURABLE_NAME"))
-		}); err != nil {
-			log.Fatalf("auth events: %v", err)
-		}
-		defer consumer.Stop()
+		var live atomic.Pointer[events.Consumer]
+		go func() {
+			err := startup.Do("start the auth-event consumer", retry, func() error {
+				c := events.New(creds, creds)
+				c.MaxDisconnect = cfg.CredentialEventsMaxDisconnect
+				if err := c.Start(context.Background(), natsURL, os.Getenv("NATS_DURABLE_NAME")); err != nil {
+					return err
+				}
+				live.Store(c)
+				return nil
+			})
+			if err != nil {
+				// The gate is closed until the consumer has caught up, so credentials stay at 503.
+				logging.Logger.Error("the auth-event consumer did not start; integration credentials stay closed", "error", err.Error())
+			}
+		}()
+		defer func() {
+			if c := live.Load(); c != nil {
+				c.Stop()
+			}
+		}()
 	}
 	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)

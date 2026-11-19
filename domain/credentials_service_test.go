@@ -97,3 +97,27 @@ func TestClosedCredentialsFailClosedUntilReopened(t *testing.T) {
 		t.Fatalf("reopened = %v", err)
 	}
 }
+
+func TestAPausedGateReopensWithoutAnAdministratorButAPersistedCloseDoesNot(t *testing.T) {
+	s, _ := newCreds(t)
+	_, secret, err := s.Create(ctx, "u1", "a", []string{"read"}, stubChecker{limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Pause()
+	if _, err := s.Authenticate(ctx, secret); !errors.Is(err, ErrCredentialsClosed) {
+		t.Fatalf("paused = %v, want ErrCredentialsClosed", err)
+	}
+	if open, err := s.Open(ctx); err != nil || !open {
+		t.Fatalf("Open after a pause = %v, %v; want open", open, err)
+	}
+	if _, err := s.Authenticate(ctx, secret); err != nil {
+		t.Fatalf("reopened = %v", err)
+	}
+	if err := s.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := s.Open(ctx); open {
+		t.Error("Open reopened a persisted close without a reconcile")
+	}
+}

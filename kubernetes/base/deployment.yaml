@@ -61,6 +61,25 @@ spec:
               memory: "256Mi"
           # Shallow /status/ping for both probes (PADR-0017): /status/health checks dependencies
           # and must not gate routing or restarts.
+          # Start-up retries the database (60s) and index creation (60s) before the server listens,
+          # so liveness must not start until this passes: 40 x 5s = 200s, above the worst case.
+          startupProbe:
+            httpGet:
+              path: /status/ping
+              port: http
+            timeoutSeconds: 5
+            periodSeconds: 5
+            failureThreshold: 40
+          # The server listens only after the database and indexes are ready, and those retry for up to
+          # about 160s (startup.Policy: 60s budget each, plus one attempt). Liveness and readiness start
+          # once this passes, so Kubernetes does not kill a pod that is still retrying.
+          startupProbe:
+            httpGet:
+              path: /status/ping
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /status/ping

@@ -17,6 +17,7 @@ type fakeGate struct{ opened chan struct{} }
 
 func (g fakeGate) Open(context.Context) (bool, error) { close(g.opened); return true, nil }
 func (g fakeGate) Close(context.Context) error        { return nil }
+func (g fakeGate) Pause()                             {}
 
 type chanRevoker struct{ got chan [2]string }
 
