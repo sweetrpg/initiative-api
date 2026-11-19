@@ -155,8 +155,15 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
+	// http.Server.Shutdown does not wait for upgraded connections, so end the event streams first
+	// (each closes with 1001 and its client reconnects to another pod), give their close frames a
+	// moment to go out, then drain the ordinary requests.
+	hub.Shutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	drain, drainCancel := context.WithTimeout(ctx, 3*time.Second)
+	hub.Drain(drain)
+	drainCancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		logging.Logger.Error("shutdown failed", "error", err.Error())
 	}
