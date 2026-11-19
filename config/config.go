@@ -42,6 +42,9 @@ type Config struct {
 	// SessionMembersMax is the maximum of a session's member limit: an entitled members_per_session
 	// above it has no effect (initiative-entitlement-gating, "Session member limit").
 	SessionMembersMax int
+	// CredentialEventsMaxDisconnect is how long NATS may be unreachable before integration
+	// credentials fail closed (503); the rest of the API keeps serving.
+	CredentialEventsMaxDisconnect time.Duration
 	// StreamAllowedOrigins are the browser origins (host patterns) that may open an event stream; a
 	// request with no Origin header (a native client) is always allowed.
 	StreamAllowedOrigins []string
@@ -128,6 +131,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 				c.StreamAllowedOrigins = append(c.StreamAllowedOrigins, o)
 			}
 		}
+	}
+	maxDisc := get(constants.CREDENTIAL_EVENTS_MAX_DISCONNECT, "10m")
+	if d, err := time.ParseDuration(maxDisc); err != nil || d < 30*time.Second || d > time.Hour {
+		errs = append(errs, fmt.Errorf("%s %q: must be a duration between 30s and 1h", constants.CREDENTIAL_EVENTS_MAX_DISCONNECT, maxDisc))
+	} else {
+		c.CredentialEventsMaxDisconnect = d
 	}
 	if _, _, err := net.SplitHostPort(c.BindAddress); err != nil {
 		errs = append(errs, fmt.Errorf("BIND_ADDRESS %q: %w", c.BindAddress, err))
