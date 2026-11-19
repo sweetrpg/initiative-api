@@ -8,6 +8,7 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/events/stream"
 	"github.com/sweetrpg/initiative-api/relations"
 )
 
@@ -31,6 +32,13 @@ type Services struct {
 	// Relations answers session authorization checks (PADR-0035). Without it every session
 	// request fails closed with 503.
 	Relations *relations.Client
+	// Streams and Hub serve the event stream; without both there is no /streams route. Stream
+	// holds its transport settings.
+	Streams *domain.Streams
+	Hub     *stream.Hub
+	Stream  StreamOptions
+	// Leases counts a user's open streams across pods; without it the per-user cap is not applied.
+	Leases *data.StreamLeases
 }
 
 // ProtectedGroup returns a route group whose every route requires a bearer token that auth-api
@@ -78,6 +86,9 @@ func SetupHandlers(r *gin.Engine, s Services) {
 		setupGameSystemHandlers(g, s.Systems, s.Entitlements)
 	}
 	setupRefHandlers(g, s.Encounters)
+	if s.Streams != nil && s.Hub != nil {
+		setupStreamHandlers(r, u, s)
+	}
 	if s.Credentials != nil {
 		setupAdminCredentialHandlers(ProtectedGroup(r, s.Authz, nil, authz.RoleAdmin), s.Credentials)
 	}

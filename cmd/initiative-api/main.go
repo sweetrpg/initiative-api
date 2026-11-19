@@ -16,7 +16,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gomodule/redigo/redis"
 	"github.com/joho/godotenv"
-	sloggin "github.com/samber/slog-gin"
 	"github.com/sweetrpg/api-core.go/ratelimit"
 	"github.com/sweetrpg/api-core.go/tracing"
 	"github.com/sweetrpg/api-core.go/util"
@@ -34,7 +33,6 @@ import (
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
 func main() {
@@ -97,6 +95,8 @@ func main() {
 	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	sessions.MaxMembers = cfg.SessionMembersMax
+	streams := domain.NewStreams(db, sessions, encounters)
+	streams.TTL = cfg.StreamTicketTTL
 	svc := server.Services{
 		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(
@@ -117,6 +117,13 @@ func main() {
 		Sessions:       sessions,
 		ChangeRequests: domain.NewChangeRequests(db, encounters, sessions),
 		Relations:      relations.New(cfg.AuthAPIURL),
+		Hub:            hub,
+		Streams:        streams,
+		Leases:         data.NewStreamLeases(db),
+		Stream: server.StreamOptions{
+			AllowedOrigins: cfg.StreamAllowedOrigins, MaxAge: cfg.StreamMaxAge, Heartbeat: cfg.StreamHeartbeat,
+			ConcurrentMax: cfg.StreamConcurrentMax, CredentialMax: cfg.StreamCredentialMax, MaxPerPod: cfg.StreamMaxPerPod, LeaseTTL: cfg.StreamLeaseTTL, Grace: cfg.StreamGrace, Pod: pod,
+		},
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc, pool), ReadHeaderTimeout: 10 * time.Second}
 
@@ -142,11 +149,7 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 	httpLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	r := gin.New()
-	// Correlation runs first so the access log and every handler see the ID.
-	r.Use(server.Correlation())
-	r.Use(sloggin.New(httpLogger))
-	r.Use(gin.Recovery())
-	r.Use(otelgin.Middleware(constants.ServiceName))
+	r.Use(server.Middleware(httpLogger)...)
 
 	if len(cfg.AllowedOrigins) > 0 {
 		r.Use(cors.New(cors.Config{
