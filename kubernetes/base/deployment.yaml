@@ -25,6 +25,11 @@ spec:
     spec:
       serviceAccountName: api
       enableServiceLinks: false
+      # ndots:2 stops names with 2+ dots (e.g. SRV or Atlas hosts) from walking the node search list first.
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
       imagePullSecrets:
         - name: sweetrpg-registry
       containers:
