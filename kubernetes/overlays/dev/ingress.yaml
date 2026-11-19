@@ -9,6 +9,8 @@ metadata:
     traefik.ingress.kubernetes.io/router.tls: "true"
     traefik.ingress.kubernetes.io/router.middlewares: sweetrpg-initiative-strip-prefix-v1@kubernetescrd
     kubernetes.io/ingress.class: traefik
+    # Creates sweetrpg-dev-tls in this namespace; without it Traefik has no cert for the host.
+    cert-manager.io/cluster-issuer: letsencrypt-prd
 
 spec:
   ingressClassName: traefik
