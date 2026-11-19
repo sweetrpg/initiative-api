@@ -18,6 +18,11 @@ const (
 	STREAM_TICKET_TTL                = "STREAM_TICKET_TTL"
 	STREAM_MAX_AGE                   = "STREAM_MAX_AGE"
 	STREAM_HEARTBEAT                 = "STREAM_HEARTBEAT"
+	STREAM_CONCURRENT_MAX            = "STREAM_CONCURRENT_MAX"
+	STREAM_MAX_PER_POD               = "STREAM_MAX_PER_POD"
+	STREAM_CREDENTIAL_MAX            = "STREAM_CREDENTIAL_MAX"
+	STREAM_LEASE_TTL                 = "STREAM_LEASE_TTL"
+	STREAM_GRACE                     = "STREAM_GRACE"
 )
 
 // Value constants.
@@ -38,4 +43,6 @@ const (
 	MaxStreamTicketTTL     = 2 * time.Minute
 	DefaultStreamMaxAge    = time.Hour
 	DefaultStreamHeartbeat = 20 * time.Second
+	DefaultStreamLeaseTTL  = time.Minute
+	DefaultStreamGrace     = 30 * time.Second
 )

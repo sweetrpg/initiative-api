@@ -52,6 +52,13 @@ type Config struct {
 	// after that long, so a revoked credential or a missed eviction cannot outlive it;
 	// StreamHeartbeat is the interval of the server's heartbeat frames.
 	StreamTicketTTL, StreamMaxAge, StreamHeartbeat time.Duration
+	// StreamConcurrentMax is the most event streams one user may hold open across all pods and
+	// StreamCredentialMax the most one integration credential may (its own count, not the owner's);
+	// StreamMaxPerPod caps one pod's connections. StreamLeaseTTL is how long a stream's seat lasts
+	// without a renewal (a crashed pod's seats lapse after it), and StreamGrace how long a dropped
+	// client keeps its seat so its reconnect does not need a free one.
+	StreamConcurrentMax, StreamCredentialMax, StreamMaxPerPod int
+	StreamLeaseTTL, StreamGrace                               time.Duration
 }
 
 // defaultOwnerEntitlementsMaxAge is seven days.
@@ -115,6 +122,43 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		} else {
 			*d.dst = n
 		}
+	}
+	for _, d := range []struct {
+		key      string
+		dst      *int
+		def      int
+		min, max int
+	}{
+		{constants.STREAM_CONCURRENT_MAX, &c.StreamConcurrentMax, 10, 1, 100},
+		{constants.STREAM_CREDENTIAL_MAX, &c.StreamCredentialMax, 3, 1, 20},
+		{constants.STREAM_MAX_PER_POD, &c.StreamMaxPerPod, 1000, 1, 100000},
+	} {
+		v := get(d.key, strconv.Itoa(d.def))
+		if n, err := strconv.Atoi(v); err != nil || n < d.min || n > d.max {
+			errs = append(errs, fmt.Errorf("%s %q: must be an integer between %d and %d", d.key, v, d.min, d.max))
+		} else {
+			*d.dst = n
+		}
+	}
+	for _, d := range []struct {
+		key      string
+		dst      *time.Duration
+		def      time.Duration
+		min, max time.Duration
+	}{
+		{constants.STREAM_LEASE_TTL, &c.StreamLeaseTTL, constants.DefaultStreamLeaseTTL, 2 * time.Second, 10 * time.Minute},
+		{constants.STREAM_GRACE, &c.StreamGrace, constants.DefaultStreamGrace, time.Second, 10 * time.Minute},
+	} {
+		v := get(d.key, d.def.String())
+		if n, err := time.ParseDuration(v); err != nil || n < d.min || n > d.max {
+			errs = append(errs, fmt.Errorf("%s %q: must be a duration between %s and %s", d.key, v, d.min, d.max))
+		} else {
+			*d.dst = n
+		}
+	}
+	// A seat is renewed on every heartbeat, so it must outlast at least one missed renewal.
+	if c.StreamHeartbeat > 0 && c.StreamLeaseTTL > 0 && c.StreamLeaseTTL < 2*c.StreamHeartbeat {
+		errs = append(errs, fmt.Errorf("%s %s: must be at least twice %s (%s)", constants.STREAM_LEASE_TTL, c.StreamLeaseTTL, constants.STREAM_HEARTBEAT, c.StreamHeartbeat))
 	}
 	if origins := get(constants.STREAM_ALLOWED_ORIGINS, ""); origins != "" {
 		for _, o := range strings.Split(origins, ",") {
