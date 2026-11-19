@@ -97,7 +97,9 @@ func main() {
 	sessions.MaxMembers = cfg.SessionMembersMax
 	streams := domain.NewStreams(db, sessions, encounters)
 	streams.TTL = cfg.StreamTicketTTL
+	ready := server.NewReadiness(5*time.Second, 2*time.Second, server.Check{Name: "database", Fn: func(ctx context.Context) error { return database.Db.Client().Ping(ctx, nil) }})
 	svc := server.Services{
+		Ready: ready,
 		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(
 			domain.Kind{Name: "themes", Key: domain.KeyThemeSlots, Repo: themes.Items()},

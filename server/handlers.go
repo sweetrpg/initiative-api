@@ -14,6 +14,8 @@ import (
 
 // Services are the dependencies the resource handlers need.
 type Services struct {
+	// Ready is the deep dependency check behind /status/health; nil reports healthy.
+	Ready        *Readiness
 	Authz        *authz.Client
 	Entitlements *entitlements.Client
 	// OwnerLimits records the owner's entitlement values for integration credentials, which carry
@@ -53,7 +55,7 @@ func ProtectedGroup(r *gin.Engine, client *authz.Client, creds *domain.Credentia
 
 // SetupHandlers registers every route group on r.
 func SetupHandlers(r *gin.Engine, s Services) {
-	setupStatusHandlers(r)
+	setupStatusHandlers(r, s.Ready)
 
 	g := ProtectedGroup(r, s.Authz, s.Credentials)
 	g.Use(limitBody(), withOrigin(), withOwnerRecord(s.OwnerLimits), withChecker(s.Entitlements), withGate(s.Relations))

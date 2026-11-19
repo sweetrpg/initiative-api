@@ -70,7 +70,7 @@ spec:
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /status/ping
+              path: /status/health
               port: http
             initialDelaySeconds: 10
             timeoutSeconds: 10
