@@ -935,7 +935,9 @@ func TestRefusalsInFlightAreBounded(t *testing.T) {
 }
 
 func TestConcurrentConnectsWithOneTicketOpenOneStreamAndHoldOneSeat(t *testing.T) {
-	st := newStreamTable(t, StreamOptions{ConcurrentMax: 5}, 0)
+	// The cap is above the number of connects, so the only refusal left is the lost ticket race
+	// (each connect takes a seat before it redeems, so a lower cap could refuse them all).
+	st := newStreamTable(t, StreamOptions{ConcurrentMax: 20}, 0)
 	tk, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
 	const n = 12
 	var wg sync.WaitGroup
@@ -945,6 +947,7 @@ func TestConcurrentConnectsWithOneTicketOpenOneStreamAndHoldOneSeat(t *testing.T
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// dial only returns the error; nothing here calls t.Fatal off the test goroutine.
 			if c, _, err := st.dial(t, "ticket="+tk, nil); err == nil {
 				won.Add(1)
 				conns <- c
