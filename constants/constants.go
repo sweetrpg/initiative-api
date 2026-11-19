@@ -19,6 +19,11 @@ const (
 	STREAM_MAX_AGE                   = "STREAM_MAX_AGE"
 	STREAM_HEARTBEAT                 = "STREAM_HEARTBEAT"
 	CREDENTIAL_EVENTS_MAX_DISCONNECT = "CREDENTIAL_EVENTS_MAX_DISCONNECT"
+	STREAM_CONCURRENT_MAX            = "STREAM_CONCURRENT_MAX"
+	STREAM_MAX_PER_POD               = "STREAM_MAX_PER_POD"
+	STREAM_CREDENTIAL_MAX            = "STREAM_CREDENTIAL_MAX"
+	STREAM_LEASE_TTL                 = "STREAM_LEASE_TTL"
+	STREAM_GRACE                     = "STREAM_GRACE"
 )
 
 // Value constants.
@@ -40,4 +45,6 @@ const (
 	DefaultStreamMaxAge    = time.Hour
 	DefaultStreamHeartbeat = 20 * time.Second
 	DefaultRequestTimeout  = 10 * time.Second
+	DefaultStreamLeaseTTL  = time.Minute
+	DefaultStreamGrace     = 30 * time.Second
 )

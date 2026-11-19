@@ -46,7 +46,9 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 0
+      # A fresh pod retries a transient DNS or Mongo failure; the pass is idempotent and
+      # activeDeadlineSeconds still bounds the Job inside the 5-minute schedule.
+      backoffLimit: 2
       activeDeadlineSeconds: 270
       template:
         spec:

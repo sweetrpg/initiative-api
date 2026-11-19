@@ -37,6 +37,8 @@ type Services struct {
 	Streams *domain.Streams
 	Hub     *stream.Hub
 	Stream  StreamOptions
+	// Leases counts a user's open streams across pods; without it the per-user cap is not applied.
+	Leases *data.StreamLeases
 }
 
 // ProtectedGroup returns a route group whose every route requires a bearer token that auth-api
