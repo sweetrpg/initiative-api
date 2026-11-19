@@ -34,6 +34,17 @@ func TestLoadErrors(t *testing.T) {
 		env  map[string]string
 		want string
 	}{
+		{"ticket ttl above the row ttl", map[string]string{"STREAM_TICKET_TTL": "5m"}, "STREAM_TICKET_TTL"},
+		{"heartbeat too slow to bound revocation", map[string]string{"STREAM_HEARTBEAT": "10m"}, "STREAM_HEARTBEAT"},
+		{"wildcard stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "*"}, "wildcard"},
+		{"double star stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "**"}, "match any host"},
+		{"star question stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "*?*"}, "match any host"},
+		{"malformed stream origin pattern", map[string]string{"STREAM_ALLOWED_ORIGINS": "app[.example.test"}, "not a valid host pattern"},
+		{"lease shorter than two heartbeats", map[string]string{"STREAM_LEASE_TTL": "30s", "STREAM_HEARTBEAT": "20s"}, "at least twice"},
+		{"concurrent cap of zero", map[string]string{"STREAM_CONCURRENT_MAX": "0"}, "STREAM_CONCURRENT_MAX"},
+		{"credential cap too high", map[string]string{"STREAM_CREDENTIAL_MAX": "500"}, "STREAM_CREDENTIAL_MAX"},
+		{"pod cap not a number", map[string]string{"STREAM_MAX_PER_POD": "many"}, "STREAM_MAX_PER_POD"},
+		{"grace too long", map[string]string{"STREAM_GRACE": "24h"}, "STREAM_GRACE"},
 		{"bad bind address", map[string]string{"BIND_ADDRESS": "8000"}, "BIND_ADDRESS"},
 		{"bad log level", map[string]string{"LOG_LEVEL": "loud"}, "LOG_LEVEL"},
 		{"relative otlp endpoint", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "tempo:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},

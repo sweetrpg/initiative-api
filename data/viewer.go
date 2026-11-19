@@ -68,15 +68,15 @@ func (r *Sessions) AuthorizeView(ctx context.Context, actor, sessionID string) (
 	if err != nil {
 		return Viewer{}, err
 	}
+	level := roleLevel(m.Role)
 	var relation string
-	var level ViewLevel
 	switch m.Role {
 	case RoleGM, RoleCoGM:
-		relation, level = relEdit, ViewGM
+		relation = relEdit
 	case RolePlayer:
-		relation, level = RolePlayer, ViewPlayer
+		relation = RolePlayer
 	case RoleObserver:
-		relation, level = RoleObserver, ViewObserver
+		relation = RoleObserver
 	default:
 		return Viewer{}, ErrNotMember
 	}
@@ -86,6 +86,14 @@ func (r *Sessions) AuthorizeView(ctx context.Context, actor, sessionID string) (
 		return Viewer{}, err
 	}
 	return Viewer{actor: d.actor, session: d.session, level: level}, nil
+}
+
+// OwnerViewer is the viewer for owner's own private encounters.
+func OwnerViewer(owner string) (Viewer, error) {
+	if err := checkUserID(owner); err != nil {
+		return Viewer{}, err
+	}
+	return ownerViewer(owner), nil
 }
 
 // LoadOwnedView reads the owner's private encounter with the viewer to render it with. An
