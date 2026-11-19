@@ -182,5 +182,8 @@ func EnsureIndexes(ctx context.Context, db store.Database) error {
 	if err := db.Collection(CollectionStreamTickets).EnsureIndexes(ctx, ticketIndexes); err != nil {
 		return fmt.Errorf("ensure indexes on %s: %w", CollectionStreamTickets, err)
 	}
+	if err := db.Collection(CollectionStreamLeases).EnsureIndexes(ctx, leaseIndexes); err != nil {
+		return fmt.Errorf("ensure indexes on %s: %w", CollectionStreamLeases, err)
+	}
 	return nil
 }

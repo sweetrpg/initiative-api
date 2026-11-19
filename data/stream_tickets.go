@@ -56,6 +56,22 @@ func (r *StreamTickets) Mint(ctx context.Context, t StreamTicket) error {
 	return r.c.InsertOne(ctx, t)
 }
 
+// Peek reads the ticket without spending it, so a connect that will be refused for a limit leaves
+// it redeemable. Redeem is still what makes it single-use.
+func (r *StreamTickets) Peek(ctx context.Context, id string, maxAge time.Duration) (StreamTicket, error) {
+	var t StreamTicket
+	if err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}}, &t); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return StreamTicket{}, ErrNotFound
+		}
+		return StreamTicket{}, err
+	}
+	if r.now().Sub(t.At) > maxAge {
+		return StreamTicket{}, ErrNotFound
+	}
+	return t, nil
+}
+
 // Redeem spends the ticket whose hash is id: it finds the row, then deletes it by _id and requires
 // that the delete removed one row. Two redeems can both find the row, but only one delete removes
 // it (the other reports ErrNotFound, which store.DeleteOne raises on a deleted count of zero), so a

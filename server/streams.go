@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -9,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -50,6 +53,17 @@ type StreamOptions struct {
 	Buffer int
 	// beforeWrite, when set by a test, runs before each event is written.
 	beforeWrite func()
+	// onServe, when set by a test, runs as serve starts, holding a pod slot.
+	onServe func()
+	// afterRenew, when set by a test, runs after each seat renewal attempt.
+	afterRenew func()
+	// ConcurrentMax is the most streams one user may hold (Services.Leases counts them, with
+	// seats lasting LeaseTTL unless renewed and kept Grace after a drop); MaxPerPod is this pod's
+	// cap, answered with close code 1013. Zero disables the cap.
+	ConcurrentMax, CredentialMax, MaxPerPod int
+	LeaseTTL, Grace                         time.Duration
+	// Pod names this pod on its seats.
+	Pod string
 }
 
 func (o StreamOptions) buffer() int {
@@ -57,6 +71,13 @@ func (o StreamOptions) buffer() int {
 		return o.Buffer
 	}
 	return streamBuffer
+}
+
+func (o StreamOptions) leaseTTL() time.Duration {
+	if o.LeaseTTL > 0 {
+		return o.LeaseTTL
+	}
+	return constants.DefaultStreamLeaseTTL
 }
 
 func (o StreamOptions) maxAge() time.Duration {
@@ -101,13 +122,20 @@ func RedactTicket() gin.HandlerFunc {
 type streamHandlers struct {
 	svc  Services
 	opts StreamOptions
+	open *atomic.Int64 // connections on this pod
+	// refusing bounds the refusals in flight (each holds a socket for the close handshake); nil is
+	// unbounded.
+	refusing chan struct{}
 }
+
+// maxRefusals is how many "pod full" closes may be in flight at once.
+const maxRefusals = 32
 
 // setupStreamHandlers registers POST /streams/tickets (user bearer only) on u, and GET /streams on
 // r: with ticket= it opens the stream for that ticket, with no ticket it needs the caller's bearer
 // (a user's, or an integration credential with the read scope) like every other route.
 func setupStreamHandlers(r *gin.Engine, u *gin.RouterGroup, s Services) {
-	h := streamHandlers{s, s.Stream}
+	h := streamHandlers{svc: s, opts: s.Stream, open: new(atomic.Int64), refusing: make(chan struct{}, maxRefusals)}
 	u.POST("/streams/tickets", h.mint)
 	g := r.Group("", h.ticketGate, typedErrors(), authenticate(s.Credentials, authz.RequireAnyRole(s.Authz, constants.ServiceName, authz.RoleUser)))
 	g.Use(withOrigin(), withGate(s.Relations))
@@ -180,15 +208,26 @@ func (h streamHandlers) ticketGate(c *gin.Context) {
 		c.JSON(http.StatusForbidden, ErrorBody{Code: "origin_not_allowed", Message: "This origin may not open a stream.", CorrelationID: CorrelationID(c)})
 		return
 	}
-	claim, err := h.svc.Streams.Redeem(c.Request.Context(), ticket)
+	ctx := c.Request.Context()
+	// Peek reads the ticket without spending it, so a junk ticket is a plain 401 (no upgrade, no
+	// socket held) and a refused connect leaves a real one redeemable.
+	claim, err := h.svc.Streams.Peek(ctx, ticket)
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
-	h.serve(c, serveArgs{
+	release, ok := h.admit()
+	if !ok {
+		h.refuseFull(c)
+		return
+	}
+	defer release()
+	a := serveArgs{
 		actor: claim.UserID, session: claim.SessionID, encounter: claim.EncounterID, clientID: claim.ClientID,
 		authorize: func(ctx context.Context) (data.Viewer, error) { return h.svc.Streams.View(ctx, claim) },
-	})
+		redeem:    func(ctx context.Context) error { _, err := h.svc.Streams.Redeem(ctx, ticket); return err },
+	}
+	h.serve(c, a)
 }
 
 // bearerStream opens the stream for a caller authenticated by bearer: authorized exactly as the
@@ -220,6 +259,15 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 			return h.svc.Credentials.Live(ctx, id.(string))
 		})
 	}
+	if id, ok := c.Get(credentialContextKey); ok {
+		a.credentialID = id.(string)
+	}
+	release, ok := h.admit()
+	if !ok {
+		h.refuseFull(c)
+		return
+	}
+	defer release()
 	h.serve(c, a)
 }
 
@@ -252,12 +300,30 @@ type serveArgs struct {
 	authorize                           func(context.Context) (data.Viewer, error)
 	// guard runs on every heartbeat, besides the membership re-check; an error ends the stream.
 	guard func(context.Context) error
+	// credentialID is set when an integration credential opened the stream; its seats count in
+	// their own bucket. seat is the seat serve takes and releases.
+	credentialID string
+	seat         seat
+	// redeem spends the ticket that opened the stream; nil for a bearer stream. It runs after the
+	// seat is taken, so a refused connect never spends it.
+	redeem func(context.Context) error
 }
 
-// serve opens a pending subscription, authorizes, grants, and upgrades. Everything that can fail
-// does so before the upgrade, as an ordinary HTTP error.
+// serve opens a pending subscription, authorizes, grants, takes a seat, spends the ticket (if any),
+// and upgrades. Everything that can fail does so before the upgrade, as an ordinary HTTP error.
+// The seat comes after authorization so a caller who may not see the scope costs the lease store
+// nothing, and the ticket after the seat so a refusal leaves it redeemable.
 func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
+	if hook := h.opts.onServe; hook != nil {
+		hook()
+	}
 	ctx := c.Request.Context()
+	released := false
+	defer func() {
+		if !released {
+			h.release(a.seat, false) // refused before the upgrade
+		}
+	}()
 	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, h.opts.buffer())
 	defer sub.Close()
 	v, err := a.authorize(ctx)
@@ -271,11 +337,24 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		writeError(c, err, nil)
 		return
 	}
+	if a.seat, err = h.takeSeat(ctx, a); err != nil {
+		writeError(c, err, nil)
+		return
+	}
+	if a.redeem != nil {
+		if err = a.redeem(ctx); err != nil { // lost a race for the ticket
+			writeError(c, err, nil)
+			return
+		}
+	}
 	heads, truncated, err := h.svc.Streams.Heads(ctx, v, a.encounter)
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
+	keep := false // only a dropped connection keeps its seat for the grace period
+	released = true
+	defer func() { h.release(a.seat, keep) }()
 	conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{OriginPatterns: h.opts.AllowedOrigins})
 	if err != nil {
 		return // Accept has answered
@@ -286,12 +365,98 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 	if err := cl.hello(ctx, heads, truncated); err != nil {
 		return
 	}
-	cl.run(ctx)
+	keep = cl.run(ctx)
 }
 
 type headFrame struct {
 	Type string `json:"type"`
 	domain.Head
+}
+
+// seat is a stream's place in the lease store; the zero seat means none is kept (no store, or no
+// cap configured).
+type seat struct {
+	lease data.StreamLease
+	held  bool
+}
+
+// takeSeat gives the stream a seat in its bucket: the user's for a user's stream, the credential's
+// own for an integration credential's, so a leaked or runaway credential cannot lock its owner out
+// of their own stream. Over the cap is data.ErrStreamLimit; a store failure is
+// data.ErrStreamUnavailable and a new connect fails closed (streams already open stay up).
+func (h streamHandlers) takeSeat(ctx context.Context, a serveArgs) (seat, error) {
+	max, bucket := h.opts.ConcurrentMax, "user:"+a.actor
+	if a.credentialID != "" {
+		max, bucket = h.opts.CredentialMax, "cred:"+a.credentialID
+	}
+	if h.svc.Leases == nil || max <= 0 {
+		return seat{}, nil
+	}
+	l := data.StreamLease{ID: randomHex(), Bucket: bucket, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
+	if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), max); err != nil {
+		if errors.Is(err, data.ErrStreamUnavailable) {
+			slog.WarnContext(ctx, "the stream seat store is unavailable; refusing a new stream", "error", err)
+		}
+		return seat{}, err
+	}
+	return seat{l, true}, nil
+}
+
+// release ends a seat. Only a connection that dropped (keep) holds it for the grace period; one the
+// server ended, or that never opened, frees it now.
+func (h streamHandlers) release(s seat, keep bool) {
+	if !s.held {
+		return
+	}
+	if err := h.svc.Leases.Release(context.Background(), s.lease, h.opts.Grace, keep); err != nil {
+		slog.Warn("releasing a stream seat failed; it lapses on its own", "seat", s.lease.ID, "error", err)
+	}
+}
+
+// admit takes one of this pod's connection slots, or reports the pod full. A compare-and-swap, so a
+// refused attempt never counts.
+func (h streamHandlers) admit() (release func(), ok bool) {
+	max := int64(h.opts.MaxPerPod)
+	if max <= 0 {
+		return func() {}, true
+	}
+	for {
+		n := h.open.Load()
+		if n >= max {
+			return nil, false
+		}
+		if h.open.CompareAndSwap(n, n+1) {
+			return func() { h.open.Add(-1) }, true
+		}
+	}
+}
+
+// refuseFull answers a holder of a real ticket (or an authenticated caller) on a full pod: it
+// accepts the upgrade and closes with 1013, since a browser cannot read the status of a refused
+// upgrade. The ticket was only peeked, so the client keeps it. Each refusal holds a socket for the
+// close handshake, so they are bounded; past the bound the answer is a plain 503.
+func (h streamHandlers) refuseFull(c *gin.Context) {
+	if h.refusing != nil {
+		select {
+		case h.refusing <- struct{}{}:
+			defer func() { <-h.refusing }()
+		default:
+			c.Header("Retry-After", "5")
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, ErrorBody{Code: "pod_full", Message: "This server is full; try again shortly.", CorrelationID: CorrelationID(c)})
+			return
+		}
+	}
+	conn, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{OriginPatterns: h.opts.AllowedOrigins})
+	if err != nil {
+		return
+	}
+	_ = conn.Close(websocket.StatusTryAgainLater, "pod full")
+}
+
+func randomHex() string {
+	b := make([]byte, 12)
+	_, _ = cryptorand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 type connection struct {
@@ -300,6 +465,8 @@ type connection struct {
 	sub  *stream.Subscription
 	v    data.Viewer
 	a    serveArgs
+
+	renewFailing bool
 }
 
 func (cl *connection) write(ctx context.Context, v any) error {
@@ -333,7 +500,7 @@ func (cl *connection) hello(ctx context.Context, heads []domain.Head, truncated 
 
 // run delivers events until the stream ends for any reason, and closes with the code that says
 // why. Client frames are read and discarded (CloseRead), so pongs reset the idle watch.
-func (cl *connection) run(ctx context.Context) {
+func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 	ctx = cl.conn.CloseRead(ctx)
 	tick := time.NewTicker(cl.h.opts.heartbeat())
 	defer tick.Stop()
@@ -359,27 +526,47 @@ func (cl *connection) run(ctx context.Context) {
 				continue
 			}
 			if cl.write(ctx, ev) != nil {
-				return
+				return true
 			}
 		case <-tick.C:
 			// Check first, so a revoked connection gets no further frame.
 			if code, why := cl.check(ctx); code != 0 {
 				_ = cl.conn.Close(code, why)
-				return
+				return false
 			}
 			if cl.write(ctx, gin.H{"type": "heartbeat"}) != nil {
-				return
+				return true
 			}
 			select {
 			case pings <- struct{}{}:
 			default:
 			}
+			cl.renew(ctx)
 		case <-maxAge.C:
 			_ = cl.conn.Close(CloseMaxAge, "maximum connection age")
-			return
+			return false
 		case <-ctx.Done():
-			return
+			return true
 		}
+	}
+}
+
+// renew keeps the stream's seat alive, bounded so a hung store cannot stall the heartbeat, the
+// membership re-check or the credential guard. A failure leaves the stream up; the seat lapses after
+// the lease TTL if renewals keep failing, and the next connect for that user then has room.
+func (cl *connection) renew(ctx context.Context) {
+	if !cl.a.seat.held {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.heartbeat()/2)
+	defer cancel()
+	err := cl.h.svc.Leases.Renew(ctx, cl.a.seat.lease, cl.h.opts.leaseTTL())
+	if err != nil && !cl.renewFailing {
+		slog.WarnContext(ctx, "renewing a stream seat failed; it lapses if renewals keep failing", "seat", cl.a.seat.lease.ID, "error", err)
+	}
+	cl.renewFailing = err != nil // log the first failure of a run, not every heartbeat
+	if hook := cl.h.opts.afterRenew; hook != nil {
+		hook()
 	}
 }
 

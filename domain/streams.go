@@ -149,13 +149,23 @@ func (s *Streams) Recheck(ctx context.Context, v data.Viewer) error {
 	return nil
 }
 
+// Peek reads what a ticket stands for without spending it; the caller checks its limits and then
+// calls Redeem, so a refused connect does not cost the client its ticket.
+func (s *Streams) Peek(ctx context.Context, ticket string) (Claim, error) {
+	return s.claim(ctx, ticket, s.tickets.Peek)
+}
+
 // Redeem spends a ticket. It is the only thing that can be done with it: a second redeem, an
 // expired ticket and an unknown one are all ErrTicketInvalid.
 func (s *Streams) Redeem(ctx context.Context, ticket string) (Claim, error) {
+	return s.claim(ctx, ticket, s.tickets.Redeem)
+}
+
+func (s *Streams) claim(ctx context.Context, ticket string, take func(context.Context, string, time.Duration) (data.StreamTicket, error)) (Claim, error) {
 	if len(ticket) == 0 || len(ticket) > 128 {
 		return Claim{}, ErrTicketInvalid
 	}
-	t, err := s.tickets.Redeem(ctx, hashTicket(ticket), s.ttl())
+	t, err := take(ctx, hashTicket(ticket), s.ttl())
 	if errors.Is(err, data.ErrNotFound) {
 		return Claim{}, ErrTicketInvalid
 	}
