@@ -108,6 +108,10 @@ type Consumer struct {
 
 	stopping    atomic.Bool
 	disconnects atomic.Int64
+	resyncing   atomic.Bool
+	dead        chan struct{}
+	deadOnce    sync.Once
+	sleep       func(time.Duration)
 
 	mu           sync.Mutex
 	downSince    time.Time // zero while connected
@@ -155,26 +159,28 @@ func (c *Consumer) DownFor() time.Duration {
 func (c *Consumer) onReconnect(ctx context.Context) {
 	c.mu.Lock()
 	c.downSince = time.Time{}
-	closed := c.closedByLoss
 	c.mu.Unlock()
 	slog.Info("reconnected to NATS", "disconnects", c.disconnects.Load())
-	if closed {
-		go c.resync(ctx)
-	}
+	go c.resync(ctx) // every reconnect: a gap shorter than MaxDisconnect can still outlast the stream's retention
 }
 
-// onClosed runs when the client gives up for good (a rejected credential, say): the consumer is
-// gone, so credentials stay closed and the cause is logged at error. The rest of the API keeps
-// serving.
-func (c *Consumer) onClosed(ctx context.Context) {
+// onClosed runs when the client gives up for good (a rejected credential, say): this consumer is
+// gone, so credentials are paused and Dead is signalled; the owner builds a new Consumer. The rest of
+// the API keeps serving.
+func (c *Consumer) onClosed() {
 	if c.stopping.Load() {
 		return
 	}
 	slog.Error("the NATS connection is closed for good; auth events can no longer be applied and integration credentials are closed", "disconnects", c.disconnects.Load())
-	c.closeGate(ctx, "the NATS connection closed")
+	c.closeGate()
+	c.deadOnce.Do(func() { close(c.dead) })
 }
 
-func (c *Consumer) closeGate(_ context.Context, _ string) {
+// Dead is closed when the connection to NATS is lost for good. The consumer cannot recover; build
+// another with New and Start it.
+func (c *Consumer) Dead() <-chan struct{} { return c.dead }
+
+func (c *Consumer) closeGate() {
 	c.gate.Pause() // in this process only: a restart then rechecks retention itself
 	c.mu.Lock()
 	c.closedByLoss = true
@@ -199,47 +205,72 @@ func (c *Consumer) watchOutage(ctx context.Context) {
 }
 
 func (c *Consumer) checkOutage(ctx context.Context) {
-	max := c.MaxDisconnect
-	if max <= 0 {
-		max = DefaultMaxDisconnect
+	limit := c.MaxDisconnect
+	if limit <= 0 {
+		limit = DefaultMaxDisconnect
 	}
 	c.mu.Lock()
 	already := c.closedByLoss
 	c.mu.Unlock()
-	if d := c.DownFor(); d > max && !already {
-		slog.Error("NATS has been unreachable too long to trust the credential list; closing integration credentials", "down_for", d.String(), "limit", max.String())
-		c.closeGate(ctx, "NATS unreachable")
+	if d := c.DownFor(); d > limit && !already {
+		slog.Error("NATS has been unreachable too long to trust the credential list; closing integration credentials", "down_for", d.String(), "limit", limit.String())
+		c.closeGate()
 	}
 }
 
-// resync runs after a reconnect that follows a gate closure by an outage: if the stream's retention
-// overtook the consumer the gate stays closed until a reconcile; otherwise it reopens once the
-// consumer has drained what was pending.
+// resync runs after every reconnect, one at a time. It asks whether the stream's retention overtook
+// this consumer while it was away: if so a deny may be lost for good, so the gate is closed for
+// everyone (persisted, the way startup does it) until a reconcile. Otherwise, if an outage had paused
+// credentials, they reopen once the consumer has drained what was pending. A failed check or close is
+// retried with a growing wait until it succeeds or the consumer stops.
 func (c *Consumer) resync(ctx context.Context) {
+	if !c.resyncing.CompareAndSwap(false, true) {
+		return // one already running; it will see the current state
+	}
+	defer c.resyncing.Store(false)
+	wait := time.Second
+	for !c.stopping.Load() && ctx.Err() == nil {
+		if c.resyncOnce(ctx) {
+			return
+		}
+		c.sleep(wait)
+		wait = min(wait*2, 30*time.Second)
+	}
+}
+
+// resyncOnce reports whether the check is finished.
+func (c *Consumer) resyncOnce(ctx context.Context) bool {
 	behind, err := c.behind(ctx)
 	if err != nil {
-		slog.Error("could not check the auth-event consumer against the stream after reconnecting; credentials stay closed", "error", err)
-		return
+		slog.Error("could not check the auth-event consumer against the stream after reconnecting; will retry", "error", err)
+		return false
 	}
 	if behind {
-		slog.Error("auth-event consumer is behind stream retention after the outage; integration credentials stay closed until reconcile")
+		slog.Error("auth-event consumer is behind stream retention; closing integration credentials until reconcile")
+		if err := c.gate.Close(ctx); err != nil {
+			slog.Error("could not persist the credential gate closure; will retry", "error", err)
+			return false
+		}
 		c.mu.Lock()
-		c.closedByLoss = false // an administrator's reconcile reopens it, not a reconnect
+		c.closedByLoss = false // a reconcile reopens it, not a reconnect
 		c.mu.Unlock()
-		return
+		return true
 	}
-	c.catchUp(ctx)
 	c.mu.Lock()
-	c.closedByLoss = false
+	reopen := c.closedByLoss
 	c.mu.Unlock()
+	if reopen {
+		c.catchUp(ctx)
+		c.mu.Lock()
+		c.closedByLoss = false
+		c.mu.Unlock()
+	}
+	return true
 }
-
-// Disconnects counts the times the connection to NATS was lost since Start.
-func (c *Consumer) Disconnects() int64 { return c.disconnects.Load() }
 
 // New builds a consumer. The gate must start closed.
 func New(rev Revoker, gate Gate) *Consumer {
-	return &Consumer{rev: rev, gate: gate, Stream: StreamName, Filter: FilterSubject, now: time.Now}
+	return &Consumer{rev: rev, gate: gate, Stream: StreamName, Filter: FilterSubject, now: time.Now, sleep: time.Sleep, dead: make(chan struct{})}
 }
 
 // Start connects, binds the durable consumer, and begins revoking. The gate opens only after the
@@ -263,7 +294,7 @@ func (c *Consumer) start(ctx context.Context, natsURL, durable string) error {
 		nats.MaxReconnects(-1), nats.RetryOnFailedConnect(true), // the outage clock, not a retry count, decides
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) { c.onDisconnect(err) }),
 		nats.ReconnectHandler(func(*nats.Conn) { c.onReconnect(ctx) }),
-		nats.ClosedHandler(func(*nats.Conn) { c.onClosed(ctx) }),
+		nats.ClosedHandler(func(*nats.Conn) { c.onClosed() }),
 	}
 	if creds := os.Getenv("NATS_CREDS"); creds != "" {
 		opts = append(opts, nats.UserCredentials(creds))

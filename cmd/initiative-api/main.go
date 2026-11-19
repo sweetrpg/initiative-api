@@ -86,21 +86,9 @@ func main() {
 		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
 	} else {
 		var live atomic.Pointer[events.Consumer]
-		go func() {
-			err := startup.Do("start the auth-event consumer", retry, func() error {
-				c := events.New(creds, creds)
-				c.MaxDisconnect = cfg.CredentialEventsMaxDisconnect
-				if err := c.Start(context.Background(), natsURL, os.Getenv("NATS_DURABLE_NAME")); err != nil {
-					return err
-				}
-				live.Store(c)
-				return nil
-			})
-			if err != nil {
-				// The gate is closed until the consumer has caught up, so credentials stay at 503.
-				logging.Logger.Error("the auth-event consumer did not start; integration credentials stay closed", "error", err.Error())
-			}
-		}()
+		consumerCtx, stopConsumer := context.WithCancel(context.Background())
+		go runConsumer(consumerCtx, creds, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
+		defer stopConsumer()
 		defer func() {
 			if c := live.Load(); c != nil {
 				c.Stop()
@@ -189,4 +177,39 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 
 	server.SetupHandlers(r, svc)
 	return r
+}
+
+// runConsumer keeps an auth-event consumer running until ctx ends: it starts one (retrying with a
+// capped backoff, an error logged each round, so a NATS that is down at boot is picked up when it
+// returns) and builds a new one if the connection is lost for good. Until a consumer has started and
+// caught up, credentials stay closed (503) and the rest of the API serves.
+func runConsumer(ctx context.Context, creds *domain.Credentials, natsURL, durable string, maxDisconnect time.Duration, retry startup.Policy, live *atomic.Pointer[events.Consumer]) {
+	wait := 5 * time.Second
+	for ctx.Err() == nil {
+		var c *events.Consumer
+		err := startup.Do("start the auth-event consumer", retry, func() error {
+			c = events.New(creds, creds)
+			c.MaxDisconnect = maxDisconnect
+			return c.Start(ctx, natsURL, durable)
+		})
+		if err != nil {
+			logging.Logger.Error("the auth-event consumer did not start; integration credentials stay closed; retrying", "error", err.Error(), "retry_in", wait.String())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			wait = min(wait*2, 2*time.Minute)
+			continue
+		}
+		wait = 5 * time.Second
+		live.Store(c)
+		select {
+		case <-c.Dead():
+			logging.Logger.Error("the auth-event consumer lost its connection for good; starting a new one")
+			c.Stop()
+		case <-ctx.Done():
+			return
+		}
+	}
 }
