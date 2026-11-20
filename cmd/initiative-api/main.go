@@ -88,8 +88,8 @@ func main() {
 		var live atomic.Pointer[events.Consumer]
 		consumerCtx, stopConsumer := context.WithCancel(context.Background())
 		go runConsumer(consumerCtx, creds, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
-		defer stopConsumer()
 		defer func() {
+			stopConsumer() // first, so runConsumer does not rebuild what Stop closes
 			if c := live.Load(); c != nil {
 				c.Stop()
 			}
@@ -183,12 +183,20 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 	return r
 }
 
+// Pacing for runConsumer: the wait between attempts, and how long a consumer must live before a
+// loss counts as new trouble rather than a flap.
+const (
+	consumerFirstWait = 5 * time.Second
+	consumerMaxWait   = 2 * time.Minute
+	consumerMinLife   = time.Minute
+)
+
 // runConsumer keeps an auth-event consumer running until ctx ends: it starts one (retrying with a
 // capped backoff, an error logged each round, so a NATS that is down at boot is picked up when it
 // returns) and builds a new one if the connection is lost for good. Until a consumer has started and
 // caught up, credentials stay closed (503) and the rest of the API serves.
 func runConsumer(ctx context.Context, creds *domain.Credentials, natsURL, durable string, maxDisconnect time.Duration, retry startup.Policy, live *atomic.Pointer[events.Consumer]) {
-	wait := 5 * time.Second
+	wait := consumerFirstWait
 	for ctx.Err() == nil {
 		var c *events.Consumer
 		err := startup.Do("start the auth-event consumer", retry, func() error {
@@ -203,17 +211,26 @@ func runConsumer(ctx context.Context, creds *domain.Credentials, natsURL, durabl
 				return
 			case <-time.After(wait):
 			}
-			wait = min(wait*2, 2*time.Minute)
+			wait = min(wait*2, consumerMaxWait)
 			continue
 		}
-		wait = 5 * time.Second
+		started := time.Now()
 		live.Store(c)
 		select {
 		case <-c.Dead():
-			logging.Logger.Error("the auth-event consumer lost its connection for good; starting a new one")
+			logging.Logger.Error("the auth-event consumer lost its connection for good; starting a new one", "retry_in", wait.String())
 			c.Stop()
 		case <-ctx.Done():
 			return
 		}
+		if time.Since(started) >= consumerMinLife {
+			wait = consumerFirstWait // it ran long enough to count as healthy
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, consumerMaxWait)
 	}
 }

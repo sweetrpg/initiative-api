@@ -247,12 +247,17 @@ func TestOnlyOneResyncRunsAtATime(t *testing.T) {
 		go func() { defer wg.Done(); c.resync(context.Background()) }()
 	}
 	waitUntil(t, func() bool { return runs.Load() >= 1 })
-	time.Sleep(20 * time.Millisecond) // the rest have had time to start and return
 	close(release)
 	wg.Wait()
 	if runs.Load() != 1 {
 		t.Errorf("%d concurrent resyncs checked retention, want 1", runs.Load())
 	}
+}
+
+func TestAReconnectBeforeStartHasBoundTheConsumerIsHarmless(t *testing.T) {
+	c := New(nil, &memGate{}) // behind and catchUp are unset, as while start waits on JetStream
+	c.onReconnect(context.Background())
+	c.resync(context.Background()) // would panic on a nil func
 }
 
 func TestAPermanentCloseOfTheConnectionPausesCredentialsAndSignalsDeadButNotAfterStop(t *testing.T) {
