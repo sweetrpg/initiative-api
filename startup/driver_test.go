@@ -21,23 +21,27 @@ func TestDriverTimeoutsAreAddedOnlyWhereTheSettingsLeaveThemOut(t *testing.T) {
 	}
 }
 
-func TestTheTimeoutsReachTheURIOrTheOptionsTheDatabasePackageReads(t *testing.T) {
-	t.Setenv("DB_URI", "mongodb+srv://u:p@cluster.example.test/appdb?retryWrites=true")
+func TestTheURIKeepsItsCredentialsByteForByteAndGainsTheTimeouts(t *testing.T) {
+	raw := "mongodb+srv://u:p%40ss@cluster.example.test/appdb?retryWrites=true"
+	t.Setenv("DB_URI", raw)
 	ApplyDriverTimeouts()
-	if got := envOf("DB_URI"); !strings.Contains(got, "serverSelectionTimeoutMS=5000") || !strings.Contains(got, "retryWrites=true") {
+	got := os.Getenv("DB_URI")
+	if !strings.HasPrefix(got, raw+"&serverSelectionTimeoutMS=5000") || !strings.Contains(got, "connectTimeoutMS=5000") {
 		t.Errorf("DB_URI = %q", got)
 	}
-	t.Setenv("DB_URI", "")
-	if err := unsetEnv("DB_URI"); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DB_OPTS", "w=majority")
-	ApplyDriverTimeouts()
-	if got := envOf("DB_OPTS"); !strings.Contains(got, "w=majority") || !strings.Contains(got, "connectTimeoutMS=5000") {
-		t.Errorf("DB_OPTS = %q", got)
+	if bare := WithDriverTimeoutsURI("mongodb://h/db"); !strings.HasPrefix(bare, "mongodb://h/db?serverSelectionTimeoutMS=5000") {
+		t.Errorf("URI without a query gave %q", bare)
 	}
 }
 
-func envOf(k string) string { return os.Getenv(k) }
-
-func unsetEnv(k string) error { return os.Unsetenv(k) }
+func TestTheOptionsAreUsedWhenThereIsNoURI(t *testing.T) {
+	t.Setenv("DB_OPTS", "w=majority")
+	if v, ok := os.LookupEnv("DB_URI"); ok {
+		t.Setenv("DB_URI", v) // restored after the test
+		os.Unsetenv("DB_URI")
+	}
+	ApplyDriverTimeouts()
+	if got := os.Getenv("DB_OPTS"); !strings.Contains(got, "w=majority") || !strings.Contains(got, "connectTimeoutMS=5000") {
+		t.Errorf("DB_OPTS = %q", got)
+	}
+}

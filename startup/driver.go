@@ -1,7 +1,6 @@
 package startup
 
 import (
-	"net/url"
 	"os"
 	"strings"
 )
@@ -37,14 +36,25 @@ func WithDriverTimeouts(rawQuery string) string {
 	return out
 }
 
+// WithDriverTimeoutsURI is WithDriverTimeouts for a whole connection string. The parameters are
+// appended to the raw text, so credentials, hosts and escaping come through byte for byte.
+func WithDriverTimeoutsURI(raw string) string {
+	base, query, hasQuery := strings.Cut(raw, "?")
+	if frag := strings.IndexByte(query, '#'); frag >= 0 { // a fragment ends the query
+		return raw
+	}
+	if q := WithDriverTimeouts(query); q != query || !hasQuery {
+		return base + "?" + q
+	}
+	return raw
+}
+
 // ApplyDriverTimeouts puts the default timeouts into the connection settings the database package
-// reads from the environment: the query of DB_URI when that is set, DB_OPTS otherwise.
+// reads from the environment: DB_URI when that is set (the package then ignores DB_OPTS), DB_OPTS
+// otherwise.
 func ApplyDriverTimeouts() {
 	if raw, ok := os.LookupEnv("DB_URI"); ok {
-		if u, err := url.Parse(raw); err == nil {
-			u.RawQuery = WithDriverTimeouts(u.RawQuery)
-			_ = os.Setenv("DB_URI", u.String())
-		}
+		_ = os.Setenv("DB_URI", WithDriverTimeoutsURI(raw))
 		return
 	}
 	_ = os.Setenv("DB_OPTS", WithDriverTimeouts(os.Getenv("DB_OPTS")))
