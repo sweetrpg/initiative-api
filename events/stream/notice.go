@@ -176,11 +176,13 @@ func (h *Hub) Flush() { h.noticePending.Wait() }
 func (h *Hub) stopNotices() {
 	h.mu.Lock()
 	h.noticeClosed = true
-	done := h.noticeDone
-	h.noticeDone = nil
+	started := h.noticeDone != nil
+	if started {
+		close(h.noticeDone) // inside the lock: anyone who sees noticeClosed can rely on done being closed
+		h.noticeDone = nil
+	}
 	h.mu.Unlock()
-	if done != nil {
-		close(done)
+	if started {
 		h.noticeWG.Wait()
 	}
 }
