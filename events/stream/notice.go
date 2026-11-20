@@ -108,22 +108,34 @@ func (h *Hub) startNotices() {
 		defer h.noticeWG.Done()
 		for {
 			select {
+			case <-done: // a closed hub wins over a waiting job, so what is still queued is the drain's
+				h.drainNotices(q)
+				return
+			default:
+			}
+			select {
 			case j := <-q:
 				h.runNotice(j)
 				h.noticePending.Done()
 			case <-done:
-				for {
-					select {
-					case j := <-q: // queued but never delivered: counted, not silent
-						h.dropNotice(j, "the hub closed before it was delivered")
-						h.noticePending.Done()
-					default:
-						return
-					}
-				}
+				h.drainNotices(q)
+				return
 			}
 		}
 	}()
+}
+
+// drainNotices discards what is still queued when the hub closes: counted and logged, not silent.
+func (h *Hub) drainNotices(q chan noticeJob) {
+	for {
+		select {
+		case j := <-q:
+			h.dropNotice(j, "the hub closed before it was delivered")
+			h.noticePending.Done()
+		default:
+			return
+		}
+	}
 }
 
 func (h *Hub) runNotice(j noticeJob) {
@@ -145,14 +157,15 @@ func (h *Hub) runNotice(j noticeJob) {
 		return
 	}
 	muted := h.mutedUsers(n) // one read per addressee, shared by every delivery of this notice
-	h.notifyLocal(n, muted)
+	isMember := h.memberChecker(n)
+	h.notifyLocal(n, muted, isMember)
 	if j.local {
 		return
 	}
 	if r := h.relay(); r != nil {
 		r.publishNotice(n)
 	}
-	h.publishNoticeToBus(n, muted)
+	h.publishNoticeToBus(n, muted, isMember)
 }
 
 // Flush waits until every notice queued so far has been delivered (tests, and shutdown).
@@ -163,11 +176,13 @@ func (h *Hub) Flush() { h.noticePending.Wait() }
 func (h *Hub) stopNotices() {
 	h.mu.Lock()
 	h.noticeClosed = true
-	done := h.noticeDone
-	h.noticeDone = nil
+	started := h.noticeDone != nil
+	if started {
+		close(h.noticeDone) // inside the lock: anyone who sees noticeClosed can rely on done being closed
+		h.noticeDone = nil
+	}
 	h.mu.Unlock()
-	if done != nil {
-		close(done)
+	if started {
 		h.noticeWG.Wait()
 	}
 }
@@ -185,19 +200,16 @@ func (h *Hub) Notify(_ context.Context, n data.Notice) {
 }
 
 // notifyLocal delivers n to this pod's streams only, skipping the addressees in muted.
-func (h *Hub) notifyLocal(n data.Notice, muted map[string]bool) {
+func (h *Hub) notifyLocal(n data.Notice, muted map[string]bool, isMember func(string) bool) {
 	ev := noticeEvent(n, newEventID())
 	subs := h.snapshot(n.EncounterID)
-	h.mu.RLock()
-	members := h.members
-	h.mu.RUnlock()
 	done := map[string]bool{}
 	for _, u := range n.Users {
 		if u == "" || done[u] || muted[u] {
 			continue
 		}
 		done[u] = true
-		member := h.memberOnce(members, u, n.SessionID)
+		member := func() bool { return isMember(u) }
 		for _, s := range subs {
 			if s.addressedTo(u, n.SessionID, member) && s.send(ev) {
 				s.overflowed.Store(true)
@@ -216,6 +228,23 @@ func (s *Subscription) addressedTo(u, session string, member func() bool) bool {
 	}
 	v := s.viewer.Load()
 	return v != nil && v.Actor() == u && v.SessionID() == session
+}
+
+// memberChecker returns a membership check for n's session that reads each addressee's membership
+// at most once, however many deliveries (streams, bus) ask. It is used by one worker job only.
+func (h *Hub) memberChecker(n data.Notice) func(string) bool {
+	h.mu.RLock()
+	members := h.members
+	h.mu.RUnlock()
+	checks := map[string]func() bool{}
+	return func(u string) bool {
+		f, ok := checks[u]
+		if !ok {
+			f = h.memberOnce(members, u, n.SessionID)
+			checks[u] = f
+		}
+		return f()
+	}
 }
 
 // memberOnce returns a check of u's membership in session, read at most once per notice and only
@@ -240,8 +269,9 @@ func (h *Hub) memberOnce(m Members, u, session string) func() bool {
 	}
 }
 
-// muteLookupTimeout bounds each addressee's preference read.
-const muteLookupTimeout = time.Second
+// muteLookupTimeout bounds each addressee's preference or membership read (a variable so a test
+// can shorten it).
+var muteLookupTimeout = time.Second
 
 // mutedUsers returns the addressees who turned n's type off for its session, with one preference
 // read per distinct addressee, each under its own timeout.
