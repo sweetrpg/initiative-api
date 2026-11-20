@@ -66,36 +66,56 @@ const (
 // enqueueNotice hands j to the notice worker, started on first use. It never blocks: the
 // preference, membership and manager reads a notice needs run on the worker under a timeout, so a
 // slow store delays notices only, never a write, a request, or the fan-out tail's evictions. A full
-// queue drops the notice (counted by Dropped, logged).
+// queue, or a hub that has been closed, drops the notice (counted by Dropped, logged). The send
+// happens under the read lock, so Close (which takes the write lock) never races a send that would
+// then have no consumer.
 func (h *Hub) enqueueNotice(j noticeJob) {
 	h.noticeOnce.Do(h.startNotices)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.noticeClosed || h.noticeQ == nil {
+		h.dropNotice(j, "the hub is closed")
+		return
+	}
 	h.noticePending.Add(1)
 	select {
 	case h.noticeQ <- j:
 	default:
 		h.noticePending.Done()
-		h.dropped.Add(1)
-		slog.Warn("the notice queue is full; dropping a notification", "type", j.n.Type, "session", j.n.SessionID)
+		h.dropNotice(j, "the notice queue is full")
 	}
 }
 
+func (h *Hub) dropNotice(j noticeJob, why string) {
+	h.dropped.Add(1)
+	slog.Warn("dropping a notification: "+why, "type", j.n.Type, "session", j.n.SessionID)
+}
+
+// startNotices starts the worker unless the hub has already been closed, which is final for
+// notices.
 func (h *Hub) startNotices() {
-	done := make(chan struct{})
 	h.mu.Lock()
-	h.noticeQ, h.noticeDone = make(chan noticeJob, noticeQueue), done
+	if h.noticeClosed {
+		h.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	q := make(chan noticeJob, noticeQueue)
+	h.noticeQ, h.noticeDone = q, done
 	h.mu.Unlock()
 	h.noticeWG.Add(1)
 	go func() {
 		defer h.noticeWG.Done()
 		for {
 			select {
-			case j := <-h.noticeQ:
+			case j := <-q:
 				h.runNotice(j)
 				h.noticePending.Done()
 			case <-done:
 				for {
 					select {
-					case <-h.noticeQ:
+					case j := <-q: // queued but never delivered: counted, not silent
+						h.dropNotice(j, "the hub closed before it was delivered")
 						h.noticePending.Done()
 					default:
 						return
@@ -124,7 +144,8 @@ func (h *Hub) runNotice(j noticeJob) {
 	if n.SessionID == "" || len(n.Users) == 0 {
 		return
 	}
-	h.notifyLocal(ctx, n)
+	muted := h.mutedUsers(n) // one read per addressee, shared by every delivery of this notice
+	h.notifyLocal(n, muted)
 	if j.local {
 		return
 	}
@@ -136,13 +157,15 @@ func (h *Hub) runNotice(j noticeJob) {
 // Flush waits until every notice queued so far has been delivered (tests, and shutdown).
 func (h *Hub) Flush() { h.noticePending.Wait() }
 
+// stopNotices ends the notice worker for good: later notices are dropped and counted, and
+// Flush returns.
 func (h *Hub) stopNotices() {
 	h.mu.Lock()
-	started := h.noticeQ != nil
+	h.noticeClosed = true
 	done := h.noticeDone
 	h.noticeDone = nil
 	h.mu.Unlock()
-	if started && done != nil {
+	if done != nil {
 		close(done)
 		h.noticeWG.Wait()
 	}
@@ -160,23 +183,20 @@ func (h *Hub) Notify(_ context.Context, n data.Notice) {
 	h.enqueueNotice(noticeJob{n: n})
 }
 
-// notifyLocal delivers n to this pod's streams only.
-func (h *Hub) notifyLocal(ctx context.Context, n data.Notice) {
+// notifyLocal delivers n to this pod's streams only, skipping the addressees in muted.
+func (h *Hub) notifyLocal(n data.Notice, muted map[string]bool) {
 	ev := noticeEvent(n, newEventID())
 	subs := h.snapshot(n.EncounterID)
 	h.mu.RLock()
-	prefs, members := h.prefs, h.members
+	members := h.members
 	h.mu.RUnlock()
 	done := map[string]bool{}
 	for _, u := range n.Users {
-		if u == "" || done[u] {
+		if u == "" || done[u] || muted[u] {
 			continue
 		}
 		done[u] = true
-		if h.muted(ctx, prefs, u, n) {
-			continue
-		}
-		member := h.memberOnce(ctx, members, u, n.SessionID)
+		member := h.memberOnce(members, u, n.SessionID)
 		for _, s := range subs {
 			if s.addressedTo(u, n.SessionID, member) && s.send(ev) {
 				s.overflowed.Store(true)
@@ -199,7 +219,7 @@ func (s *Subscription) addressedTo(u, session string, member func() bool) bool {
 
 // memberOnce returns a check of u's membership in session, read at most once per notice and only
 // if a user-level stream needs it. A failed read counts as not a member.
-func (h *Hub) memberOnce(ctx context.Context, m Members, u, session string) func() bool {
+func (h *Hub) memberOnce(m Members, u, session string) func() bool {
 	var once sync.Once
 	var ok bool
 	return func() bool {
@@ -207,6 +227,8 @@ func (h *Hub) memberOnce(ctx context.Context, m Members, u, session string) func
 			if m == nil {
 				return
 			}
+			ctx, cancel := context.WithTimeout(context.Background(), muteLookupTimeout)
+			defer cancel()
 			var err error
 			if ok, err = m.IsMember(ctx, u, session); err != nil {
 				ok = false
@@ -217,18 +239,43 @@ func (h *Hub) memberOnce(ctx context.Context, m Members, u, session string) func
 	}
 }
 
-// muted reports whether u turned the notice off. A failed lookup delivers: a notification is
-// worth more than a missed mute, and the mute only chooses what a client shows.
-func (h *Hub) muted(ctx context.Context, prefs Preferences, u string, n data.Notice) bool {
+// muteLookupTimeout bounds each addressee's preference read.
+const muteLookupTimeout = time.Second
+
+// mutedUsers returns the addressees who turned n's type off for its session, with one preference
+// read per distinct addressee, each under its own timeout.
+//
+// A failed read fails open on purpose: a notification is worth more than a missed mute, and a mute
+// only chooses what a client shows. It is never silent: the first failure is logged at WARN with
+// how many addressees were left unchecked, and the remaining reads are skipped, so a dead store
+// costs one timeout per notice, not one per addressee.
+func (h *Hub) mutedUsers(n data.Notice) map[string]bool {
+	h.mu.RLock()
+	prefs := h.prefs
+	h.mu.RUnlock()
 	if prefs == nil {
-		return false
+		return nil
 	}
-	muted, err := prefs.Muted(ctx, u, n.SessionID)
-	if err != nil {
-		slog.WarnContext(ctx, "reading notification preferences failed; delivering the event", "user", u, "type", n.Type, "error", err)
-		return false
+	muted := map[string]bool{}
+	seen := map[string]bool{}
+	for i, u := range n.Users {
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		ctx, cancel := context.WithTimeout(context.Background(), muteLookupTimeout)
+		list, err := prefs.Muted(ctx, u, n.SessionID)
+		cancel()
+		if err != nil {
+			slog.Warn("reading notification preferences failed; delivering without the mutes of the rest",
+				"type", n.Type, "session", n.SessionID, "unchecked", len(n.Users)-i, "error", err)
+			break
+		}
+		if slices.Contains(list, n.Type) {
+			muted[u] = true
+		}
 	}
-	return slices.Contains(muted, n.Type)
+	return muted
 }
 
 // noticeEvent is the wire form of n. It has no revision or view tag, which belong to the encounter

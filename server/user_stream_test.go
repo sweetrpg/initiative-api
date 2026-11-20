@@ -46,8 +46,8 @@ func TestTheUserLevelStreamHearsOnlyItsUsersNoticesAcrossSessionsAndNoState(t *t
 		t.Fatalf("hello = %v, want a user-level hello with no session", hello)
 	}
 	ctx := context.Background()
-	st.hub.Notify(ctx, notice(st.sid, "u-3", data.NoticeTurnYours))                                                          // someone else's
-	st.hub.Notify(ctx, notice("5f00000000000000000000d0", "u-2", data.NoticeTurnYours))                                      // a session u-2 is not in
+	st.hub.Notify(ctx, notice(st.sid, "u-3", data.NoticeTurnYours))                                                              // someone else's
+	st.hub.Notify(ctx, notice("5f00000000000000000000d0", "u-2", data.NoticeTurnYours))                                          // a session u-2 is not in
 	st.hub.Emit(ctx, data.Change{Type: data.EventUpdated, After: userStreamEncounter(t, st), SessionID: st.sid, At: time.Now()}) // state, not addressed
 	st.hub.Notify(ctx, notice(st.sid, "u-2", data.NoticeTurnNext))
 	got, raw := frame(t, c)
@@ -70,5 +70,27 @@ func TestAUserLevelTicketTakesNoScopeAndCredentialsCannotOpenOne(t *testing.T) {
 	_, secret := issue(t, st.r, "user-ok", `["read"]`)
 	if got := st.refused(t, "scope=user", http.Header{"Authorization": {"Bearer " + secret}}); got != http.StatusForbidden {
 		t.Errorf("a credential on the user-level stream = %d, want 403", got)
+	}
+}
+
+func TestAUserRemovedAfterOpeningTheUserLevelStreamHearsNothingFurther(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	c, _ := st.openUserLevel(t, "user-two")
+	ctx := context.Background()
+
+	st.hub.Notify(ctx, notice(st.sid, "u-2", data.NoticeTurnYours))
+	if got, raw := frame(t, c); got["type"] != data.NoticeTurnYours {
+		t.Fatalf("before the removal the member got %s, want the notice", raw)
+	}
+	if w := callAs(st.r, "user-ok", "DELETE", "/sessions/"+st.sid+"/members/u-2", ""); w.Code != http.StatusNoContent && w.Code != http.StatusOK {
+		t.Fatalf("remove = %d %s", w.Code, w.Body)
+	}
+	st.hub.Notify(ctx, notice(st.sid, "u-2", data.NoticeTurnNext))
+	st.hub.Flush()
+
+	rctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	if _, b, err := c.Read(rctx); err == nil {
+		t.Errorf("a removed member's user-level stream received %s", b)
 	}
 }
