@@ -41,6 +41,12 @@ type Hub struct {
 	prefs    Preferences
 	managers Managers
 
+	noticeOnce    sync.Once
+	noticeQ       chan noticeJob
+	noticeDone    chan struct{}
+	noticeWG      sync.WaitGroup
+	noticePending sync.WaitGroup
+
 	pendingTTL time.Duration
 
 	dropped atomic.Int64 // events not delivered: full subscriber buffer closed, or full bus queue

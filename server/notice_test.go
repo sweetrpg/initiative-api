@@ -105,6 +105,7 @@ func TestTheTurnReachingACombatantNotifiesOnlyItsControllersWithoutStateOrRevisi
 	observer := subscribe(n.hub, n.viewer(t, "user-three"), encE1, 16)
 
 	n.hub.Emit(context.Background(), turnChange(n.encounter(t), "pc"))
+	n.hub.Flush()
 
 	got := notices(drain(player))
 	if len(got) != 1 || got[0].Type != data.NoticeTurnYours || got[0].Data["combatant_id"] != "pc" {
@@ -122,6 +123,7 @@ func TestTheNextCombatantsControllerHearsTurnNext(t *testing.T) {
 	n := newNoticeTable(t)
 	player := subscribe(n.hub, n.viewer(t, "user-two"), encE1, 16)
 	n.hub.Emit(context.Background(), turnChange(n.encounter(t), "orc")) // pc is next in the queue
+	n.hub.Flush()
 	got := notices(drain(player))
 	if len(got) != 1 || got[0].Type != data.NoticeTurnNext {
 		t.Fatalf("player notices = %+v, want one turn.next", got)
@@ -137,6 +139,7 @@ func TestAMutedTypeIsNotDeliveredButStateEventsStillAre(t *testing.T) {
 	n.hub.SetPreferences(mutes{"u-2": {data.NoticeTurnNext}})
 	player := subscribe(n.hub, n.viewer(t, "user-two"), encE1, 16)
 	n.hub.Emit(context.Background(), turnChange(n.encounter(t), "orc"))
+	n.hub.Flush()
 	evs := drain(player)
 	if got := notices(evs); len(got) != 0 {
 		t.Errorf("muted turn.next delivered: %+v", got)
@@ -154,6 +157,7 @@ func TestChangeRequestNoticesGoToManagersThenTheSubmitterWithoutTheProposedValue
 	if code != http.StatusCreated {
 		t.Fatalf("submit = %d", code)
 	}
+	n.hub.Flush()
 	if got := notices(drain(gm)); len(got) != 1 || got[0].Type != data.NoticeChangeSubmitted || got[0].Data["change_request_id"] != req["id"] {
 		t.Fatalf("GM notices = %+v, want one change_request.submitted", got)
 	}
@@ -164,6 +168,7 @@ func TestChangeRequestNoticesGoToManagersThenTheSubmitterWithoutTheProposedValue
 	if w.Code != http.StatusOK {
 		t.Fatalf("approve = %d %s", w.Code, w.Body)
 	}
+	n.hub.Flush()
 	got := notices(drain(player))
 	if len(got) != 1 || got[0].Type != data.NoticeChangeApproved {
 		t.Fatalf("player notices = %+v, want one change_request.approved", got)
@@ -188,7 +193,94 @@ func TestPreferencesAreOwnedByTheCallerAndRejectUnknownTypes(t *testing.T) {
 	if w := callAs(n.r, "user-two", "PUT", path, `{"muted":["bogus"]}`); w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("unknown type = %d, want 422", w.Code)
 	}
-	if w := callAs(n.r, "user-two", "PUT", "/sessions/5f00000000000000000000d0/notification-preferences", `{"muted":[]}`); w.Code == http.StatusOK {
-		t.Errorf("a non-member stored preferences for a session it is not in")
+	if w := callAs(n.r, "user-two", "PUT", "/sessions/5f00000000000000000000d0/notification-preferences", `{"muted":[]}`); w.Code != http.StatusNotFound {
+		t.Errorf("preferences for a session the caller is not in = %d %s, want 404", w.Code, w.Body)
+	}
+}
+
+// secondSession creates a session by user-ok that user-two joins as a player, and returns its id.
+func (n noticeTable) secondSession(t *testing.T) string {
+	t.Helper()
+	w := callAs(n.r, "user-ok", "POST", "/sessions", `{"name":"Saturday"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", w.Code, w.Body)
+	}
+	sid := decodeBody(t, w)["id"].(string)
+	jw := callAs(n.r, "user-two", "POST", "/sessions/join", `{"code":"`+inviteCode(t, n.r, "user-ok", sid)+`"}`)
+	if jw.Code != http.StatusAccepted {
+		t.Fatalf("join = %d %s", jw.Code, jw.Body)
+	}
+	if aw := callAs(n.r, "user-ok", "POST", "/sessions/"+sid+"/requests/"+decodeBody(t, jw)["id"].(string)+"/approve", `{"role":"player"}`); aw.Code != http.StatusOK {
+		t.Fatalf("approve = %d %s", aw.Code, aw.Body)
+	}
+	return sid
+}
+
+func TestANoticeReachesOnlyStreamsOfItsOwnSession(t *testing.T) {
+	n := newNoticeTable(t)
+	other := n.secondSession(t)
+	ctx := data.WithGate(context.Background(), relations.New(n.relAPI), "user-two")
+	v, err := n.ses.Viewer(ctx, "u-2", other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inA := subscribe(n.hub, n.viewer(t, "user-two"), "", 8)
+	inB := subscribe(n.hub, v, "", 8)
+
+	n.hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: n.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+	n.hub.Flush()
+
+	if got := notices(drain(inA)); len(got) != 1 {
+		t.Errorf("the stream of the notice's own session got %d, want 1", len(got))
+	}
+	if got := notices(drain(inB)); len(got) != 0 {
+		t.Errorf("a stream of another session got a notice addressed in this one: %+v", got)
+	}
+}
+
+func TestAUsersTwoStreamsGetOneCopyEachAndNobodyElseGetsOne(t *testing.T) {
+	n := newNoticeTable(t)
+	a := subscribe(n.hub, n.viewer(t, "user-two"), encE1, 8)
+	b := subscribe(n.hub, n.viewer(t, "user-two"), "", 8)
+	other := subscribe(n.hub, n.viewer(t, "user-three"), encE1, 8)
+
+	n.hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: n.sid, EncounterID: encE1, Users: []string{"u-2", "u-2"}, At: time.Now()})
+	n.hub.Flush()
+
+	if x, y := len(notices(drain(a))), len(notices(drain(b))); x != 1 || y != 1 {
+		t.Errorf("copies per stream = %d and %d, want 1 and 1", x, y)
+	}
+	if got := notices(drain(other)); len(got) != 0 {
+		t.Errorf("another user got a copy: %+v", got)
+	}
+}
+
+func TestARemovedMemberHearsNothingMore(t *testing.T) {
+	n := newNoticeTable(t)
+	n.ses.SetEvictor(n.hub)
+	player := subscribe(n.hub, n.viewer(t, "user-two"), encE1, 8)
+	if w := callAs(n.r, "user-ok", "DELETE", "/sessions/"+n.sid+"/members/u-2", ""); w.Code != http.StatusNoContent && w.Code != http.StatusOK {
+		t.Fatalf("remove = %d %s", w.Code, w.Body)
+	}
+
+	n.hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: n.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+	n.hub.Flush()
+
+	if got := notices(drain(player)); len(got) != 0 {
+		t.Errorf("a removed member got %+v", got)
+	}
+	if !player.Ended() {
+		t.Error("the removed member's stream is still open")
+	}
+}
+
+func TestPreferenceRoutesRejectAnIntegrationCredential(t *testing.T) {
+	n := newNoticeTable(t)
+	_, secret := issue(t, n.r, "user-two", `["read","write"]`)
+	path := "/sessions/" + n.sid + "/notification-preferences"
+	for _, method := range []string{"GET", "PUT"} {
+		if w := callAs(n.r, secret, method, path, `{"muted":[]}`); w.Code != http.StatusForbidden {
+			t.Errorf("%s with a credential = %d, want 403", method, w.Code)
+		}
 	}
 }

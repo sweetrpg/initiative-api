@@ -30,6 +30,10 @@ type notificationPrefDoc struct {
 // write is filtered by the owning user's id (docs/coding-conventions.md, owner-scoped data
 // access); there is no function that reaches another user's preferences. Whether the user belongs
 // to the session is the caller's check.
+//
+// A document is never deleted: it is at most one short list per session a user has joined, a
+// deleted session is only soft-deleted (PADR-0027), and keeping the list means a member who is
+// removed and later rejoins keeps their mutes. The event path only reads it for current members.
 type NotificationPrefs struct {
 	c   store.Collection
 	now func() time.Time
@@ -70,6 +74,9 @@ func (r *NotificationPrefs) SetMuted(ctx context.Context, ownerUserID, sessionID
 	id, ok := cleanID(sessionID)
 	if !ok {
 		return nil, invalid("session id is not valid")
+	}
+	if len(muted) > len(NoticeTypes) {
+		return nil, invalid("at most %d notification types can be muted", len(NoticeTypes))
 	}
 	clean := make([]string, 0, len(muted))
 	for _, m := range muted {

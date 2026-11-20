@@ -21,7 +21,7 @@ type busQueue struct {
 // goroutine, fail-open: a full queue or a failed publication drops the event (counted by Dropped
 // and logged) and never affects the write or the WebSocket subscribers. Call Close to stop it.
 func (h *Hub) AttachBus(bus Bus, queue int) {
-	h.Close() // a second attach replaces the first, whose goroutine must not outlive it
+	h.closeBus() // a second attach replaces the first, whose goroutine must not outlive it
 	q := &busQueue{bus: bus, ch: make(chan Event, max(queue, 1)), done: make(chan struct{})}
 	q.wg.Add(1)
 	go func() {
@@ -45,8 +45,13 @@ func (h *Hub) AttachBus(bus Bus, queue int) {
 	h.mu.Unlock()
 }
 
-// Close stops the bus goroutine, if one was attached.
+// Close stops the bus and notice goroutines, if started.
 func (h *Hub) Close() {
+	h.closeBus()
+	h.stopNotices()
+}
+
+func (h *Hub) closeBus() {
 	h.mu.Lock()
 	q := h.bus
 	h.bus = nil
