@@ -38,3 +38,14 @@ func TestPreferencesAreKeyedByUserAndSessionAndRejectUnknownTypes(t *testing.T) 
 		t.Errorf("a rejected write changed the stored list: %v", got)
 	}
 }
+
+func TestAMuteListLongerThanTheKnownTypesIsRejectedBeforeAnyWork(t *testing.T) {
+	r := NewNotificationPrefs(fake.NewDB())
+	long := make([]string, len(NoticeTypes)+1)
+	for i := range long {
+		long[i] = NoticeTurnNext
+	}
+	if _, err := r.SetMuted(context.Background(), "u-1", sess1, long); err == nil {
+		t.Error("an over-long list was accepted")
+	}
+}

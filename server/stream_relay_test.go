@@ -390,3 +390,20 @@ func TestAnAddressedNoticeOnOnePodReachesTheAddresseeOnTheOtherOnce(t *testing.T
 		t.Errorf("a different user on the other pod received %d notices", n)
 	}
 }
+
+func TestAMuteIsHonoredOnTheRemotePod(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a", "pod-b")
+	pods[1].hub.SetPreferences(mutes{"u-2": {data.NoticeTurnYours}})
+	muted := subscribe(pods[1].hub, e.viewer(t, "user-two"), encE1, 8)
+
+	pods[0].hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: e.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+	pods[0].hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnNext, SessionID: e.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+
+	waitFor(t, "the unmuted notice on the remote pod", func() bool { return len(muted.C) > 0 })
+	pods[1].hub.Flush()
+	got := notices(drain(muted))
+	if len(got) != 1 || got[0].Type != data.NoticeTurnNext {
+		t.Errorf("the remote pod delivered %+v, want only turn.next (turn.yours is muted there)", got)
+	}
+}
