@@ -40,6 +40,7 @@ func TestLoadErrors(t *testing.T) {
 		{"double star stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "**"}, "match any host"},
 		{"star question stream origin", map[string]string{"STREAM_ALLOWED_ORIGINS": "*?*"}, "match any host"},
 		{"malformed stream origin pattern", map[string]string{"STREAM_ALLOWED_ORIGINS": "app[.example.test"}, "not a valid host pattern"},
+		{"credential outage limit too long", map[string]string{"CREDENTIAL_EVENTS_MAX_DISCONNECT": "48h"}, "CREDENTIAL_EVENTS_MAX_DISCONNECT"},
 		{"lease shorter than two heartbeats", map[string]string{"STREAM_LEASE_TTL": "30s", "STREAM_HEARTBEAT": "20s"}, "at least twice"},
 		{"concurrent cap of zero", map[string]string{"STREAM_CONCURRENT_MAX": "0"}, "STREAM_CONCURRENT_MAX"},
 		{"credential cap too high", map[string]string{"STREAM_CREDENTIAL_MAX": "500"}, "STREAM_CREDENTIAL_MAX"},
