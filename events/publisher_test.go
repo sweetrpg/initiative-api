@@ -69,6 +69,16 @@ func TestPublishReturnsTheBrokerError(t *testing.T) {
 	}
 }
 
+func TestAnAddressedEventGoesOnItsUsersSubjectKeepingTheDottedType(t *testing.T) {
+	got := Subject(stream.Event{UserID: "auth0|u1", Type: "turn.yours", EntityType: "encounter", Action: "yours"})
+	if got != "initiative.user.auth0|u1.turn.yours" {
+		t.Errorf("subject = %q", got)
+	}
+	if got := Subject(stream.Event{UserID: "u.1 *", Type: "change_request.submitted"}); got != "initiative.user.u_1__.change_request.submitted" {
+		t.Errorf("an unsafe user id changed the subject shape: %q", got)
+	}
+}
+
 func TestSubjectKeepsEachValueToOneSegment(t *testing.T) {
 	got := Subject(stream.Event{EntityType: "enc.>", Action: "up *"})
 	if got != "initiative.events.enc__.up__" {

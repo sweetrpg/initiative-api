@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/sweetrpg/initiative-api/data"
 )
 
 // busPublishTimeout bounds one publication, so a stuck broker cannot hold the queue.
@@ -59,6 +61,39 @@ func (h *Hub) closeBus() {
 	if q != nil {
 		close(q.done)
 		q.wg.Wait()
+	}
+}
+
+// publishNoticeToBus queues one event per addressee for the bus, where a push service can consume
+// it. It carries what the addressee's own stream carries and is published on the addressee's own
+// subject. Two addressees are left out: one who muted the type (the consumer has no other way to
+// see the mute) and one who is no longer a member of the session, since nothing ends a push the way
+// a stream's eviction ends a stream (so a removed requester gets no change_request.approved).
+// Fail-open like every bus publication, except the membership check, which fails closed.
+func (h *Hub) publishNoticeToBus(n data.Notice, muted map[string]bool) {
+	h.mu.RLock()
+	q, members := h.bus, h.members
+	h.mu.RUnlock()
+	if q == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, u := range n.Users {
+		if u == "" || seen[u] || muted[u] {
+			continue
+		}
+		seen[u] = true
+		if !h.memberOnce(members, u, n.SessionID)() {
+			continue
+		}
+		ev := noticeEvent(n, newEventID())
+		ev.UserID = u
+		select {
+		case q.ch <- ev:
+		default:
+			h.dropped.Add(1)
+			slog.Warn("the bus queue is full; dropping a notice", "event_id", ev.EventID, "type", ev.Type)
+		}
 	}
 }
 

@@ -152,6 +152,7 @@ func (h *Hub) runNotice(j noticeJob) {
 	if r := h.relay(); r != nil {
 		r.publishNotice(n)
 	}
+	h.publishNoticeToBus(n, muted)
 }
 
 // Flush waits until every notice queued so far has been delivered (tests, and shutdown).

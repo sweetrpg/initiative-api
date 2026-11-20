@@ -70,6 +70,9 @@ Invalid values stop the process at startup with every problem listed.
   Encounter events are also published to the `INITIATIVE_EVENTS` stream on
   `initiative.events.<entity>.<action>` (`NATS_URL`, same login), fail-open: a broker outage drops
   the event with a log line and never fails the write. `Nats-Msg-Id` is the event id.
+  Addressed notices are also published, one event per unmuted addressee, on
+  `initiative.user.<user_id>.<type>` (`turn.yours` stays two tokens: `initiative.user.u1.turn.yours`),
+  with `user_id` in the envelope, for a future push service.
   Administrator routes (admin bearer only, no credentials): `GET /admin/credentials[?owner=]` lists
   any owner's credentials (never the secret or hash); `DELETE /admin/credentials/{id}` with
   `{"reason": "..."}` removes one for good, at once; `GET /admin/credentials/deletions[?owner=]`

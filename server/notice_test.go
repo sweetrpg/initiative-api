@@ -39,6 +39,7 @@ func newNoticeTable(t *testing.T) noticeTable {
 		svc.NotificationPrefs = domain.NewNotificationPrefs(captured, svc.Sessions)
 		n.hub.SetPreferences(svc.NotificationPrefs)
 		n.hub.SetManagers(svc.Sessions)
+		n.hub.SetMembers(svc.Sessions)
 		svc.ChangeRequests.Notifier = n.hub
 	}
 	t.Cleanup(func() { routerHook = nil })
@@ -285,6 +286,29 @@ func TestPreferenceRoutesRejectAnIntegrationCredential(t *testing.T) {
 	}
 }
 
+func TestAnAddressedNoticeIsPublishedToTheBusOncePerUnmutedAddressee(t *testing.T) {
+	n := newNoticeTable(t)
+	bus := &captureBus{}
+	n.hub.AttachBus(bus, 8)
+	t.Cleanup(n.hub.Close)
+	n.hub.SetPreferences(mutes{"u-3": {data.NoticeTurnYours}})
+
+	n.hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: n.sid, EncounterID: encE1, Users: []string{"u-2", "u-3", "u-2"}, At: time.Now(), Data: map[string]any{"combatant_id": "pc"}})
+
+	n.hub.Flush()
+	eventually(t, func() bool { return bus.count() >= 1 }, "a bus event for the unmuted addressee")
+	time.Sleep(50 * time.Millisecond) // a duplicate queued behind the first would be in by now
+	if bus.count() != 1 {
+		t.Fatalf("%d bus events, want exactly one for the one unmuted addressee", bus.count())
+	}
+	bus.mu.Lock()
+	ev := bus.events[0]
+	bus.mu.Unlock()
+	if ev.UserID != "u-2" || ev.Type != data.NoticeTurnYours || ev.SessionID != n.sid || ev.Revision != 0 || ev.ViewTag != "" {
+		t.Errorf("bus event = %+v, want turn.yours addressed to u-2 with no revision or view_tag", ev)
+	}
+}
+
 // stuck blocks every read until release is closed, ignoring the context.
 type stuck struct{ release chan struct{} }
 
@@ -326,4 +350,25 @@ func TestTheRelayTailKeepsApplyingEvictionsWhileNoticeReadsAreStuck(t *testing.T
 	pods[0].hub.Evict(e.sid, "u-2")
 
 	waitFor(t, "the eviction to land behind a notice whose preference read is stuck", func() bool { return isClosed(victim) })
+}
+
+func TestARemovedMemberIsNotPushedToTheBus(t *testing.T) {
+	n := newNoticeTable(t)
+	bus := &captureBus{}
+	n.hub.AttachBus(bus, 8)
+	t.Cleanup(n.hub.Close)
+	if w := callAs(n.r, "user-ok", "DELETE", "/sessions/"+n.sid+"/members/u-2", ""); w.Code != http.StatusNoContent && w.Code != http.StatusOK {
+		t.Fatalf("remove = %d %s", w.Code, w.Body)
+	}
+
+	n.hub.Notify(context.Background(), data.Notice{Type: data.NoticeChangeApproved, SessionID: n.sid, EncounterID: encE1, Users: []string{"u-2", "u-3"}, At: time.Now()})
+	n.hub.Flush()
+
+	eventually(t, func() bool { return bus.count() >= 1 }, "the remaining member's bus event")
+	time.Sleep(50 * time.Millisecond)
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if len(bus.events) != 1 || bus.events[0].UserID != "u-3" {
+		t.Errorf("bus events = %+v, want only the current member u-3", bus.events)
+	}
 }
