@@ -345,7 +345,7 @@ func (r *Relay) handle(ctx context.Context, raw bson.Raw) {
 	case d.Kind == kindEvict:
 		r.h.evictLocal(d.Session, d.User)
 	case d.Kind == kindNotice && d.Notice != nil:
-		r.h.notifyLocal(ctx, *d.Notice)
+		r.h.enqueueNotice(noticeJob{n: *d.Notice, local: true}) // preferences are read on the worker, never on the tail
 	case d.Kind == kindChange && d.Change != nil:
 		select {
 		case r.in <- d:

@@ -35,15 +35,85 @@ func (h *Hub) SetManagers(m Managers) {
 	h.mu.Unlock()
 }
 
-// Notify implements data.Notifier. It delivers the event to each addressee's open streams of the
-// notice's session (a per-encounter stream only for that encounter), skipping an addressee who
-// muted the type for the session. A stream's viewer is fixed when it is granted and ends when
-// membership ends, so only current members of the session receive it. It never blocks the caller.
-func (h *Hub) Notify(ctx context.Context, n data.Notice) {
+// noticeJob is one notice waiting for the notice worker. resolve, when set, builds the notice (a
+// lookup that reads the store) on the worker; local means it came from another pod, so it is
+// delivered here and goes no further.
+type noticeJob struct {
+	n       data.Notice
+	resolve func(ctx context.Context) (data.Notice, bool)
+	local   bool
+}
+
+const (
+	noticeQueue   = 1024
+	noticeTimeout = 3 * time.Second // bounds every store read one notice makes
+)
+
+// enqueueNotice hands j to the notice worker, started on first use. It never blocks: the
+// preference, membership and manager reads a notice needs run on the worker under a timeout, so a
+// slow store delays notices only, never a write, a request, or the fan-out tail's evictions. A full
+// queue drops the notice (counted by Dropped, logged).
+func (h *Hub) enqueueNotice(j noticeJob) {
+	h.noticeOnce.Do(h.startNotices)
+	h.noticePending.Add(1)
+	select {
+	case h.noticeQ <- j:
+	default:
+		h.noticePending.Done()
+		h.dropped.Add(1)
+		slog.Warn("the notice queue is full; dropping a notification", "type", j.n.Type, "session", j.n.SessionID)
+	}
+}
+
+func (h *Hub) startNotices() {
+	done := make(chan struct{})
+	h.mu.Lock()
+	h.noticeQ, h.noticeDone = make(chan noticeJob, noticeQueue), done
+	h.mu.Unlock()
+	h.noticeWG.Add(1)
+	go func() {
+		defer h.noticeWG.Done()
+		for {
+			select {
+			case j := <-h.noticeQ:
+				h.runNotice(j)
+				h.noticePending.Done()
+			case <-done:
+				for {
+					select {
+					case <-h.noticeQ:
+						h.noticePending.Done()
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+}
+
+func (h *Hub) runNotice(j noticeJob) {
+	ctx, cancel := context.WithTimeout(context.Background(), noticeTimeout)
+	defer cancel()
+	defer func() {
+		if p := recover(); p != nil {
+			slog.ErrorContext(ctx, "delivering a notification panicked", "panic", p)
+		}
+	}()
+	n := j.n
+	if j.resolve != nil {
+		var ok bool
+		if n, ok = j.resolve(ctx); !ok {
+			return
+		}
+	}
 	if n.SessionID == "" || len(n.Users) == 0 {
 		return
 	}
 	h.notifyLocal(ctx, n)
+	if j.local {
+		return
+	}
 	if r := h.relay(); r != nil {
 		r.publishNotice(n)
 	}
@@ -51,6 +121,33 @@ func (h *Hub) Notify(ctx context.Context, n data.Notice) {
 	prefs := h.prefs
 	h.mu.RUnlock()
 	h.publishNoticeToBus(ctx, n, prefs)
+}
+
+// Flush waits until every notice queued so far has been delivered (tests, and shutdown).
+func (h *Hub) Flush() { h.noticePending.Wait() }
+
+func (h *Hub) stopNotices() {
+	h.mu.Lock()
+	started := h.noticeQ != nil
+	done := h.noticeDone
+	h.noticeDone = nil
+	h.mu.Unlock()
+	if started && done != nil {
+		close(done)
+		h.noticeWG.Wait()
+	}
+}
+
+// Notify implements data.Notifier. It queues the notice; the worker delivers it to each
+// addressee's open streams of the notice's session (a per-encounter stream only for that
+// encounter), skipping an addressee who muted the type, and relays it to other pods. A stream's
+// viewer is fixed when it is granted and ends when membership ends, so only current members of
+// the session receive it. It never blocks the caller.
+func (h *Hub) Notify(_ context.Context, n data.Notice) {
+	if n.SessionID == "" || len(n.Users) == 0 {
+		return
+	}
+	h.enqueueNotice(noticeJob{n: n})
 }
 
 // notifyLocal delivers n to this pod's streams only.
@@ -144,19 +241,21 @@ func combatantOf(e data.Encounter, id string) (data.Combatant, bool) {
 }
 
 // ChangeSubmitted tells the session's GM and co-GMs a player filed a change request.
-func (h *Hub) ChangeSubmitted(ctx context.Context, req data.ChangeRequest) {
+func (h *Hub) ChangeSubmitted(_ context.Context, req data.ChangeRequest) {
 	h.mu.RLock()
 	m := h.managers
 	h.mu.RUnlock()
 	if m == nil {
 		return
 	}
-	ids, err := m.ManagerIDs(ctx, req.SessionID)
-	if err != nil {
-		slog.WarnContext(ctx, "finding the session's managers failed; the change request notice was not sent", "session", req.SessionID, "error", err)
-		return
-	}
-	h.Notify(ctx, requestNotice(data.NoticeChangeSubmitted, req, ids, req.CreatedAt))
+	h.enqueueNotice(noticeJob{n: data.Notice{Type: data.NoticeChangeSubmitted, SessionID: req.SessionID}, resolve: func(ctx context.Context) (data.Notice, bool) {
+		ids, err := m.ManagerIDs(ctx, req.SessionID)
+		if err != nil {
+			slog.WarnContext(ctx, "finding the session's managers failed; the change request notice was not sent", "session", req.SessionID, "error", err)
+			return data.Notice{}, false
+		}
+		return requestNotice(data.NoticeChangeSubmitted, req, ids, req.CreatedAt), true
+	}})
 }
 
 // ChangeDecided tells the player who filed the request that it was approved or rejected.
