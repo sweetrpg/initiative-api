@@ -284,3 +284,46 @@ func TestPreferenceRoutesRejectAnIntegrationCredential(t *testing.T) {
 		}
 	}
 }
+
+// stuck blocks every read until release is closed, ignoring the context.
+type stuck struct{ release chan struct{} }
+
+func (s stuck) Muted(context.Context, string, string) ([]string, error) { <-s.release; return nil, nil }
+func (s stuck) ManagerIDs(context.Context, string) ([]string, error)    { <-s.release; return nil, nil }
+
+func returnsPromptly(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { f(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("%s blocked on the store", what)
+	}
+}
+
+func TestTheWritePathNeverWaitsOnTheStoresNoticeReads(t *testing.T) {
+	n := newNoticeTable(t)
+	s := stuck{make(chan struct{})}
+	t.Cleanup(func() { close(s.release) })
+	n.hub.SetPreferences(s)
+	n.hub.SetManagers(s)
+	returnsPromptly(t, "Emit", func() { n.hub.Emit(context.Background(), turnChange(n.encounter(t), "pc")) })
+	returnsPromptly(t, "ChangeSubmitted", func() {
+		n.hub.ChangeSubmitted(context.Background(), data.ChangeRequest{ID: "r", SessionID: n.sid, EncounterID: encE1, CreatedAt: time.Now()})
+	})
+}
+
+func TestTheRelayTailKeepsApplyingEvictionsWhileNoticeReadsAreStuck(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a", "pod-b")
+	s := stuck{make(chan struct{})}
+	t.Cleanup(func() { close(s.release) })
+	pods[1].hub.SetPreferences(s)
+	victim := subscribe(pods[1].hub, e.viewer(t, "user-two"), encE1, 8)
+
+	pods[0].hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: e.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+	pods[0].hub.Evict(e.sid, "u-2")
+
+	waitFor(t, "the eviction to land behind a notice whose preference read is stuck", func() bool { return isClosed(victim) })
+}
