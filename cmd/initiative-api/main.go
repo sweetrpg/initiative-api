@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/sweetrpg/initiative-api/events/stream"
 	"github.com/sweetrpg/initiative-api/relations"
 	"github.com/sweetrpg/initiative-api/server"
+	"github.com/sweetrpg/initiative-api/startup"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -50,19 +52,26 @@ func main() {
 	tracing.SetupTracing(constants.ServiceName)
 	defer tracing.TeardownTracing()
 
-	database.SetupDatabase() // reads the MongoDB connection settings from the environment
+	// Reads the MongoDB connection settings from the environment; waits out a brief resolver or
+	// network failure instead of crashing the pod.
+	retry := startup.DefaultPolicy()
+	if err := startup.ConnectDatabase(retry); err != nil {
+		log.Fatalf("database: %v", err)
+	}
 	defer database.TeardownDatabase()
 	db := store.MongoDatabase{DB: database.Db}
 
-	idxCtx, idxCancel := context.WithTimeout(context.Background(), time.Minute)
-	if err := data.EnsureIndexes(idxCtx, db); err != nil {
+	fanout := db.Collection(stream.FanoutCollection)
+	if err := startup.Do("create indexes", startup.IndexPolicy(retry), func() error { // a conflicting index never resolves by waiting
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := data.EnsureIndexes(ctx, db); err != nil {
+			return err
+		}
+		return fanout.EnsureIndexes(ctx, stream.FanoutIndexes)
+	}); err != nil {
 		log.Fatalf("indexes: %v", err)
 	}
-	fanout := db.Collection(stream.FanoutCollection)
-	if err := fanout.EnsureIndexes(idxCtx, stream.FanoutIndexes); err != nil {
-		log.Fatalf("fan-out indexes: %v", err)
-	}
-	idxCancel()
 
 	themes, err := domain.NewThemes(db)
 	if err != nil {
@@ -71,14 +80,20 @@ func main() {
 	creds := domain.NewCredentials(db)
 	// Credentials stay off (503) until the auth-event consumer is bound and caught up, so a deny
 	// published while the service was down is applied before any secret authenticates (PADR-0039).
+	// The consumer starts in the background, so the rest of the API does not wait on NATS; if NATS
+	// stays unreachable past CREDENTIAL_EVENTS_MAX_DISCONNECT the gate closes again.
 	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
 		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
 	} else {
-		consumer := events.New(creds, creds)
-		if err := consumer.Start(context.Background(), natsURL, os.Getenv("NATS_DURABLE_NAME")); err != nil {
-			log.Fatalf("auth events: %v", err)
-		}
-		defer consumer.Stop()
+		var live atomic.Pointer[events.Consumer]
+		consumerCtx, stopConsumer := context.WithCancel(context.Background())
+		go runConsumer(consumerCtx, creds, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
+		defer func() {
+			stopConsumer() // first, so runConsumer does not rebuild what Stop closes
+			if c := live.Load(); c != nil {
+				c.Stop()
+			}
+		}()
 	}
 	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
@@ -97,7 +112,9 @@ func main() {
 	sessions.MaxMembers = cfg.SessionMembersMax
 	streams := domain.NewStreams(db, sessions, encounters)
 	streams.TTL = cfg.StreamTicketTTL
+	ready := server.NewReadiness(5*time.Second, 2*time.Second, server.Check{Name: "database", Fn: func(ctx context.Context) error { return database.Db.Client().Ping(ctx, nil) }})
 	svc := server.Services{
+		Ready: ready,
 		Locks: encounters.Locks(),
 		Limits: domain.NewLimits(
 			domain.Kind{Name: "themes", Key: domain.KeyThemeSlots, Repo: themes.Items()},
@@ -138,8 +155,15 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
+	// http.Server.Shutdown does not wait for upgraded connections, so end the event streams first
+	// (each closes with 1001 and its client reconnects to another pod), give their close frames a
+	// moment to go out, then drain the ordinary requests.
+	hub.Shutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	drain, drainCancel := context.WithTimeout(ctx, 3*time.Second)
+	hub.Drain(drain)
+	drainCancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		logging.Logger.Error("shutdown failed", "error", err.Error())
 	}
@@ -149,7 +173,7 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 	httpLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	r := gin.New()
-	r.Use(server.Middleware(httpLogger)...)
+	r.Use(server.Middleware(httpLogger, cfg.RequestTimeout)...)
 
 	if len(cfg.AllowedOrigins) > 0 {
 		r.Use(cors.New(cors.Config{
@@ -166,4 +190,56 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 
 	server.SetupHandlers(r, svc)
 	return r
+}
+
+// Pacing for runConsumer: the wait between attempts, and how long a consumer must live before a
+// loss counts as new trouble rather than a flap.
+const (
+	consumerFirstWait = 5 * time.Second
+	consumerMaxWait   = 2 * time.Minute
+	consumerMinLife   = time.Minute
+)
+
+// runConsumer keeps an auth-event consumer running until ctx ends: it starts one (retrying with a
+// capped backoff, an error logged each round, so a NATS that is down at boot is picked up when it
+// returns) and builds a new one if the connection is lost for good. Until a consumer has started and
+// caught up, credentials stay closed (503) and the rest of the API serves.
+func runConsumer(ctx context.Context, creds *domain.Credentials, natsURL, durable string, maxDisconnect time.Duration, retry startup.Policy, live *atomic.Pointer[events.Consumer]) {
+	wait := consumerFirstWait
+	for ctx.Err() == nil {
+		var c *events.Consumer
+		err := startup.Do("start the auth-event consumer", retry, func() error {
+			c = events.New(creds, creds)
+			c.MaxDisconnect = maxDisconnect
+			return c.Start(ctx, natsURL, durable)
+		})
+		if err != nil {
+			logging.Logger.Error("the auth-event consumer did not start; integration credentials stay closed; retrying", "error", err.Error(), "retry_in", wait.String())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			wait = min(wait*2, consumerMaxWait)
+			continue
+		}
+		started := time.Now()
+		live.Store(c)
+		select {
+		case <-c.Dead():
+			logging.Logger.Error("the auth-event consumer lost its connection for good; starting a new one", "retry_in", wait.String())
+			c.Stop()
+		case <-ctx.Done():
+			return
+		}
+		if time.Since(started) >= consumerMinLife {
+			wait = consumerFirstWait // it ran long enough to count as healthy
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, consumerMaxWait)
+	}
 }

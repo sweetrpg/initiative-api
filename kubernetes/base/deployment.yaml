@@ -25,6 +25,11 @@ spec:
     spec:
       serviceAccountName: api
       enableServiceLinks: false
+      # ndots:2 stops names with 2+ dots (e.g. SRV or Atlas hosts) from walking the node search list first.
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
       imagePullSecrets:
         - name: sweetrpg-registry
       containers:
@@ -59,8 +64,18 @@ spec:
             limits:
               cpu: "500m"
               memory: "256Mi"
-          # Shallow /status/ping for both probes (PADR-0017): /status/health checks dependencies
-          # and must not gate routing or restarts.
+          # The server listens only after the database and indexes are ready, and those retry for up to
+          # about 160s (startup.Policy: 60s budget each, plus one attempt). Liveness and readiness start
+          # once this passes, so Kubernetes does not kill a pod that is still retrying.
+          startupProbe:
+            httpGet:
+              path: /status/ping
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          # Shallow /status/ping for liveness and readiness (PADR-0017): /status/health checks
+          # dependencies and must not gate routing or restarts.
           livenessProbe:
             httpGet:
               path: /status/ping

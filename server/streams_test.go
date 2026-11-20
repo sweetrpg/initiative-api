@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -760,6 +761,47 @@ func TestADemotedMembersTicketServesTheLowerLevel(t *testing.T) {
 	}
 }
 
+// stuckCollection never answers a read until its context ends, as a database that has stopped
+// responding does.
+type stuckCollection struct{ store.Collection }
+
+func (stuckCollection) FindOne(ctx context.Context, _ bson.D, _ any) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestAStoreCallPastTheRequestDeadlineIs503TimeoutButTheStreamUpgradeIsExempt(t *testing.T) {
+	r := gin.New()
+	r.Use(Middleware(slog.New(slog.NewTextHandler(io.Discard, nil)), 30*time.Millisecond)...)
+	col := stuckCollection{fake.NewDB().Collection("things")}
+	r.GET("/slow", func(c *gin.Context) {
+		if err := col.FindOne(c.Request.Context(), bson.D{}, nil); err != nil {
+			writeError(c, err, nil)
+		}
+	})
+	var streamDeadline bool
+	r.GET("/streams", func(c *gin.Context) {
+		_, streamDeadline = c.Request.Context().Deadline()
+		c.Status(http.StatusNoContent)
+	})
+	var mintDeadline bool
+	r.POST("/streams/tickets", func(c *gin.Context) { _, mintDeadline = c.Request.Context().Deadline(); c.Status(http.StatusNoContent) })
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/slow", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"timeout"`) || w.Header().Get("Retry-After") == "" {
+		t.Errorf("a store call past the deadline = %d %s retry-after %q, want 503 timeout", w.Code, w.Body, w.Header().Get("Retry-After"))
+	}
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/streams", nil))
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/streams/tickets", nil))
+	if streamDeadline {
+		t.Error("the stream upgrade has a request deadline; a long-lived connection must not")
+	}
+	if !mintDeadline {
+		t.Error("minting a ticket has no deadline")
+	}
+}
+
 // open connects a GM stream with a fresh ticket and reads its hello.
 func (st streamTable) open(t *testing.T, token, extra string) (*websocket.Conn, int) {
 	t.Helper()
@@ -1062,4 +1104,56 @@ func TestAServerEndedStreamFreesItsSeatInsteadOfKeepingGrace(t *testing.T) {
 		t.Fatalf("close code = %d", got)
 	}
 	waitFor(t, "the seat to be freed", func() bool { return len(st.db.Fake(data.CollectionStreamLeases).Docs()) == 0 })
+}
+
+func TestShutdownClosesOpenStreamsWith1001AndRefusesNewOnes(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	tk, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	late, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+
+	st.hub.Shutdown()
+	if got := closeCode(c); got != websocket.StatusGoingAway {
+		t.Errorf("close code = %d, want 1001", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st.hub.Drain(ctx)
+	if ctx.Err() != nil {
+		t.Error("the hub still holds subscriptions after every stream closed")
+	}
+	if got := st.refused(t, "ticket="+late, nil); got != http.StatusServiceUnavailable {
+		t.Errorf("a new stream during shutdown = %d, want 503", got)
+	}
+}
+
+func TestDrainWaitsForAStreamThatHasNotFinishedClosing(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	tk, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	st.hub.Shutdown()
+	// The client has not read the close frame, so the server side is still closing.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	st.hub.Drain(ctx)
+	if ctx.Err() == nil {
+		t.Fatal("Drain returned while a stream was still closing")
+	}
+	if got := closeCode(c); got != websocket.StatusGoingAway {
+		t.Fatalf("close code = %d, want 1001", got)
+	}
+	done, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	st.hub.Drain(done)
+	if done.Err() != nil {
+		t.Error("Drain did not finish after the client answered the close")
+	}
 }

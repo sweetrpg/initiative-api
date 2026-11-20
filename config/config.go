@@ -42,6 +42,9 @@ type Config struct {
 	// SessionMembersMax is the maximum of a session's member limit: an entitled members_per_session
 	// above it has no effect (initiative-entitlement-gating, "Session member limit").
 	SessionMembersMax int
+	// CredentialEventsMaxDisconnect is how long NATS may be unreachable before integration
+	// credentials fail closed (503); the rest of the API keeps serving.
+	CredentialEventsMaxDisconnect time.Duration
 	// StreamAllowedOrigins are the browser origins (host patterns) that may open an event stream; a
 	// request with no Origin header (a native client) is always allowed.
 	StreamAllowedOrigins []string
@@ -49,6 +52,8 @@ type Config struct {
 	// after that long, so a revoked credential or a missed eviction cannot outlive it;
 	// StreamHeartbeat is the interval of the server's heartbeat frames.
 	StreamTicketTTL, StreamMaxAge, StreamHeartbeat time.Duration
+	// RequestTimeout bounds every request except the event stream's upgrade.
+	RequestTimeout time.Duration
 	// StreamConcurrentMax is the most event streams one user may hold open across all pods and
 	// StreamCredentialMax the most one integration credential may (its own count, not the owner's);
 	// StreamMaxPerPod caps one pod's connections. StreamLeaseTTL is how long a stream's seat lasts
@@ -107,6 +112,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		def      time.Duration
 		min, max time.Duration
 	}{
+		{constants.REQUEST_TIMEOUT, &c.RequestTimeout, constants.DefaultRequestTimeout, time.Second, time.Minute},
 		{constants.STREAM_TICKET_TTL, &c.StreamTicketTTL, constants.DefaultStreamTicketTTL, time.Second, constants.MaxStreamTicketTTL},
 		{constants.STREAM_MAX_AGE, &c.StreamMaxAge, constants.DefaultStreamMaxAge, time.Minute, 24 * time.Hour},
 		// The heartbeat is also how often a stream re-checks membership and credentials, so it
@@ -169,6 +175,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 				c.StreamAllowedOrigins = append(c.StreamAllowedOrigins, o)
 			}
 		}
+	}
+	maxDisc := get(constants.CREDENTIAL_EVENTS_MAX_DISCONNECT, "10m")
+	if d, err := time.ParseDuration(maxDisc); err != nil || d < 30*time.Second || d > time.Hour {
+		errs = append(errs, fmt.Errorf("%s %q: must be a duration between 30s and 1h", constants.CREDENTIAL_EVENTS_MAX_DISCONNECT, maxDisc))
+	} else {
+		c.CredentialEventsMaxDisconnect = d
 	}
 	if _, _, err := net.SplitHostPort(c.BindAddress); err != nil {
 		errs = append(errs, fmt.Errorf("BIND_ADDRESS %q: %w", c.BindAddress, err))

@@ -318,18 +318,25 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		hook()
 	}
 	ctx := c.Request.Context()
+	defer h.svc.Hub.Track()() // outlives the connection's close below, so Drain sees the close frame sent
 	released := false
 	defer func() {
 		if !released {
 			h.release(a.seat, false) // refused before the upgrade
 		}
 	}()
+	if h.svc.Hub.ShuttingDown() {
+		writeError(c, stream.ErrShuttingDown, nil)
+		return
+	}
 	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, h.opts.buffer())
 	defer sub.Close()
 	v, err := a.authorize(ctx)
 	if err == nil {
 		err = sub.Grant(v)
-		if errors.Is(err, stream.ErrEvicted) || errors.Is(err, stream.ErrViewer) {
+		if errors.Is(err, stream.ErrEvicted) && sub.ServerStopping() {
+			err = stream.ErrShuttingDown // closed by Shutdown after the check above
+		} else if errors.Is(err, stream.ErrEvicted) || errors.Is(err, stream.ErrViewer) {
 			err = data.ErrNotMember
 		}
 	}
@@ -512,7 +519,9 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 		select {
 		case ev, ok := <-cl.sub.C:
 			if !ok {
-				if cl.sub.Overflowed() {
+				if cl.sub.ServerStopping() {
+					_ = cl.conn.Close(websocket.StatusGoingAway, "server restarting")
+				} else if cl.sub.Overflowed() {
 					_ = cl.conn.Close(CloseSlowConsumer, "slow consumer")
 				} else {
 					_ = cl.conn.Close(CloseMembershipChanged, "membership changed")

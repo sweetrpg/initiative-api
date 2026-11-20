@@ -28,10 +28,13 @@ make run
 | `AUTH_API_URL` | required | auth-api base URL; tokens are verified via `/authz/check` |
 | `USERS_API_URL` | required | users-api base URL; resolves the caller to `users._id` |
 | `ENTITLEMENTS_API_URL` | required | entitlements-api base URL; the caller's bearer is forwarded on checks |
+| `DB_OPTS` / `DB_URI` query | driver timeouts added | `serverSelectionTimeoutMS=5000`, `connectTimeoutMS=5000` and `socketTimeoutMS=30000` are added when the connection settings do not set them |
 | `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
 | `SESSION_MEMBERS_MAX` | `20` | maximum of a session's member limit; an entitled `members_per_session` above it has no effect; positive integer |
+| `REQUEST_TIMEOUT` | `10s` | deadline for every request except the event stream upgrade; past it a store call fails and the answer is 503 `timeout` with `Retry-After`; 1s-1m |
 | `STREAM_ALLOWED_ORIGINS` | unset | comma-separated host patterns a browser `Origin` may match to open an event stream (no `Origin` is always allowed; `*` is rejected); CORS `ALLOWED_ORIGINS` still applies first, so a cross-origin stream client must be in both lists |
 | `STREAM_TICKET_TTL`, `STREAM_MAX_AGE`, `STREAM_HEARTBEAT` | `30s`, `1h`, `20s` | stream ticket lifetime, maximum connection age, heartbeat and membership re-check interval; Go durations: ticket TTL 1s-2m, max age 1m-24h, heartbeat 1s-1m (it is also how often a stream re-checks membership and credentials) |
+| `CREDENTIAL_EVENTS_MAX_DISCONNECT` | `10m` | how long NATS may be unreachable before integration credentials answer 503 (the rest of the API keeps serving); they reopen after the consumer reconnects and catches up; 30s-1h |
 | `STREAM_CONCURRENT_MAX`, `STREAM_CREDENTIAL_MAX`, `STREAM_MAX_PER_POD` | `10`, `3`, `1000` | most event streams one user may hold across all pods (429 `too_many_streams` with `Retry-After`), most one integration credential may (its own count; it never uses up its owner's), and most one pod serves (close code 1013, ticket not spent) |
 | `STREAM_LEASE_TTL`, `STREAM_GRACE` | `60s`, `30s` | how long a stream's seat lasts without a renewal (at least twice `STREAM_HEARTBEAT`), and how long a dropped client keeps it for a reconnect; seats are compared across pods by their clocks, so keep node clocks in sync. If the seat store is down, new streams get 503 `streams_unavailable` and open streams stay up (seats lapse after the TTL) |
 | `OWNER_ENTITLEMENTS_MAX_AGE` | `168h` | how long a recorded owner entitlement serves integration credentials; positive Go duration |
@@ -43,7 +46,7 @@ Invalid values stop the process at startup with every problem listed.
 ## Endpoints
 
 - `GET /status/ping`: shallow liveness and readiness probe.
-- `GET /status/health`: dependency check (no dependencies yet).
+- `GET /status/health`: deep dependency check (database); 503 while one is down. Not used by the probes (PADR-0017).
 - `GET /themes`, `GET /themes/packaged`, `GET /themes/{id}`, `POST /themes`,
   `PATCH /themes/{id}` (body carries `revision`), `DELETE /themes/{id}?revision=N`. Custom themes
   take the lowest free slot below `initiative.theme_slots`; packaged themes (`pkg-` IDs) are

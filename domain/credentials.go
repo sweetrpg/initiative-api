@@ -80,6 +80,10 @@ func (s *Credentials) Open(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// Pause turns credentials off in this process without persisting it: Open reopens them (unless a
+// persisted close is in force) once the auth-event consumer has caught up after an outage.
+func (s *Credentials) Pause() { s.open.Store(false) }
+
 // Close turns credentials off and persists that, so a restart stays closed until Reopen.
 func (s *Credentials) Close(ctx context.Context) error {
 	s.open.Store(false)

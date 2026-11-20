@@ -109,7 +109,9 @@ func (m mongoCollection) EnsureIndexes(ctx context.Context, specs []IndexSpec) e
 
 // Watch tails the collection's inserts with a change stream (a replica set is required).
 func (m mongoCollection) Watch(ctx context.Context, resume bson.Raw) (Cursor, error) {
-	opts := options.ChangeStream()
+	// A getMore waits at most the await time, so an idle tail answers well inside the driver's
+	// socketTimeoutMS and is not mistaken for a dead connection.
+	opts := options.ChangeStream().SetMaxAwaitTime(time.Second)
 	if len(resume) > 0 {
 		opts.SetResumeAfter(resume)
 	}

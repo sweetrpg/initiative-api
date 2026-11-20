@@ -16,6 +16,7 @@ import (
 	"github.com/sweetrpg/common.go/logging"
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/reconcile"
+	"github.com/sweetrpg/initiative-api/startup"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/mongodb.go/database"
 )
@@ -29,7 +30,7 @@ func run() int {
 		return 2
 	}
 
-	if err := connectWithRetry(liveDB(), dbConnectBudget); err != nil {
+	if err := startup.ConnectDatabase(startup.DefaultPolicy()); err != nil {
 		logging.Logger.Error("cannot reach the database", "error", err.Error())
 		return 1
 	}
