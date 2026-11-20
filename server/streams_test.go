@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -757,6 +758,47 @@ func TestADemotedMembersTicketServesTheLowerLevel(t *testing.T) {
 	want := strings.Trim(callAs(st.r, "user-three", "GET", "/sessions/"+st.sid+"/encounters/"+encE1, "").Header().Get("ETag"), `"`)
 	if head["view_tag"] != want || want == "" {
 		t.Errorf("head view_tag = %v, want the observer's %q", head["view_tag"], want)
+	}
+}
+
+// stuckCollection never answers a read until its context ends, as a database that has stopped
+// responding does.
+type stuckCollection struct{ store.Collection }
+
+func (stuckCollection) FindOne(ctx context.Context, _ bson.D, _ any) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestAStoreCallPastTheRequestDeadlineIs503TimeoutButTheStreamUpgradeIsExempt(t *testing.T) {
+	r := gin.New()
+	r.Use(Middleware(slog.New(slog.NewTextHandler(io.Discard, nil)), 30*time.Millisecond)...)
+	col := stuckCollection{fake.NewDB().Collection("things")}
+	r.GET("/slow", func(c *gin.Context) {
+		if err := col.FindOne(c.Request.Context(), bson.D{}, nil); err != nil {
+			writeError(c, err, nil)
+		}
+	})
+	var streamDeadline bool
+	r.GET("/streams", func(c *gin.Context) {
+		_, streamDeadline = c.Request.Context().Deadline()
+		c.Status(http.StatusNoContent)
+	})
+	var mintDeadline bool
+	r.POST("/streams/tickets", func(c *gin.Context) { _, mintDeadline = c.Request.Context().Deadline(); c.Status(http.StatusNoContent) })
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/slow", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"timeout"`) || w.Header().Get("Retry-After") == "" {
+		t.Errorf("a store call past the deadline = %d %s retry-after %q, want 503 timeout", w.Code, w.Body, w.Header().Get("Retry-After"))
+	}
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/streams", nil))
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/streams/tickets", nil))
+	if streamDeadline {
+		t.Error("the stream upgrade has a request deadline; a long-lived connection must not")
+	}
+	if !mintDeadline {
+		t.Error("minting a ticket has no deadline")
 	}
 }
 

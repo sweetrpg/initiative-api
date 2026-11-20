@@ -52,6 +52,8 @@ type Config struct {
 	// after that long, so a revoked credential or a missed eviction cannot outlive it;
 	// StreamHeartbeat is the interval of the server's heartbeat frames.
 	StreamTicketTTL, StreamMaxAge, StreamHeartbeat time.Duration
+	// RequestTimeout bounds every request except the event stream's upgrade.
+	RequestTimeout time.Duration
 	// StreamConcurrentMax is the most event streams one user may hold open across all pods and
 	// StreamCredentialMax the most one integration credential may (its own count, not the owner's);
 	// StreamMaxPerPod caps one pod's connections. StreamLeaseTTL is how long a stream's seat lasts
@@ -110,6 +112,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		def      time.Duration
 		min, max time.Duration
 	}{
+		{constants.REQUEST_TIMEOUT, &c.RequestTimeout, constants.DefaultRequestTimeout, time.Second, time.Minute},
 		{constants.STREAM_TICKET_TTL, &c.StreamTicketTTL, constants.DefaultStreamTicketTTL, time.Second, constants.MaxStreamTicketTTL},
 		{constants.STREAM_MAX_AGE, &c.StreamMaxAge, constants.DefaultStreamMaxAge, time.Minute, 24 * time.Hour},
 		// The heartbeat is also how often a stream re-checks membership and credentials, so it

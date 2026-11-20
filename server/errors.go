@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -35,7 +36,7 @@ func writeError(c *gin.Context, err error, current any) {
 	if status >= http.StatusInternalServerError && status != http.StatusServiceUnavailable {
 		slog.ErrorContext(c.Request.Context(), "request failed", "error", err, "correlation_id", body.CorrelationID)
 	}
-	if body.Code == "membership_sync_pending" || body.Code == "rate_limited" || body.Code == "too_many_streams" || body.Code == "streams_unavailable" {
+	if body.Code == "membership_sync_pending" || body.Code == "rate_limited" || body.Code == "timeout" || body.Code == "too_many_streams" || body.Code == "streams_unavailable" {
 		c.Header("Retry-After", "5")
 	}
 	c.AbortWithStatusJSON(status, body)
@@ -87,6 +88,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "entitlements_unavailable", Message: "Entitlements are temporarily unavailable. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, entitlements.ErrUnauthorized):
 		return ErrorBody{Code: "unauthorized", Message: "Your session is not valid."}, http.StatusUnauthorized
+	case errors.Is(err, context.DeadlineExceeded):
+		return ErrorBody{Code: "timeout", Message: "The request took too long. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, data.ErrStreamUnavailable):
 		return ErrorBody{Code: "streams_unavailable", Message: "Event streams cannot be opened right now. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, data.ErrStreamLimit):
