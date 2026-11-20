@@ -69,6 +69,8 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 30
+          # Shallow /status/ping for liveness and readiness (PADR-0017): /status/health checks
+          # dependencies and must not gate routing or restarts.
           livenessProbe:
             httpGet:
               path: /status/ping

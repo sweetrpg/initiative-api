@@ -111,6 +111,7 @@ type Consumer struct {
 	resyncing   atomic.Bool
 	dead        chan struct{}
 	deadOnce    sync.Once
+	stopOnce    sync.Once
 	sleep       func(time.Duration)
 
 	mu           sync.Mutex
@@ -238,29 +239,57 @@ func (c *Consumer) resync(ctx context.Context) {
 	}
 }
 
+// ready returns the stream-bound checks, nil until start has bound the consumer. A reconnect can
+// fire while start is still waiting on JetStream (RetryOnFailedConnect); start's own checks cover
+// that window.
+func (c *Consumer) ready() (behind func(context.Context) (bool, error), catchUp func(context.Context)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.behind, c.catchUp
+}
+
+// closeIfBehind persists the gate closure when retention overtook the consumer. done is true once
+// the question is settled (the gate was closed, or the check does not apply yet); a false done with
+// behind false means the consumer is within retention.
+func (c *Consumer) closeIfBehind(ctx context.Context) (behind, done bool) {
+	check, _ := c.ready()
+	if check == nil {
+		return false, true
+	}
+	behind, err := check(ctx)
+	if err != nil {
+		slog.Error("could not check the auth-event consumer against the stream; will retry", "error", err)
+		return false, false
+	}
+	if !behind {
+		return false, true
+	}
+	slog.Error("auth-event consumer is behind stream retention; closing integration credentials until reconcile")
+	if err := c.gate.Close(ctx); err != nil {
+		slog.Error("could not persist the credential gate closure; will retry", "error", err)
+		return true, false
+	}
+	c.mu.Lock()
+	c.closedByLoss = false // a reconcile reopens it, not a reconnect
+	c.mu.Unlock()
+	return true, true
+}
+
 // resyncOnce reports whether the check is finished.
 func (c *Consumer) resyncOnce(ctx context.Context) bool {
-	behind, err := c.behind(ctx)
-	if err != nil {
-		slog.Error("could not check the auth-event consumer against the stream after reconnecting; will retry", "error", err)
-		return false
+	behind, done := c.closeIfBehind(ctx)
+	if !done || behind {
+		return done
 	}
-	if behind {
-		slog.Error("auth-event consumer is behind stream retention; closing integration credentials until reconcile")
-		if err := c.gate.Close(ctx); err != nil {
-			slog.Error("could not persist the credential gate closure; will retry", "error", err)
-			return false
-		}
-		c.mu.Lock()
-		c.closedByLoss = false // a reconcile reopens it, not a reconnect
-		c.mu.Unlock()
+	_, catchUp := c.ready()
+	if catchUp == nil {
 		return true
 	}
 	c.mu.Lock()
 	reopen := c.closedByLoss
 	c.mu.Unlock()
 	if reopen {
-		c.catchUp(ctx)
+		catchUp(ctx)
 		c.mu.Lock()
 		c.closedByLoss = false
 		c.mu.Unlock()
@@ -349,7 +378,7 @@ func (c *Consumer) start(ctx context.Context, natsURL, durable string) error {
 		return fmt.Errorf("start consuming: %w", err)
 	}
 	c.cc = cc
-	c.behind = func(ctx context.Context) (bool, error) {
+	behind := func(ctx context.Context) (bool, error) {
 		si, err := stream.Info(ctx)
 		if err != nil {
 			return false, err
@@ -360,8 +389,11 @@ func (c *Consumer) start(ctx context.Context, natsURL, durable string) error {
 		}
 		return behindRetention(true, ci.AckFloor.Stream, si.State.FirstSeq), nil
 	}
-	c.catchUp = func(ctx context.Context) { c.openWhenCaughtUp(ctx, cons) }
-	go c.openWhenCaughtUp(ctx, cons)
+	catchUp := func(ctx context.Context) { c.openWhenCaughtUp(ctx, cons) }
+	c.mu.Lock()
+	c.behind, c.catchUp = behind, catchUp
+	c.mu.Unlock()
+	go catchUp(ctx)
 	go c.watchOutage(ctx)
 	return nil
 }
@@ -375,7 +407,9 @@ func (c *Consumer) process(ctx context.Context, msg jetstream.Msg) {
 	_ = msg.Ack()
 }
 
-// openWhenCaughtUp polls until nothing is pending or awaiting ack, then opens the gate.
+// openWhenCaughtUp polls until nothing is pending or awaiting ack, then opens the gate. Each round
+// rechecks retention first, so a poll that outlives an outage cannot open a gate the stream's
+// retention has since closed; it ends when the consumer stops.
 func (c *Consumer) openWhenCaughtUp(ctx context.Context, cons jetstream.Consumer) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -384,6 +418,12 @@ func (c *Consumer) openWhenCaughtUp(ctx context.Context, cons jetstream.Consumer
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+		if c.stopping.Load() {
+			return
+		}
+		if behind, done := c.closeIfBehind(ctx); behind && done {
+			return
 		}
 		info, err := cons.Info(ctx)
 		if err != nil || info.NumPending > 0 || info.NumAckPending > 0 {
@@ -399,13 +439,16 @@ func (c *Consumer) openWhenCaughtUp(ctx context.Context, cons jetstream.Consumer
 	}
 }
 
-// Stop halts consumption and closes the connection.
+// Stop halts consumption and closes the connection. It is safe to call more than once and from
+// several goroutines (the shutdown path and the Dead path can both reach it).
 func (c *Consumer) Stop() {
 	c.stopping.Store(true)
-	if c.cc != nil {
-		c.cc.Stop()
-	}
-	if c.conn != nil {
-		c.conn.Close()
-	}
+	c.stopOnce.Do(func() {
+		if c.cc != nil {
+			c.cc.Stop()
+		}
+		if c.conn != nil {
+			c.conn.Close()
+		}
+	})
 }
