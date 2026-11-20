@@ -40,7 +40,9 @@ type Hub struct {
 	rel      *Relay
 	prefs    Preferences
 	managers Managers
+	members  Members
 
+	noticeClosed  bool // set under mu by Close; final
 	noticeOnce    sync.Once
 	noticeQ       chan noticeJob
 	noticeDone    chan struct{}
@@ -89,6 +91,7 @@ type Subscription struct {
 	session     string // fixed by Open; the audience Evict matches, before and after Grant
 	actor       string
 	encounterID string
+	userLevel   bool                        // receives only addressed events, across sessions; never has a viewer
 	viewer      atomic.Pointer[data.Viewer] // nil until Grant
 	overflowed  atomic.Bool
 	shutdown    atomic.Bool // closed because the server is stopping
@@ -127,6 +130,21 @@ func (h *Hub) Open(sessionID, actor, encounterID string, buf int) *Subscription 
 		s.mu.Unlock()
 	}
 	if h.stopping.Load() { // registered after Shutdown took its snapshot
+		s.shutdown.Store(true)
+		s.Close()
+	}
+	return s
+}
+
+// OpenUser registers a user-level subscription: the addressed events of every session actor
+// belongs to, and no encounter state. It needs no Grant (there is no scope to authorize; each
+// delivery checks the session membership). The transport must Close it.
+func (h *Hub) OpenUser(actor string, buf int) *Subscription {
+	s := &Subscription{C: make(chan Event, max(buf, 1)), h: h, actor: actor, userLevel: true}
+	h.mu.Lock()
+	h.sub[s] = struct{}{}
+	h.mu.Unlock()
+	if h.stopping.Load() {
 		s.shutdown.Store(true)
 		s.Close()
 	}
