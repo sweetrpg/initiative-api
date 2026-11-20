@@ -260,6 +260,20 @@ func TestAReconnectBeforeStartHasBoundTheConsumerIsHarmless(t *testing.T) {
 	c.resync(context.Background()) // would panic on a nil func
 }
 
+func TestStopIsIdempotentAndSafeConcurrently(t *testing.T) {
+	c := New(nil, &memGate{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.Stop() }()
+	}
+	wg.Wait()
+	c.Stop()
+	if !c.stopping.Load() {
+		t.Error("Stop did not latch")
+	}
+}
+
 func TestAPermanentCloseOfTheConnectionPausesCredentialsAndSignalsDeadButNotAfterStop(t *testing.T) {
 	g := &memGate{}
 	now := time.Unix(1000, 0)

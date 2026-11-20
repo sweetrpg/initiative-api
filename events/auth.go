@@ -111,6 +111,7 @@ type Consumer struct {
 	resyncing   atomic.Bool
 	dead        chan struct{}
 	deadOnce    sync.Once
+	stopOnce    sync.Once
 	sleep       func(time.Duration)
 
 	mu           sync.Mutex
@@ -438,13 +439,16 @@ func (c *Consumer) openWhenCaughtUp(ctx context.Context, cons jetstream.Consumer
 	}
 }
 
-// Stop halts consumption and closes the connection.
+// Stop halts consumption and closes the connection. It is safe to call more than once and from
+// several goroutines (the shutdown path and the Dead path can both reach it).
 func (c *Consumer) Stop() {
 	c.stopping.Store(true)
-	if c.cc != nil {
-		c.cc.Stop()
-	}
-	if c.conn != nil {
-		c.conn.Close()
-	}
+	c.stopOnce.Do(func() {
+		if c.cc != nil {
+			c.cc.Stop()
+		}
+		if c.conn != nil {
+			c.conn.Close()
+		}
+	})
 }
