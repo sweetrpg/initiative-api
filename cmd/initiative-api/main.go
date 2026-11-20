@@ -128,6 +128,7 @@ func main() {
 	changeRequests.Notifier = hub
 	hub.SetPreferences(prefs)
 	hub.SetManagers(sessions)
+	hub.SetMembers(sessions)
 	streams.TTL = cfg.StreamTicketTTL
 	ready := server.NewReadiness(5*time.Second, 2*time.Second, server.Check{Name: "database", Fn: func(ctx context.Context) error { return database.Db.Client().Ping(ctx, nil) }})
 	svc := server.Services{
