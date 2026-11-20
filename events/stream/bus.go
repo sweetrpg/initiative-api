@@ -70,9 +70,9 @@ func (h *Hub) closeBus() {
 // see the mute) and one who is no longer a member of the session, since nothing ends a push the way
 // a stream's eviction ends a stream (so a removed requester gets no change_request.approved).
 // Fail-open like every bus publication, except the membership check, which fails closed.
-func (h *Hub) publishNoticeToBus(n data.Notice, muted map[string]bool) {
+func (h *Hub) publishNoticeToBus(n data.Notice, muted map[string]bool, isMember func(string) bool) {
 	h.mu.RLock()
-	q, members := h.bus, h.members
+	q := h.bus
 	h.mu.RUnlock()
 	if q == nil {
 		return
@@ -83,7 +83,7 @@ func (h *Hub) publishNoticeToBus(n data.Notice, muted map[string]bool) {
 			continue
 		}
 		seen[u] = true
-		if !h.memberOnce(members, u, n.SessionID)() {
+		if !isMember(u) {
 			continue
 		}
 		ev := noticeEvent(n, newEventID())

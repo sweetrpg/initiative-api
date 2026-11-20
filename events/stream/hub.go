@@ -278,7 +278,7 @@ func (h *Hub) evictAudience(c data.Change) {
 	h.mu.RLock()
 	var gone []*Subscription
 	for s := range h.sub {
-		if (c.SessionID != "" && s.session == c.SessionID) || (c.SessionID == "" && s.session == "" && s.actor == c.OwnerID) {
+		if (c.SessionID != "" && s.session == c.SessionID) || (c.SessionID == "" && s.session == "" && !s.userLevel && s.actor == c.OwnerID) {
 			gone = append(gone, s)
 		}
 	}
