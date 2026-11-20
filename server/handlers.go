@@ -38,7 +38,9 @@ type Services struct {
 	// holds its transport settings.
 	Streams *domain.Streams
 	Hub     *stream.Hub
-	Stream  StreamOptions
+	// NotificationPrefs holds each member's muted notice types per session.
+	NotificationPrefs *domain.NotificationPrefs
+	Stream            StreamOptions
 	// Leases counts a user's open streams across pods; without it the per-user cap is not applied.
 	Leases *data.StreamLeases
 }
@@ -71,6 +73,9 @@ func SetupHandlers(r *gin.Engine, s Services) {
 	setupActiveItemHandlers(u, s)
 	if s.Sessions != nil {
 		setupSessionHandlers(u, s.Sessions)
+	}
+	if s.NotificationPrefs != nil {
+		setupNotificationPrefHandlers(u, s.NotificationPrefs)
 	}
 	if s.Encounters != nil && s.Sessions != nil {
 		setupEncounterViewHandlers(u, s.Encounters, s.Sessions)

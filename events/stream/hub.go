@@ -38,6 +38,8 @@ type Hub struct {
 	stopping atomic.Bool
 	live     atomic.Int64 // stream handlers still running, upgraded or not
 	rel      *Relay
+	prefs    Preferences
+	managers Managers
 
 	pendingTTL time.Duration
 
@@ -285,6 +287,9 @@ func (h *Hub) Emit(ctx context.Context, c data.Change) {
 	em := newEmission(ctx, h.r, c)
 	h.deliverLocal(ctx, em)
 	h.publishToBus(ctx, em)
+	for _, n := range turnNotices(c) {
+		h.Notify(ctx, n)
+	}
 	if r := h.relay(); r != nil {
 		r.publishChange(c, em.id)
 	}

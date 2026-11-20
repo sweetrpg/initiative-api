@@ -768,3 +768,9 @@ func (s *Sessions) scrubControllers(ctx context.Context, d data.Decision, user s
 		slog.WarnContext(ctx, "cancelling a member's pending change requests failed", "session", d.SessionID(), "user", user, "error", err)
 	}
 }
+
+// ManagerIDs lists the GM and co-GM user ids of a session, for addressing change-request notices
+// (stream.Managers).
+func (s *Sessions) ManagerIDs(ctx context.Context, sessionID string) ([]string, error) {
+	return s.repo.ManagerIDs(ctx, sessionID)
+}

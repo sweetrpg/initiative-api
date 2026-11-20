@@ -169,7 +169,7 @@ var (
 // AllSpecs lists every collection the service owns.
 func AllSpecs() []Spec {
 	return []Spec{RosterSpec, EncounterSpec, ThemeSpec, CredentialSpec, SystemSpec,
-		SessionSpec, SessionMemberSpec, SessionInviteSpec, SessionRequestSpec, SessionBlockSpec, ChangeRequestSpec}
+		SessionSpec, SessionMemberSpec, SessionInviteSpec, SessionRequestSpec, SessionBlockSpec, ChangeRequestSpec, NotificationPrefSpec}
 }
 
 // EnsureIndexes creates every collection's indexes. Safe to run at each startup.
