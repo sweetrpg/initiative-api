@@ -36,6 +36,7 @@ type Hub struct {
 	sub      map[*Subscription]struct{}
 	bus      *busQueue
 	stopping atomic.Bool
+	live     atomic.Int64 // stream handlers still running, upgraded or not
 	rel      *Relay
 
 	pendingTTL time.Duration
@@ -390,18 +391,21 @@ func (h *Hub) Shutdown() {
 // ShuttingDown reports whether Shutdown has been called.
 func (h *Hub) ShuttingDown() bool { return h.stopping.Load() }
 
-// Drain waits until every subscription has been closed and unregistered (its connection's handler
-// has ended and sent its close frame), or ctx ends.
+// Track marks one stream handler as running until the returned func is called. The HTTP server
+// does not wait for hijacked (upgraded) connections, so Drain waits on these instead. Call it
+// before any work that can fail and defer the result before the connection's own close.
+func (h *Hub) Track() (done func()) {
+	h.live.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { h.live.Add(-1) }) }
+}
+
+// Drain waits until every tracked stream handler has returned (each has sent its close frame and
+// closed its connection), or ctx ends.
 func (h *Hub) Drain(ctx context.Context) {
 	t := time.NewTicker(20 * time.Millisecond)
 	defer t.Stop()
-	for {
-		h.mu.RLock()
-		n := len(h.sub)
-		h.mu.RUnlock()
-		if n == 0 {
-			return
-		}
+	for h.live.Load() > 0 {
 		select {
 		case <-ctx.Done():
 			return

@@ -318,6 +318,7 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		hook()
 	}
 	ctx := c.Request.Context()
+	defer h.svc.Hub.Track()() // outlives the connection's close below, so Drain sees the close frame sent
 	released := false
 	defer func() {
 		if !released {
