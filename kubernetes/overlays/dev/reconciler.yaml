@@ -59,12 +59,24 @@ spec:
               - name: ndots
                 value: "2"
           restartPolicy: Never
+          # PodSecurity "restricted". The image's USER is the name "sweetrpg" (uid 1000), which
+          # runAsNonRoot cannot verify, so the uid is pinned.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
           imagePullSecrets:
             - name: sweetrpg-registry
           containers:
             - name: reconciler
               image: initiative-api
               command: ["/app/bin/reconciler"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
               envFrom:
                 - configMapRef:
                     name: api-common

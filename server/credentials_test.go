@@ -328,3 +328,32 @@ func TestAdminReopenNeedsAdminBearerNotCredential(t *testing.T) {
 		t.Fatalf("after admin reopen = %d, want 200", w.Code)
 	}
 }
+
+func TestARevokedCredentialCutsOffItsInFlightRequest(t *testing.T) {
+	old := credentialRecheck
+	credentialRecheck = 20 * time.Millisecond
+	t.Cleanup(func() { credentialRecheck = old })
+	r, creds := credRouterWith(t, "3")
+	id, secret := issue(t, r, "user-ok", `["read"]`)
+	entered := make(chan struct{})
+	r.Group("", typedErrors(), authenticate(creds, func(c *gin.Context) { c.AbortWithStatus(http.StatusForbidden) })).
+		GET("/hang", func(c *gin.Context) {
+			close(entered)
+			<-c.Request.Context().Done() // a slow store call that honors its context
+			writeError(c, c.Request.Context().Err(), nil)
+		})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- callAs(r, secret, "GET", "/hang", "") }()
+	<-entered
+	if w := callAs(r, "user-ok", "POST", "/credentials/"+id+"/revoke", ""); w.Code != http.StatusOK {
+		t.Fatalf("revoke = %d %s", w.Code, w.Body)
+	}
+	select {
+	case w := <-done:
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "revoked") {
+			t.Errorf("in-flight request = %d %s, want 401 revoked", w.Code, w.Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight request outlived its revoked credential")
+	}
+}

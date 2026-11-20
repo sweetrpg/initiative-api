@@ -29,6 +29,9 @@ type ErrorBody struct {
 // writeError maps err to a status and typed body. current is returned with revision conflicts.
 // Unrecognized errors are logged and reported as an opaque 500.
 func writeError(c *gin.Context, err error, current any) {
+	if errors.Is(context.Cause(c.Request.Context()), errCredentialRevoked) {
+		err = errCredentialRevoked // the request was cut short by the credential's end, whatever the store reported
+	}
 	body, status := classifyError(err)
 	body.CorrelationID = CorrelationID(c)
 	if status == http.StatusConflict && body.Code == "revision_conflict" {
@@ -87,6 +90,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "unauthorized", Message: "Your session is not valid."}, http.StatusUnauthorized
 	case errors.Is(err, entitlements.ErrUnavailable):
 		return ErrorBody{Code: "entitlements_unavailable", Message: "Entitlements are temporarily unavailable. Try again shortly."}, http.StatusServiceUnavailable
+	case errors.Is(err, errCredentialRevoked):
+		return ErrorBody{Code: "unauthorized", Message: "This credential has been revoked."}, http.StatusUnauthorized
 	case errors.Is(err, entitlements.ErrUnauthorized):
 		return ErrorBody{Code: "unauthorized", Message: "Your session is not valid."}, http.StatusUnauthorized
 	case errors.Is(err, context.DeadlineExceeded):

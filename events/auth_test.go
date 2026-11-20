@@ -241,16 +241,19 @@ func TestOnlyOneResyncRunsAtATime(t *testing.T) {
 	release := make(chan struct{})
 	var runs atomic.Int32
 	c.behind = func(context.Context) (bool, error) { runs.Add(1); <-release; return false, nil }
-	var wg sync.WaitGroup
-	for range 5 {
-		wg.Add(1)
-		go func() { defer wg.Done(); c.resync(context.Background()) }()
+	first := make(chan struct{})
+	go func() { defer close(first); c.resync(context.Background()) }()
+	waitUntil(t, func() bool { return runs.Load() == 1 }) // the first one now holds the slot
+	var others sync.WaitGroup
+	for range 4 {
+		others.Add(1)
+		go func() { defer others.Done(); c.resync(context.Background()) }()
 	}
-	waitUntil(t, func() bool { return runs.Load() >= 1 })
+	others.Wait() // each returned at the slot check while the first was still inside behind
 	close(release)
-	wg.Wait()
+	<-first
 	if runs.Load() != 1 {
-		t.Errorf("%d concurrent resyncs checked retention, want 1", runs.Load())
+		t.Errorf("%d resyncs checked retention, want 1", runs.Load())
 	}
 }
 

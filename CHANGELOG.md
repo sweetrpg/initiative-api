@@ -1,4 +1,15 @@
 
+## 0.12.0 - 2026-11-20
+
+### Added
+- Publish encounter events to INITIATIVE_EVENTS on NATS
+- Cut off in-flight requests when their credential ends
+
+
+### Fixed
+- Drain the publisher on close and test the observer envelope
+- Run the reconciler CronJob under PodSecurity restricted
+
 ## 0.11.0 - 2026-11-20
 
 ### Added
