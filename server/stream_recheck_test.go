@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/store"
 	"github.com/sweetrpg/initiative-api/store/fake"
 	"go.mongodb.org/mongo-driver/bson"
@@ -16,26 +17,56 @@ import (
 // streamDBWrap, when set by a test, wraps the database newStreamTable builds the router on.
 var streamDBWrap func(*fake.DB) store.Database
 
-// readFailDB fails every FindOne while fail is set, as a store that cannot answer does.
+// readFault injects session-store read failures: while down is set every read of the sessions
+// collection fails, and failN fails the next N reads. rechecks counts the reads, one per membership
+// re-check, so a test drives failures by count and not by sleeping.
+type readFault struct {
+	down     atomic.Bool
+	failN    atomic.Int32
+	rechecks atomic.Int32
+}
+
 type readFailDB struct {
 	*fake.DB
-	fail *atomic.Bool
+	f *readFault
 }
 
 func (d readFailDB) Collection(name string) store.Collection {
-	return readFailCollection{d.DB.Collection(name), d.fail}
+	c := d.DB.Collection(name)
+	if name != data.CollectionSessions {
+		return c
+	}
+	return readFailCollection{c, d.f}
 }
 
 type readFailCollection struct {
 	store.Collection
-	fail *atomic.Bool
+	f *readFault
 }
 
-func (c readFailCollection) FindOne(ctx context.Context, f bson.D, out any) error {
-	if c.fail.Load() {
+func (c readFailCollection) FindOne(ctx context.Context, filter bson.D, out any) error {
+	c.f.rechecks.Add(1)
+	if c.f.down.Load() {
 		return errors.New("mongo: server selection timeout")
 	}
-	return c.Collection.FindOne(ctx, f, out)
+	for {
+		n := c.f.failN.Load()
+		if n <= 0 {
+			break
+		}
+		if c.f.failN.CompareAndSwap(n, n-1) {
+			return errors.New("mongo: server selection timeout")
+		}
+	}
+	return c.Collection.FindOne(ctx, filter, out)
+}
+
+func useReadFault(t *testing.T) *readFault {
+	t.Helper()
+	f := &readFault{}
+	streamDBWrap = func(d *fake.DB) store.Database { return readFailDB{d, f} }
+	t.Cleanup(func() { streamDBWrap = nil })
+	return f
 }
 
 const testRecheck = 40 * time.Millisecond
@@ -76,21 +107,20 @@ func TestADemotedMembersStreamClosesWithinTheBoundToo(t *testing.T) {
 }
 
 func TestAStreamClosesAtTheThirdFailedRecheckAndWithinTheFaultBound(t *testing.T) {
-	fail := new(atomic.Bool)
-	streamDBWrap = func(d *fake.DB) store.Database { return readFailDB{d, fail} }
-	t.Cleanup(func() { streamDBWrap = nil })
+	fault := useReadFault(t)
 	opts := StreamOptions{Heartbeat: time.Hour, RecheckInterval: testRecheck}
 	st := newStreamTable(t, opts, 0)
 	c, _ := st.open(t, "user-two", "")
 
-	fail.Store(true)
+	base := fault.rechecks.Load()
+	fault.down.Store(true)
 	start := time.Now()
 	if got := closeCode(c); got != CloseMembershipChanged {
 		t.Fatalf("close code = %d, want %d", got, CloseMembershipChanged)
 	}
 	took := time.Since(start)
-	if took < (maxRecheckFailures-1)*testRecheck {
-		t.Errorf("closed after %s, before the third failed re-check (at least %s)", took, (maxRecheckFailures-1)*testRecheck)
+	if n := fault.rechecks.Load() - base; n != maxRecheckFailures {
+		t.Errorf("the stream closed after %d re-checks, want exactly %d failed ones", n, maxRecheckFailures)
 	}
 	if took > opts.FaultBound() {
 		t.Errorf("closed after %s, want within the fault bound %s", took, opts.FaultBound())
@@ -98,18 +128,15 @@ func TestAStreamClosesAtTheThirdFailedRecheckAndWithinTheFaultBound(t *testing.T
 }
 
 func TestAStreamSurvivesFewerThanThreeFailedRechecksInARow(t *testing.T) {
-	fail := new(atomic.Bool)
-	streamDBWrap = func(d *fake.DB) store.Database { return readFailDB{d, fail} }
-	t.Cleanup(func() { streamDBWrap = nil })
+	fault := useReadFault(t)
 	st := newStreamTable(t, StreamOptions{Heartbeat: time.Hour, RecheckInterval: testRecheck}, 0)
 	c, _ := st.open(t, "user-two", "")
 	frame(t, c) // the head frame that follows the hello
 
-	for range 3 { // a failure, then a success, repeatedly: never three in a row
-		fail.Store(true)
-		time.Sleep(testRecheck + testRecheck/2)
-		fail.Store(false)
-		time.Sleep(3 * testRecheck)
+	for range 3 { // two failures, then two good re-checks, repeatedly: never three failures in a row
+		base := fault.rechecks.Load()
+		fault.failN.Store(2)
+		waitFor(t, "two failed and two good re-checks", func() bool { return fault.rechecks.Load() >= base+4 })
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -118,15 +145,40 @@ func TestAStreamSurvivesFewerThanThreeFailedRechecksInARow(t *testing.T) {
 	}
 }
 
-func TestTheRecheckIntervalNeverExceedsTheHeartbeatAndTheBoundIsStated(t *testing.T) {
+func TestWhileTheStoreIsDownANewTicketAndAnOldOneAreBothRefused(t *testing.T) {
+	fault := useReadFault(t)
+	st := newStreamTable(t, StreamOptions{Heartbeat: time.Hour, RecheckInterval: testRecheck}, 0)
+	old, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+
+	fault.down.Store(true)
+
+	// Minting is authorized through OpenFGA, which is up here; the connect re-reads the member's
+	// record, so whichever ticket carries the client to the door, the connect is refused.
+	fresh, code := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+	for name, tk := range map[string]string{"a ticket minted earlier": old, "a ticket minted during the outage": fresh} {
+		if tk == "" || (name != "a ticket minted earlier" && code != http.StatusCreated) {
+			continue
+		}
+		if got := st.refused(t, "ticket="+tk, nil); got == http.StatusSwitchingProtocols || got < http.StatusInternalServerError {
+			t.Errorf("a stream opened with %s = %d, want a 5xx refusal", name, got)
+		}
+	}
+}
+
+func TestTheRecheckIntervalNeverExceedsTheHeartbeatAndTheBoundsAreStated(t *testing.T) {
 	o := StreamOptions{Heartbeat: 3 * time.Second, RecheckInterval: time.Minute}
 	if o.recheck() != 3*time.Second {
 		t.Errorf("recheck = %s, want it clamped to the heartbeat", o.recheck())
 	}
-	if d := (StreamOptions{}).RevocationBound(); d != 7*time.Second {
-		t.Errorf("default revocation bound = %s, want 7s (5s interval + 2s check timeout)", d)
-	}
-	if d := (StreamOptions{}).FaultBound(); d != 21*time.Second {
-		t.Errorf("default fault bound = %s, want 21s", d)
+	d := StreamOptions{}
+	for name, got := range map[string][2]time.Duration{
+		"revocation bound": {d.RevocationBound(), 7 * time.Second}, // 5s interval + 2s check
+		"stalled bound":    {d.StalledBound(), 19 * time.Second},   // + 10s write + 2s renewal
+		"fault bound":      {d.FaultBound(), 21 * time.Second},     // 3 x 7s
+		"stalled fault":    {d.StalledFaultBound(), 33 * time.Second},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("default %s = %s, want %s", name, got[0], got[1])
+		}
 	}
 }

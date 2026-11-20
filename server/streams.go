@@ -48,7 +48,7 @@ type StreamOptions struct {
 	// is always allowed.
 	AllowedOrigins []string
 	// MaxAge ends a stream after this long (default 1h); Heartbeat is the interval of the
-	// application heartbeat, the protocol ping, and the membership re-check (default 20s).
+	// application heartbeat and the protocol ping (default 20s).
 	MaxAge, Heartbeat time.Duration
 	// RecheckInterval is how often a stream re-reads its membership and credential (default 5s,
 	// never above Heartbeat).
@@ -99,16 +99,29 @@ func (o StreamOptions) recheck() time.Duration {
 	return min(d, o.heartbeat())
 }
 
+// The re-check runs inline in the connection's loop, so a slow client delays it. stallAllowance is
+// the most one heartbeat tick can hold the loop: a heartbeat write that the client takes up to
+// writeTimeout to accept, then a seat renewal bounded by checkTimeout. A write that does not
+// complete in writeTimeout ends the stream anyway.
+const stallAllowance = writeTimeout + checkTimeout
+
 // RevocationBound is the longest a stream stays open after its member is removed, demoted or
-// blocked, when the eviction itself is lost (the evictor or the relay is down): one re-check
-// interval to the next re-check, plus the time that check may take.
+// blocked, when the eviction itself is lost (the evictor or the relay is down) and the client keeps
+// up: one re-check interval to the next re-check, plus the time that check may take.
 func (o StreamOptions) RevocationBound() time.Duration { return o.recheck() + checkTimeout }
 
-// FaultBound is the same when the store cannot answer the re-checks: the stream closes at the
-// third consecutive failed one, so each of three intervals may also spend a full check timeout.
+// StalledBound is RevocationBound when the client's socket is slow enough to hold the loop for a
+// whole heartbeat write and renewal first.
+func (o StreamOptions) StalledBound() time.Duration { return o.RevocationBound() + stallAllowance }
+
+// FaultBound is RevocationBound when the store cannot answer the re-checks: the stream closes at
+// the third consecutive failed one, so each of three intervals may also spend a full check timeout.
 func (o StreamOptions) FaultBound() time.Duration {
 	return maxRecheckFailures * (o.recheck() + checkTimeout)
 }
+
+// StalledFaultBound is FaultBound with a slow client.
+func (o StreamOptions) StalledFaultBound() time.Duration { return o.FaultBound() + stallAllowance }
 
 func (o StreamOptions) heartbeat() time.Duration {
 	if o.Heartbeat > 0 {
@@ -338,7 +351,7 @@ type serveArgs struct {
 	// userLevel opens the user-level stream: addressed events only, no viewer, no encounter heads.
 	userLevel bool
 	authorize func(context.Context) (data.Viewer, error)
-	// guard runs on every heartbeat, besides the membership re-check; an error ends the stream.
+	// guard runs on every re-check, besides the membership re-check; an error ends the stream.
 	guard func(context.Context) error
 	// credentialID is set when an integration credential opened the stream; its seats count in
 	// their own bucket. seat is the seat serve takes and releases.
@@ -635,7 +648,7 @@ func (cl *connection) renew(ctx context.Context) {
 	if !cl.a.seat.held {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.heartbeat()/2)
+	ctx, cancel := context.WithTimeout(ctx, min(cl.h.opts.heartbeat()/2, checkTimeout)) // part of stallAllowance
 	defer cancel()
 	err := cl.h.svc.Leases.Renew(ctx, cl.a.seat.lease, cl.h.opts.leaseTTL())
 	if err != nil && !cl.renewFailing {
@@ -651,16 +664,24 @@ func (cl *connection) renew(ctx context.Context) {
 // closed after three in a row, for membership and for a credential alike: a store that cannot say
 // whether the member is still allowed does not keep the stream open for the maximum age. Each
 // failed membership read is logged with the running count. The stream closes with
-// CloseMembershipChanged, and the client's reconnect is refused while the store is down.
+// CloseMembershipChanged, and a connect (which re-reads the member's record) is refused while the
+// store is down. A user-level stream has no membership to re-check: each notice it receives is
+// checked for membership instead. A credential-backed stream runs the credential guard.
 func (cl *connection) check(ctx context.Context) (websocket.StatusCode, string) {
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout) // a hung store must not stall delivery
-	defer cancel()
+	// Each read has its own timeout: a slow credential guard must not leave the membership
+	// re-check an expired context, which would count as a failed re-check. (A credential stream has
+	// no session and a session stream has no credential, so one of the two is a no-op.)
 	if cl.a.guard != nil {
-		if err := cl.a.guard(ctx); errors.Is(err, errCredentialRevoked) {
+		gctx, cancel := context.WithTimeout(ctx, checkTimeout)
+		err := cl.a.guard(gctx)
+		cancel()
+		if errors.Is(err, errCredentialRevoked) {
 			return CloseCredentialRevoked, "credential revoked"
 		}
 	}
-	err := cl.h.svc.Streams.Recheck(ctx, cl.v)
+	rctx, cancel := context.WithTimeout(ctx, checkTimeout) // a hung store must not stall delivery
+	defer cancel()
+	err := cl.h.svc.Streams.Recheck(rctx, cl.v)
 	switch {
 	case errors.Is(err, domain.ErrAccessChanged):
 		return CloseMembershipChanged, "membership changed"
