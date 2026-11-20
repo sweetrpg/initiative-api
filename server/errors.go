@@ -11,6 +11,7 @@ import (
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
 	"github.com/sweetrpg/initiative-api/entitlements"
+	"github.com/sweetrpg/initiative-api/events/stream"
 	"github.com/sweetrpg/initiative-api/relations"
 )
 
@@ -36,7 +37,7 @@ func writeError(c *gin.Context, err error, current any) {
 	if status >= http.StatusInternalServerError && status != http.StatusServiceUnavailable {
 		slog.ErrorContext(c.Request.Context(), "request failed", "error", err, "correlation_id", body.CorrelationID)
 	}
-	if body.Code == "membership_sync_pending" || body.Code == "rate_limited" || body.Code == "timeout" || body.Code == "too_many_streams" || body.Code == "streams_unavailable" {
+	if body.Code == "membership_sync_pending" || body.Code == "rate_limited" || body.Code == "timeout" || body.Code == "shutting_down" || body.Code == "too_many_streams" || body.Code == "streams_unavailable" {
 		c.Header("Retry-After", "5")
 	}
 	c.AbortWithStatusJSON(status, body)
@@ -94,6 +95,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "streams_unavailable", Message: "Event streams cannot be opened right now. Try again shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, data.ErrStreamLimit):
 		return ErrorBody{Code: "too_many_streams", Message: "You have too many open event streams. Close one and try again."}, http.StatusTooManyRequests
+	case errors.Is(err, stream.ErrShuttingDown):
+		return ErrorBody{Code: "shutting_down", Message: "This server is restarting. Reconnect shortly."}, http.StatusServiceUnavailable
 	case errors.Is(err, domain.ErrTicketInvalid):
 		return ErrorBody{Code: "ticket_invalid", Message: "The stream ticket is not valid. Request a new one."}, http.StatusUnauthorized
 	case errors.Is(err, domain.ErrChangeStale):

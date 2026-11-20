@@ -31,11 +31,13 @@ type Bus interface {
 // is not a GM or co-GM is told only of changes that alter their own view (see Event.ViewTag), so a
 // hidden edit leaves them no gap.
 type Hub struct {
-	r   Renderer
-	mu  sync.RWMutex
-	sub map[*Subscription]struct{}
-	bus *busQueue
-	rel *Relay
+	r        Renderer
+	mu       sync.RWMutex
+	sub      map[*Subscription]struct{}
+	bus      *busQueue
+	stopping atomic.Bool
+	live     atomic.Int64 // stream handlers still running, upgraded or not
+	rel      *Relay
 
 	pendingTTL time.Duration
 
@@ -81,6 +83,7 @@ type Subscription struct {
 	encounterID string
 	viewer      atomic.Pointer[data.Viewer] // nil until Grant
 	overflowed  atomic.Bool
+	shutdown    atomic.Bool // closed because the server is stopping
 
 	mu     sync.Mutex // guards closed, the grant, and every send on and close of C
 	closed bool
@@ -114,6 +117,10 @@ func (h *Hub) Open(sessionID, actor, encounterID string, buf int) *Subscription 
 		s.mu.Lock()
 		s.timer = time.AfterFunc(ttl, s.expire)
 		s.mu.Unlock()
+	}
+	if h.stopping.Load() { // registered after Shutdown took its snapshot
+		s.shutdown.Store(true)
+		s.Close()
 	}
 	return s
 }
@@ -200,6 +207,10 @@ func (s *Subscription) Ended() bool {
 	defer s.mu.Unlock()
 	return s.closed
 }
+
+// ServerStopping reports whether the hub closed the subscription because the server is shutting
+// down, so the transport can say so (close code 1001) and the client reconnect elsewhere.
+func (s *Subscription) ServerStopping() bool { return s.shutdown.Load() }
 
 // Overflowed reports whether the hub closed the subscription because its buffer was full.
 func (s *Subscription) Overflowed() bool { return s.overflowed.Load() }
@@ -355,4 +366,50 @@ func ids(c data.Change) []string {
 	out := slices.Clone(c.CombatantID)
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// ErrShuttingDown means the hub no longer takes streams: the server is stopping.
+var ErrShuttingDown = errors.New("stream: the server is shutting down")
+
+// Shutdown ends every open subscription, marked as closed by the server stopping, and makes Open
+// hand out subscriptions that are already closed. Call it before the HTTP server's own shutdown,
+// which does not wait for upgraded connections.
+func (h *Hub) Shutdown() {
+	h.stopping.Store(true)
+	h.mu.RLock()
+	all := make([]*Subscription, 0, len(h.sub))
+	for s := range h.sub {
+		all = append(all, s)
+	}
+	h.mu.RUnlock()
+	for _, s := range all {
+		s.shutdown.Store(true)
+		s.Close()
+	}
+}
+
+// ShuttingDown reports whether Shutdown has been called.
+func (h *Hub) ShuttingDown() bool { return h.stopping.Load() }
+
+// Track marks one stream handler as running until the returned func is called. The HTTP server
+// does not wait for hijacked (upgraded) connections, so Drain waits on these instead. Call it
+// before any work that can fail and defer the result before the connection's own close.
+func (h *Hub) Track() (done func()) {
+	h.live.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { h.live.Add(-1) }) }
+}
+
+// Drain waits until every tracked stream handler has returned (each has sent its close frame and
+// closed its connection), or ctx ends.
+func (h *Hub) Drain(ctx context.Context) {
+	t := time.NewTicker(20 * time.Millisecond)
+	defer t.Stop()
+	for h.live.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

@@ -1105,3 +1105,55 @@ func TestAServerEndedStreamFreesItsSeatInsteadOfKeepingGrace(t *testing.T) {
 	}
 	waitFor(t, "the seat to be freed", func() bool { return len(st.db.Fake(data.CollectionStreamLeases).Docs()) == 0 })
 }
+
+func TestShutdownClosesOpenStreamsWith1001AndRefusesNewOnes(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	tk, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	late, _ := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+
+	st.hub.Shutdown()
+	if got := closeCode(c); got != websocket.StatusGoingAway {
+		t.Errorf("close code = %d, want 1001", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st.hub.Drain(ctx)
+	if ctx.Err() != nil {
+		t.Error("the hub still holds subscriptions after every stream closed")
+	}
+	if got := st.refused(t, "ticket="+late, nil); got != http.StatusServiceUnavailable {
+		t.Errorf("a new stream during shutdown = %d, want 503", got)
+	}
+}
+
+func TestDrainWaitsForAStreamThatHasNotFinishedClosing(t *testing.T) {
+	st := newStreamTable(t, StreamOptions{}, 0)
+	tk, _ := st.ticket(t, "user-ok", `{"session_id":"`+st.sid+`"}`)
+	c, _, err := st.dial(t, "ticket="+tk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame(t, c)
+	st.hub.Shutdown()
+	// The client has not read the close frame, so the server side is still closing.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	st.hub.Drain(ctx)
+	if ctx.Err() == nil {
+		t.Fatal("Drain returned while a stream was still closing")
+	}
+	if got := closeCode(c); got != websocket.StatusGoingAway {
+		t.Fatalf("close code = %d, want 1001", got)
+	}
+	done, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	st.hub.Drain(done)
+	if done.Err() != nil {
+		t.Error("Drain did not finish after the client answered the close")
+	}
+}
