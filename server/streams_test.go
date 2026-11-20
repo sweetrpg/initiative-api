@@ -53,6 +53,7 @@ func newStreamTable(t *testing.T, opts StreamOptions, ticketTTL time.Duration) s
 		svc.Encounters.SetSink(hub)
 		svc.Sessions.SetSink(hub)
 		svc.Sessions.SetEvictor(hub)
+		hub.SetMembers(svc.Sessions)
 		svc.Hub = hub
 		svc.Streams = domain.NewStreams(captured, svc.Sessions, svc.Encounters)
 		svc.Streams.TTL = ticketTTL

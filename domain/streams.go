@@ -51,12 +51,15 @@ type TicketRequest struct {
 	SessionID   string
 	EncounterID string
 	ClientID    string
+	// UserLevel asks for the user-level stream; it excludes SessionID and EncounterID.
+	UserLevel bool
 }
 
 // Claim is what a redeemed ticket asks for. It is a request, not proof: View decides.
 type Claim struct {
 	UserID, SessionID, EncounterID, ClientID string
 	Level                                    data.ViewLevel
+	UserLevel                                bool
 }
 
 // Mint authorizes actor for the scope the way the REST reads do (a non-member is data.ErrNotMember)
@@ -67,7 +70,12 @@ func (s *Streams) Mint(ctx context.Context, actor string, req TicketRequest) (st
 	if data.ValidClientID(req.ClientID) {
 		t.ClientID = req.ClientID
 	}
-	if req.SessionID != "" {
+	if req.UserLevel {
+		if req.SessionID != "" || req.EncounterID != "" {
+			return "", 0, invalid("a user-level stream takes no session or encounter")
+		}
+		t.UserLevel = true
+	} else if req.SessionID != "" {
 		v, err := s.sessions.Viewer(ctx, actor, req.SessionID)
 		if err != nil {
 			return "", 0, err
@@ -172,13 +180,16 @@ func (s *Streams) claim(ctx context.Context, ticket string, take func(context.Co
 	if err != nil {
 		return Claim{}, err
 	}
-	return Claim{UserID: t.UserID, SessionID: t.SessionID, EncounterID: t.EncounterID, ClientID: t.ClientID, Level: t.Level}, nil
+	return Claim{UserID: t.UserID, SessionID: t.SessionID, EncounterID: t.EncounterID, ClientID: t.ClientID, Level: t.Level, UserLevel: t.UserLevel}, nil
 }
 
 // View is the viewer a redeemed claim opens. Only the user, the scope and the minted level come
 // from the ticket; access is read live (data.Sessions.TicketView), so a member removed since the
 // mint, a session deleted since, or a role raised since gets nothing.
 func (s *Streams) View(ctx context.Context, c Claim) (data.Viewer, error) {
+	if c.UserLevel {
+		return data.Viewer{}, nil // identity only: the stream's deliveries check membership themselves
+	}
 	if c.SessionID == "" {
 		return s.ownerView(ctx, c.UserID, c.EncounterID)
 	}

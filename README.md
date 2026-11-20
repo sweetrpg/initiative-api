@@ -70,6 +70,9 @@ Invalid values stop the process at startup with every problem listed.
   Encounter events are also published to the `INITIATIVE_EVENTS` stream on
   `initiative.events.<entity>.<action>` (`NATS_URL`, same login), fail-open: a broker outage drops
   the event with a log line and never fails the write. `Nats-Msg-Id` is the event id.
+  Addressed notices are also published, one event per unmuted addressee, on
+  `initiative.user.<user_id>.<type>` (`turn.yours` stays two tokens: `initiative.user.u1.turn.yours`),
+  with `user_id` in the envelope, for a future push service.
   Administrator routes (admin bearer only, no credentials): `GET /admin/credentials[?owner=]` lists
   any owner's credentials (never the secret or hash); `DELETE /admin/credentials/{id}` with
   `{"reason": "..."}` removes one for good, at once; `GET /admin/credentials/deletions[?owner=]`
@@ -85,6 +88,14 @@ Invalid values stop the process at startup with every problem listed.
   `DELETE /sessions/{id}/invites/{invite}` revokes. Joining: `POST /sessions/join {code}` makes a
   pending request that grants nothing; `GET /sessions/{id}/requests`, `POST .../requests/{id}/approve
   {role}` or `/reject {reason}`. Blocks: `GET|POST /sessions/{id}/blocks`, `DELETE .../blocks/{user}`.
+  Notifications: `turn.yours`, `turn.next` and the change-request events (`change_request.submitted`
+  to the GM and co-GMs, `.approved` / `.rejected` to the submitter) are delivered only to the
+  addressee's open streams of that session. `GET|PUT /sessions/{id}/notification-preferences
+  {"muted": [...]}` mutes types per member; state events are unaffected.
+  User-level stream: `POST /streams/tickets {"scope":"user"}` (no session or encounter), then
+  `GET /streams?ticket=`, or `GET /streams?scope=user` with the bearer. It carries only the
+  addressed events of every session the user still belongs to (checked per delivery), no encounter
+  state; integration credentials cannot open it.
   Roles are `gm` (the creator, exactly one), `co_gm`, `player`, `observer`; `domain.Allowed` is the
   one role table. Membership collections are the source of truth for who holds a role. Membership,
   invite, request and block records and the session are all soft-deleted (`deleted_at`, `deleted_by`;

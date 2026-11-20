@@ -40,6 +40,7 @@ var FanoutIndexes = []store.IndexSpec{{Name: "at_ttl", Keys: bson.D{{Key: "at", 
 const (
 	kindChange = "change"
 	kindEvict  = "evict"
+	kindNotice = "notice"
 )
 
 // fanoutDoc is one row of the fan-out collection. A change row carries the data.Change the
@@ -52,6 +53,7 @@ type fanoutDoc struct {
 	At      time.Time          `bson:"at"`
 	EventID string             `bson:"event_id,omitempty"`
 	Change  *data.Change       `bson:"change,omitempty"`
+	Notice  *data.Notice       `bson:"notice,omitempty"`
 	Session string             `bson:"session_id,omitempty"`
 	User    string             `bson:"user_id,omitempty"`
 }
@@ -173,6 +175,18 @@ func (r *Relay) publishChange(c data.Change, eventID string) {
 	default:
 		r.dropped.Add(1)
 		slog.Warn("the fan-out queue is full; other pods miss an encounter event", "encounter", c.After.ID, "type", c.Type)
+	}
+}
+
+// publishNotice carries an addressed event to the other pods, whose streams may hold its
+// addressees. Like a change it is dropped, with a log line, when the queue is full.
+func (r *Relay) publishNotice(n data.Notice) {
+	d := fanoutDoc{ID: primitive.NewObjectID(), Pod: r.pod, Kind: kindNotice, At: time.Now(), Notice: &n}
+	select {
+	case r.out <- d:
+	default:
+		r.dropped.Add(1)
+		slog.Warn("the fan-out queue is full; other pods miss a notification", "type", n.Type, "session", n.SessionID)
 	}
 }
 
@@ -330,6 +344,8 @@ func (r *Relay) handle(ctx context.Context, raw bson.Raw) {
 		slog.WarnContext(ctx, "dropped a fan-out eviction with no session")
 	case d.Kind == kindEvict:
 		r.h.evictLocal(d.Session, d.User)
+	case d.Kind == kindNotice && d.Notice != nil:
+		r.h.enqueueNotice(noticeJob{n: *d.Notice, local: true}) // preferences are read on the worker, never on the tail
 	case d.Kind == kindChange && d.Change != nil:
 		select {
 		case r.in <- d:

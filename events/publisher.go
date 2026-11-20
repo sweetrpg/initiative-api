@@ -49,8 +49,20 @@ func NewPublisher(natsURL string) (*Publisher, error) {
 	return &Publisher{js: js, conn: conn}, nil
 }
 
+// UserSubjectPrefix is the root of the subjects of events addressed to one user:
+// initiative.user.<user_id>.<type>, where the dotted type (turn.yours) stays two tokens, so a
+// consumer filters with initiative.user.*.turn.>.
+const UserSubjectPrefix = "initiative.user."
+
 // Subject is the subject an event is published on.
 func Subject(e stream.Event) string {
+	if e.UserID != "" {
+		parts := strings.Split(e.Type, ".")
+		for i := range parts {
+			parts[i] = token(parts[i])
+		}
+		return UserSubjectPrefix + token(e.UserID) + "." + strings.Join(parts, ".")
+	}
 	return SubjectPrefix + token(e.EntityType) + "." + token(e.Action)
 }
 

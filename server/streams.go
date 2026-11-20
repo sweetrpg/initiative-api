@@ -146,14 +146,23 @@ type ticketBody struct {
 	SessionID   string `json:"session_id"`
 	EncounterID string `json:"encounter_id"`
 	ClientID    string `json:"client_id"`
+	// Scope is empty for an encounter stream or "user" for the user-level stream.
+	Scope string `json:"scope"`
 }
+
+// scopeUser asks for the user-level stream.
+const scopeUser = "user"
 
 func (h streamHandlers) mint(c *gin.Context) {
 	var b ticketBody
 	if !bindJSON(c, &b) {
 		return
 	}
-	ticket, ttl, err := h.svc.Streams.Mint(c.Request.Context(), authz.Viewer(c), domain.TicketRequest{SessionID: b.SessionID, EncounterID: b.EncounterID, ClientID: b.ClientID})
+	if b.Scope != "" && b.Scope != scopeUser {
+		writeError(c, data.ErrInvalid, nil)
+		return
+	}
+	ticket, ttl, err := h.svc.Streams.Mint(c.Request.Context(), authz.Viewer(c), domain.TicketRequest{SessionID: b.SessionID, EncounterID: b.EncounterID, ClientID: b.ClientID, UserLevel: b.Scope == scopeUser})
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -224,6 +233,7 @@ func (h streamHandlers) ticketGate(c *gin.Context) {
 	defer release()
 	a := serveArgs{
 		actor: claim.UserID, session: claim.SessionID, encounter: claim.EncounterID, clientID: claim.ClientID,
+		userLevel: claim.UserLevel,
 		authorize: func(ctx context.Context) (data.Viewer, error) { return h.svc.Streams.View(ctx, claim) },
 		redeem:    func(ctx context.Context) error { _, err := h.svc.Streams.Redeem(ctx, ticket); return err },
 	}
@@ -238,7 +248,12 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 		return
 	}
 	actor, session, enc := authz.Viewer(c), c.Query("session_id"), c.Query("encounter_id")
-	if _, viaCredential := c.Get(credentialContextKey); viaCredential && session != "" {
+	userLevel := c.Query("scope") == scopeUser
+	if userLevel && (session != "" || enc != "") {
+		writeError(c, data.ErrInvalid, nil)
+		return
+	}
+	if _, viaCredential := c.Get(credentialContextKey); viaCredential && (session != "" || userLevel) {
 		// Session data is authorized with the caller's own bearer (PADR-0037); a credential has none.
 		userOnly(c)
 		return
@@ -250,7 +265,7 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 	if !data.ValidClientID(client) {
 		client = "" // ignored, never rejected, like the origin of a write
 	}
-	a := serveArgs{actor: actor, session: session, encounter: enc, clientID: client}
+	a := serveArgs{actor: actor, session: session, encounter: enc, clientID: client, userLevel: userLevel}
 	a.authorize = func(ctx context.Context) (data.Viewer, error) {
 		return h.svc.Streams.BearerView(ctx, actor, session, enc)
 	}
@@ -297,7 +312,9 @@ func liveGuard(live func(context.Context) (bool, error)) func(context.Context) e
 
 type serveArgs struct {
 	actor, session, encounter, clientID string
-	authorize                           func(context.Context) (data.Viewer, error)
+	// userLevel opens the user-level stream: addressed events only, no viewer, no encounter heads.
+	userLevel bool
+	authorize func(context.Context) (data.Viewer, error)
 	// guard runs on every heartbeat, besides the membership re-check; an error ends the stream.
 	guard func(context.Context) error
 	// credentialID is set when an integration credential opened the stream; its seats count in
@@ -329,21 +346,12 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		writeError(c, stream.ErrShuttingDown, nil)
 		return
 	}
-	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, h.opts.buffer())
-	defer sub.Close()
-	v, err := a.authorize(ctx)
-	if err == nil {
-		err = sub.Grant(v)
-		if errors.Is(err, stream.ErrEvicted) && sub.ServerStopping() {
-			err = stream.ErrShuttingDown // closed by Shutdown after the check above
-		} else if errors.Is(err, stream.ErrEvicted) || errors.Is(err, stream.ErrViewer) {
-			err = data.ErrNotMember
-		}
-	}
+	sub, v, err := h.openSub(ctx, a)
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
+	defer sub.Close()
 	if a.seat, err = h.takeSeat(ctx, a); err != nil {
 		writeError(c, err, nil)
 		return
@@ -354,10 +362,13 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 			return
 		}
 	}
-	heads, truncated, err := h.svc.Streams.Heads(ctx, v, a.encounter)
-	if err != nil {
-		writeError(c, err, nil)
-		return
+	var heads []domain.Head
+	var truncated bool
+	if !a.userLevel {
+		if heads, truncated, err = h.svc.Streams.Heads(ctx, v, a.encounter); err != nil {
+			writeError(c, err, nil)
+			return
+		}
 	}
 	keep := false // only a dropped connection keeps its seat for the grace period
 	released = true
@@ -373,6 +384,29 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		return
 	}
 	keep = cl.run(ctx)
+}
+
+// openSub registers the stream's subscription: a user-level one needs no scope, any other is
+// authorized and granted its viewer. A subscription returned with an error is already closed.
+func (h streamHandlers) openSub(ctx context.Context, a serveArgs) (*stream.Subscription, data.Viewer, error) {
+	if a.userLevel {
+		return h.svc.Hub.OpenUser(a.actor, h.opts.buffer()), data.Viewer{}, nil
+	}
+	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, h.opts.buffer())
+	v, err := a.authorize(ctx)
+	if err == nil {
+		err = sub.Grant(v)
+		if errors.Is(err, stream.ErrEvicted) && sub.ServerStopping() {
+			err = stream.ErrShuttingDown // closed by Shutdown after the check above
+		} else if errors.Is(err, stream.ErrEvicted) || errors.Is(err, stream.ErrViewer) {
+			err = data.ErrNotMember
+		}
+	}
+	if err != nil {
+		sub.Close()
+		return nil, v, err
+	}
+	return sub, v, nil
 }
 
 type headFrame struct {
@@ -486,13 +520,21 @@ func (cl *connection) write(ctx context.Context, v any) error {
 	return cl.conn.Write(ctx, websocket.MessageText, b)
 }
 
+// scopeOf names what a stream follows: the addressed events of the user, or encounter state.
+func scopeOf(a serveArgs) string {
+	if a.userLevel {
+		return scopeUser
+	}
+	return "encounter"
+}
+
 // hello sends the hello frame and one head frame per encounter in scope. They carry only what the
 // viewer's own views carry: the scope they asked for and each visible encounter's revision (GM) or
 // view tag.
 func (cl *connection) hello(ctx context.Context, heads []domain.Head, truncated bool) error {
 	opts := cl.h.opts
 	if err := cl.write(ctx, gin.H{
-		"type": "hello", "session_id": cl.a.session, "encounter_id": cl.a.encounter, "client_id": cl.a.clientID,
+		"type": "hello", "scope": scopeOf(cl.a), "session_id": cl.a.session, "encounter_id": cl.a.encounter, "client_id": cl.a.clientID,
 		"heartbeat_seconds": int(opts.heartbeat().Seconds()), "max_age_seconds": int(opts.maxAge().Seconds()), "heads_truncated": truncated,
 	}); err != nil {
 		return err

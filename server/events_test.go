@@ -148,7 +148,7 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 
 	for name, sub := range map[string]*stream.Subscription{"player": player, "observer": observer} {
 		evs := drain(sub)
-		if len(evs) != len(allEventTypes)*4 {
+		if len(withoutNotices(evs)) != len(allEventTypes)*4 { // addressed notices are checked for leaks below, not counted
 			t.Fatalf("%s received %d events, want one per change", name, len(evs))
 		}
 		for _, ev := range evs {
@@ -176,7 +176,7 @@ func TestAPlayerSeesTheVisibleIdsOfAChangeThatAlsoTouchedAHiddenOne(t *testing.T
 	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid", "orc"}, At: time.Now()})
 	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid"}, At: time.Now()})
 	hub.Emit(context.Background(), data.Change{Type: data.EventTurn, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
-	got := drain(player)
+	got := withoutNotices(drain(player))
 
 	if len(got) != 3 {
 		t.Fatalf("%d events", len(got))
@@ -235,6 +235,19 @@ func (b *captureBus) Publish(ctx context.Context, ev stream.Event) error {
 	defer b.mu.Unlock()
 	b.events = append(b.events, ev)
 	return b.err
+}
+
+// stateEvents are the published events that are not notices addressed to a user.
+func (b *captureBus) stateEvents() []stream.Event {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []stream.Event
+	for _, ev := range b.events {
+		if ev.UserID == "" {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func (b *captureBus) count() int { b.mu.Lock(); defer b.mu.Unlock(); return len(b.events) }
@@ -323,17 +336,22 @@ func TestTheClientIDReachesOnlyTheOriginatingUsersOwnStreams(t *testing.T) {
 	origin := data.Origin{Kind: data.OriginUser, ClientID: "ios-7.f", ActorID: "u-1"}
 
 	hub.Emit(context.Background(), data.Change{Type: data.EventTurn, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", Origin: origin, At: time.Now()})
-	eventually(t, func() bool { return bus.count() == 1 }, "the bus never got the event")
+	eventually(t, func() bool { return bus.count() >= 1 }, "the bus never got the event")
 
-	g, p := drain(gm), drain(player)
+	g, p := withoutNotices(drain(gm)), withoutNotices(drain(player))
 	if g[0].Origin.Kind != "user" || g[0].Origin.ClientID != "ios-7.f" {
 		t.Errorf("the originating user's stream = %+v, want their own client id", g[0].Origin)
 	}
 	if p[0].Origin.Kind != "user" || p[0].Origin.ClientID != "" {
 		t.Errorf("another user's stream = %+v, want the kind and no client id", p[0].Origin)
 	}
-	if bus.count() != 1 || bus.events[0].Origin.ClientID != "" || bus.events[0].Revision != 0 {
-		t.Errorf("the bus form carries a client id or a revision: %v", bus.events)
+	for _, ev := range bus.stateEvents() {
+		if ev.Origin.ClientID != "" || ev.Revision != 0 {
+			t.Errorf("the bus form carries a client id or a revision: %+v", ev)
+		}
+	}
+	if n := len(bus.stateEvents()); n != 1 {
+		t.Errorf("the bus got %d state events, want 1", n)
 	}
 }
 

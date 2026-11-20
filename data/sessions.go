@@ -326,6 +326,25 @@ func (r *Sessions) Members(ctx context.Context, d Decision, q Query) (Page[Membe
 	return runQuery[Member](ctx, r.members, SessionMemberSpec, sessionScope(d.session), byCreated(q))
 }
 
+// ManagerIDs returns the user ids of the session's live GM and co-GMs: the audience of a change
+// request. It is an addressing lookup for the event path, not a read on behalf of a user, and
+// returns ids only.
+func (r *Sessions) ManagerIDs(ctx context.Context, sessionID string) ([]string, error) {
+	var ms []Member
+	filter := bson.D{{Key: "session_id", Value: sessionID}, {Key: "role", Value: bson.D{{Key: "$in", Value: bson.A{RoleGM, RoleCoGM}}}}, {Key: "live", Value: bson.D{{Key: "$exists", Value: true}}}}
+	if err := r.members.Find(ctx, filter, store.FindOptions{Limit: maxManagers}, &ms); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(ms))
+	for _, m := range ms {
+		ids = append(ids, m.UserID)
+	}
+	return ids, nil
+}
+
+// maxManagers bounds the managers one session can notify.
+const maxManagers = 100
+
 // SessionIDsOf lists the sessions userID belongs to. It is keyed by the caller's own membership
 // records and returns no session data; the caller authorizes each session before reading it.
 func (r *Sessions) SessionIDsOf(ctx context.Context, userID string, q Query) (Page[Member], error) {
