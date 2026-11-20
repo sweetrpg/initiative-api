@@ -325,11 +325,7 @@ func (c *Consumer) start(ctx context.Context, natsURL, durable string) error {
 		nats.ReconnectHandler(func(*nats.Conn) { c.onReconnect(ctx) }),
 		nats.ClosedHandler(func(*nats.Conn) { c.onClosed() }),
 	}
-	if creds := os.Getenv("NATS_CREDS"); creds != "" {
-		opts = append(opts, nats.UserCredentials(creds))
-	} else if user := os.Getenv("NATS_USER"); user != "" {
-		opts = append(opts, nats.UserInfo(user, os.Getenv("NATS_PASSWORD")))
-	}
+	opts = append(opts, authOptions()...)
 	conn, err := nats.Connect(natsURL, opts...)
 	if err != nil {
 		return fmt.Errorf("connect to NATS: %w", err)
@@ -451,4 +447,16 @@ func (c *Consumer) Stop() {
 			c.conn.Close()
 		}
 	})
+}
+
+// authOptions is the broker login from the environment: a NATS_CREDS file when set, else
+// NATS_USER and NATS_PASSWORD.
+func authOptions() []nats.Option {
+	if creds := os.Getenv("NATS_CREDS"); creds != "" {
+		return []nats.Option{nats.UserCredentials(creds)}
+	}
+	if user := os.Getenv("NATS_USER"); user != "" {
+		return []nats.Option{nats.UserInfo(user, os.Getenv("NATS_PASSWORD"))}
+	}
+	return nil
 }

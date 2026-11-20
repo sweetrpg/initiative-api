@@ -97,8 +97,20 @@ func main() {
 	}
 	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
+	// Fail-open: the hub publishes from its own queue and drops an event it cannot send.
+	var pub *events.Publisher
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		var err error
+		if pub, err = events.NewPublisher(natsURL); err != nil {
+			log.Fatalf("event publisher: %v", err)
+		}
+		defer pub.Close() // deferred before hub.Close, so it runs after the queue that feeds it stops
+	}
 	hub := stream.New(encounters)
 	defer hub.Close()
+	if pub != nil {
+		hub.AttachBus(pub, 1024)
+	}
 	encounters.SetSink(hub)
 	sessions.SetSink(hub)
 	sessions.SetEvictor(hub)
