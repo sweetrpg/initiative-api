@@ -46,8 +46,12 @@ func (r *NotificationPrefs) Muted(ctx context.Context, ownerUserID, sessionID st
 	if err := checkUserID(ownerUserID); err != nil {
 		return nil, err
 	}
+	id, ok := cleanID(sessionID)
+	if !ok {
+		return nil, invalid("session id is not valid")
+	}
 	var doc notificationPrefDoc
-	err := r.c.FindOne(ctx, prefScope(ownerUserID, sessionID), &doc)
+	err := r.c.FindOne(ctx, prefScope(ownerUserID, id), &doc)
 	if errors.Is(err, store.ErrNotFound) {
 		return []string{}, nil
 	}
@@ -63,6 +67,10 @@ func (r *NotificationPrefs) SetMuted(ctx context.Context, ownerUserID, sessionID
 	if err := checkUserID(ownerUserID); err != nil {
 		return nil, err
 	}
+	id, ok := cleanID(sessionID)
+	if !ok {
+		return nil, invalid("session id is not valid")
+	}
 	clean := make([]string, 0, len(muted))
 	for _, m := range muted {
 		if !slices.Contains(NoticeTypes, m) {
@@ -74,7 +82,7 @@ func (r *NotificationPrefs) SetMuted(ctx context.Context, ownerUserID, sessionID
 	}
 	slices.Sort(clean)
 	set := bson.D{{Key: "muted", Value: clean}, {Key: "updated_at", Value: r.now()}}
-	if err := r.c.UpsertOne(ctx, prefScope(ownerUserID, sessionID), bson.D{{Key: "$set", Value: set}}); err != nil {
+	if err := r.c.UpsertOne(ctx, prefScope(ownerUserID, id), bson.D{{Key: "$set", Value: set}}); err != nil {
 		return nil, err
 	}
 	return clean, nil
