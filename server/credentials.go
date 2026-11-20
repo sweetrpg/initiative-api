@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sweetrpg/authz-client.go/authz"
@@ -59,8 +61,47 @@ func authenticate(creds *domain.Credentials, userAuth gin.HandlerFunc) gin.Handl
 		c.Set(authzViewerKey, cred.OwnerUserID)
 		c.Set(authzRolesKey, []string{authz.RoleUser})
 		c.Set(credentialContextKey, cred.ID)
+		if !isStreamUpgrade(c.Request) { // a stream rechecks on its own heartbeat
+			defer watchCredential(c, creds, cred.ID)()
+		}
 		c.Next()
 	}
+}
+
+// credentialRecheck is how often a running request made with a credential asks whether the
+// credential is still live. A request shorter than this is never rechecked; it was authenticated
+// against the store an instant earlier.
+var credentialRecheck = 5 * time.Second
+
+// watchCredential cancels the request's context, with errCredentialRevoked as the cause, once the
+// credential stops being live (revoked, deleted, owner denied, or the gate closed), so an
+// in-flight request does not outlive it by more than credentialRecheck. Store errors count like a
+// stream's: fail closed after maxGuardErrors in a row. The returned func stops the watcher.
+func watchCredential(c *gin.Context, creds *domain.Credentials, id string) (stop func()) {
+	ctx, cancel := context.WithCancelCause(c.Request.Context())
+	c.Request = c.Request.WithContext(ctx)
+	guard := liveGuard(func(ctx context.Context) (bool, error) { return creds.Live(ctx, id) })
+	every := credentialRecheck // read here, on the request's goroutine
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if guard(ctx) != nil {
+					cancel(errCredentialRevoked)
+					return
+				}
+			}
+		}
+	}()
+	return func() { cancel(nil) }
+}
+
+func isStreamUpgrade(r *http.Request) bool {
+	return r.Method == http.MethodGet && r.URL.Path == "/streams"
 }
 
 // userOnly rejects integration credentials: account-level routes need the user's own bearer
