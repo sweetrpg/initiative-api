@@ -9,7 +9,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/gomodule/redigo v1.9.3
 	github.com/joho/godotenv v1.5.1
-	github.com/nats-io/nats.go v1.55.0
+	github.com/nats-io/nats.go v1.56.0
 	github.com/samber/slog-gin v1.21.1
 	github.com/sweetrpg/api-core.go v0.4.0
 	github.com/sweetrpg/authz-client.go v0.2.0
