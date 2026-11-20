@@ -1,4 +1,20 @@
 
+## 0.13.0 - 2026-11-20
+
+### Added
+- Addressed notifications and per-session preferences
+- Publish addressed notices to the bus per addressee
+- User-level stream for addressed notifications
+
+
+### Fixed
+- Validate the session id before it reaches a preference query
+- Deliver notices off the request path and cover the isolation cases
+- Make closing the notice worker final and bound its store reads
+- Share the mute lookup with the bus and publish only to current members
+
+
+
 ## 0.12.0 - 2026-11-20
 
 ### Added
