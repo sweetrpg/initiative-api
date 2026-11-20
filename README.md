@@ -67,6 +67,9 @@ Invalid values stop the process at startup with every problem listed.
   has caught up, and stay off if `NATS_URL` is unset or the consumer fell behind the stream's
   retention. `POST /admin/credentials/reopen` (admin bearer only) clears that close and logs an audit
   entry; the gate records the actor.
+  Encounter events are also published to the `INITIATIVE_EVENTS` stream on
+  `initiative.events.<entity>.<action>` (`NATS_URL`, same login), fail-open: a broker outage drops
+  the event with a log line and never fails the write. `Nats-Msg-Id` is the event id.
   Administrator routes (admin bearer only, no credentials): `GET /admin/credentials[?owner=]` lists
   any owner's credentials (never the secret or hash); `DELETE /admin/credentials/{id}` with
   `{"reason": "..."}` removes one for good, at once; `GET /admin/credentials/deletions[?owner=]`
