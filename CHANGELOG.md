@@ -10,6 +10,26 @@
 - Drain the publisher on close and test the observer envelope
 - Run the reconciler CronJob under PodSecurity restricted
 
+## 0.11.0 - 2026-11-20
+
+### Added
+- Report database health to the readiness probe
+
+
+### Fixed
+- Retry the API's database, index and NATS start-up
+- Bound the database and every request with timeouts
+- Fail closed on the credential path only, and harden the retry
+- Keep the credential consumer alive and check retention on every reconnect
+- Keep one startupProbe
+- Guard reconnect before bind, recheck retention while catching up, pace consumer rebuilds
+- Make Consumer.Stop idempotent
+- Append driver timeouts to the raw URI and test the deadline through the middleware
+- Keep the readiness probe on /status/ping and report health without driver detail
+- Set ndots 2 on API and reconciler pods
+- Close event streams with 1001 before the server shuts down
+- Make Drain wait on live stream handlers
+
 
 
 ## 0.10.0 - 2026-11-19
