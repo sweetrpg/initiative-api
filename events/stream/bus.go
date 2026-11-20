@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/sweetrpg/initiative-api/data"
 )
 
 // busPublishTimeout bounds one publication, so a stuck broker cannot hold the queue.
@@ -54,6 +56,34 @@ func (h *Hub) Close() {
 	if q != nil {
 		close(q.done)
 		q.wg.Wait()
+	}
+}
+
+// publishNoticeToBus queues one event per unmuted addressee for the bus, where a push service can
+// consume it. It carries what the addressee's own stream carries and is published on the
+// addressee's own subject; a muted type is not published, since the consumer has no other way to
+// see the mute. Fail-open like every bus publication.
+func (h *Hub) publishNoticeToBus(ctx context.Context, n data.Notice, prefs Preferences) {
+	h.mu.RLock()
+	q := h.bus
+	h.mu.RUnlock()
+	if q == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, u := range n.Users {
+		if u == "" || seen[u] || h.muted(ctx, prefs, u, n) {
+			continue
+		}
+		seen[u] = true
+		ev := noticeEvent(n, newEventID())
+		ev.UserID = u
+		select {
+		case q.ch <- ev:
+		default:
+			h.dropped.Add(1)
+			slog.WarnContext(ctx, "the bus queue is full; dropping a notice", "event_id", ev.EventID, "type", ev.Type)
+		}
 	}
 }
 

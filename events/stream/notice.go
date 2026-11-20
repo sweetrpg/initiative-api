@@ -47,6 +47,10 @@ func (h *Hub) Notify(ctx context.Context, n data.Notice) {
 	if r := h.relay(); r != nil {
 		r.publishNotice(n)
 	}
+	h.mu.RLock()
+	prefs := h.prefs
+	h.mu.RUnlock()
+	h.publishNoticeToBus(ctx, n, prefs)
 }
 
 // notifyLocal delivers n to this pod's streams only.

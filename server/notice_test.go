@@ -192,3 +192,21 @@ func TestPreferencesAreOwnedByTheCallerAndRejectUnknownTypes(t *testing.T) {
 		t.Errorf("a non-member stored preferences for a session it is not in")
 	}
 }
+
+func TestAnAddressedNoticeIsPublishedToTheBusOncePerUnmutedAddressee(t *testing.T) {
+	n := newNoticeTable(t)
+	bus := &captureBus{}
+	n.hub.AttachBus(bus, 8)
+	t.Cleanup(n.hub.Close)
+	n.hub.SetPreferences(mutes{"u-3": {data.NoticeTurnYours}})
+
+	n.hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: n.sid, EncounterID: encE1, Users: []string{"u-2", "u-3", "u-2"}, At: time.Now(), Data: map[string]any{"combatant_id": "pc"}})
+
+	eventually(t, func() bool { return bus.count() == 1 }, "one bus event for the one unmuted addressee")
+	bus.mu.Lock()
+	ev := bus.events[0]
+	bus.mu.Unlock()
+	if ev.UserID != "u-2" || ev.Type != data.NoticeTurnYours || ev.SessionID != n.sid || ev.Revision != 0 || ev.ViewTag != "" {
+		t.Errorf("bus event = %+v, want turn.yours addressed to u-2 with no revision or view_tag", ev)
+	}
+}

@@ -25,10 +25,13 @@ type Event struct {
 	Source      string    `json:"source"`
 	EncounterID string    `json:"encounter_id"`
 	SessionID   string    `json:"session_id,omitempty"`
-	EntityType  string    `json:"entity_type"`
-	EntityID    string    `json:"entity_id"`
-	Action      string    `json:"action"`
-	Type        string    `json:"type"`
+	// UserID is the addressee of a notice published to the bus (one event per addressee); it is
+	// empty on every other event.
+	UserID     string `json:"user_id,omitempty"`
+	EntityType string `json:"entity_type"`
+	EntityID   string `json:"entity_id"`
+	Action     string `json:"action"`
+	Type       string `json:"type"`
 	// Revision orders a GM's or co-GM's events. Other viewers never get it: the stored revision
 	// moves on every edit, hidden ones included, so it would show them edits they cannot see.
 	Revision int64 `json:"revision,omitempty"`
