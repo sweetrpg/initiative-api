@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/sweetrpg/initiative-api/data"
@@ -17,6 +18,19 @@ type Preferences interface {
 // Managers lists the user ids of a session's GM and co-GMs.
 type Managers interface {
 	ManagerIDs(ctx context.Context, sessionID string) ([]string, error)
+}
+
+// Members says whether a user currently belongs to a session.
+type Members interface {
+	IsMember(ctx context.Context, userID, sessionID string) (bool, error)
+}
+
+// SetMembers installs the membership check a user-level stream's deliveries need. Without one a
+// user-level stream receives nothing (fail closed).
+func (h *Hub) SetMembers(m Members) {
+	h.mu.Lock()
+	h.members = m
+	h.mu.Unlock()
 }
 
 // SetPreferences installs the preference store consulted before an addressed event is delivered.
@@ -54,7 +68,7 @@ func (h *Hub) notifyLocal(ctx context.Context, n data.Notice) {
 	ev := noticeEvent(n, newEventID())
 	subs := h.snapshot(n.EncounterID)
 	h.mu.RLock()
-	prefs := h.prefs
+	prefs, members := h.prefs, h.members
 	h.mu.RUnlock()
 	done := map[string]bool{}
 	for _, u := range n.Users {
@@ -65,13 +79,44 @@ func (h *Hub) notifyLocal(ctx context.Context, n data.Notice) {
 		if h.muted(ctx, prefs, u, n) {
 			continue
 		}
+		member := h.memberOnce(ctx, members, u, n.SessionID)
 		for _, s := range subs {
-			if v := s.viewer.Load(); v != nil && v.Actor() == u && v.SessionID() == n.SessionID && s.send(ev) {
+			if s.addressedTo(u, n.SessionID, member) && s.send(ev) {
 				s.overflowed.Store(true)
 				h.dropped.Add(1)
 				s.Close()
 			}
 		}
+	}
+}
+
+// addressedTo reports whether s may receive a notice for user u in session: a session stream of
+// u's in that session, or u's user-level stream when u is still a member (member is lazy).
+func (s *Subscription) addressedTo(u, session string, member func() bool) bool {
+	if s.userLevel {
+		return s.actor == u && member()
+	}
+	v := s.viewer.Load()
+	return v != nil && v.Actor() == u && v.SessionID() == session
+}
+
+// memberOnce returns a check of u's membership in session, read at most once per notice and only
+// if a user-level stream needs it. A failed read counts as not a member.
+func (h *Hub) memberOnce(ctx context.Context, m Members, u, session string) func() bool {
+	var once sync.Once
+	var ok bool
+	return func() bool {
+		once.Do(func() {
+			if m == nil {
+				return
+			}
+			var err error
+			if ok, err = m.IsMember(ctx, u, session); err != nil {
+				ok = false
+				slog.WarnContext(ctx, "checking membership for a user-level notice failed; not delivering", "user", u, "error", err)
+			}
+		})
+		return ok
 	}
 }
 
