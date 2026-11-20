@@ -80,5 +80,11 @@ func (p *Publisher) Publish(ctx context.Context, e stream.Event) error {
 	return nil
 }
 
-// Close drops the connection.
-func (p *Publisher) Close() { p.conn.Close() }
+// Close flushes what the client still has buffered and closes the connection. Call it after the
+// hub's queue has stopped (Hub.Close), so events the queue already handed over are not lost on a
+// deploy. A broker that is down makes Drain give up; the events are then dropped, as in any outage.
+func (p *Publisher) Close() {
+	if err := p.conn.Drain(); err != nil {
+		p.conn.Close()
+	}
+}

@@ -44,6 +44,24 @@ func TestPublishSendsTheEnvelopeOnTheEntitySubjectWithTheEventIDAsDedupeKey(t *t
 	}
 }
 
+func TestAnObserverEventCarriesViewTagAndNoRevision(t *testing.T) {
+	f := &fakeJS{}
+	e := stream.Event{EventID: "e-2", EntityType: "encounter", Action: "updated", ViewTag: "tag-9", Revision: 0}
+	if err := (&Publisher{js: f}).Publish(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(f.got.Data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back["view_tag"] != "tag-9" {
+		t.Errorf("view_tag = %v, want tag-9", back["view_tag"])
+	}
+	if _, has := back["revision"]; has {
+		t.Errorf("revision present in %s; observer events must not carry it", f.got.Data)
+	}
+}
+
 func TestPublishReturnsTheBrokerError(t *testing.T) {
 	f := &fakeJS{err: errors.New("nats: timeout")}
 	if err := (&Publisher{js: f}).Publish(context.Background(), stream.Event{EntityType: "encounter", Action: "updated"}); err == nil {
