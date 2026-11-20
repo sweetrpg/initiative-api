@@ -38,7 +38,9 @@ func TestTheOptionsAreUsedWhenThereIsNoURI(t *testing.T) {
 	t.Setenv("DB_OPTS", "w=majority")
 	if v, ok := os.LookupEnv("DB_URI"); ok {
 		t.Setenv("DB_URI", v) // restored after the test
-		os.Unsetenv("DB_URI")
+		if err := os.Unsetenv("DB_URI"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ApplyDriverTimeouts()
 	if got := os.Getenv("DB_OPTS"); !strings.Contains(got, "w=majority") || !strings.Contains(got, "connectTimeoutMS=5000") {
