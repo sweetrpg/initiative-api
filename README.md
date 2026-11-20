@@ -43,7 +43,7 @@ Invalid values stop the process at startup with every problem listed.
 ## Endpoints
 
 - `GET /status/ping`: shallow liveness and readiness probe.
-- `GET /status/health`: dependency check (no dependencies yet).
+- `GET /status/health`: deep dependency check (database); 503 while one is down. Not used by the probes (PADR-0017).
 - `GET /themes`, `GET /themes/packaged`, `GET /themes/{id}`, `POST /themes`,
   `PATCH /themes/{id}` (body carries `revision`), `DELETE /themes/{id}?revision=N`. Custom themes
   take the lowest free slot below `initiative.theme_slots`; packaged themes (`pkg-` IDs) are

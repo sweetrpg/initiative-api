@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -22,8 +23,9 @@ func ping(c *gin.Context) {
 	c.JSON(http.StatusOK, apicores.PingHandler())
 }
 
-// Readiness is the deep dependency check behind /status/health, which the readiness probe calls.
-// Each check runs under a timeout, and the answer is cached for ttl, so probes from every kubelet
+// Readiness is the deep dependency check behind /status/health. PADR-0017 keeps it off the
+// readiness and liveness probes (both use /status/ping): it is for operators and dashboards and
+// must not gate routing or restarts. Each check runs under a timeout, and the answer is cached for ttl, so probes from every kubelet
 // and load balancer cost the dependency one call per ttl, not one each.
 type Readiness struct {
 	checks  []Check
@@ -62,10 +64,14 @@ func (r *Readiness) Problems(ctx context.Context) []string {
 		return r.messages
 	}
 	msgs := []string{}
+	// The answer is cached for every caller, so a probe that hangs up must not cancel the check
+	// and leave a false "unavailable" for the next ttl.
+	base := context.WithoutCancel(ctx)
 	for _, ch := range r.checks {
-		cctx, cancel := context.WithTimeout(ctx, r.timeout)
+		cctx, cancel := context.WithTimeout(base, r.timeout)
 		if err := ch.Fn(cctx); err != nil {
-			msgs = append(msgs, ch.Name+": "+err.Error())
+			slog.ErrorContext(ctx, "health check failed", "check", ch.Name, "error", err)
+			msgs = append(msgs, ch.Name+": unavailable") // the detail stays in the log, not the response
 		}
 		cancel()
 	}
@@ -73,9 +79,8 @@ func (r *Readiness) Problems(ctx context.Context) []string {
 	return msgs
 }
 
-// Health is the deep dependency check, for the readiness probe. It answers 503 while a dependency
-// is down, which takes the pod out of the Service's endpoints without restarting it (liveness is
-// /status/ping, which never looks at a dependency).
+// Health is the deep dependency check. It answers 503 while a dependency is down. Probes use
+// /status/ping (PADR-0017), so this never removes a pod from the Service or restarts it.
 //
 //	@Summary	Health check
 //	@Tags		status

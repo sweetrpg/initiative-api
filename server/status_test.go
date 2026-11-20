@@ -36,8 +36,11 @@ func TestHealthIs503WhileADependencyIsDownAndPingStaysUp(t *testing.T) {
 	down.Store(true)
 	now.Add(int64(6 * time.Second)) // past the cache
 	w := get("/status/health")
-	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "database") {
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "database: unavailable") {
 		t.Errorf("database down = %d %s, want 503 naming it", w.Code, w.Body)
+	}
+	if strings.Contains(w.Body.String(), "server selection") {
+		t.Errorf("the response leaks the driver error: %s", w.Body)
 	}
 	if p := get("/status/ping"); p.Code != http.StatusOK {
 		t.Errorf("ping = %d, want liveness untouched by a dependency", p.Code)
@@ -69,6 +72,15 @@ func TestReadinessChecksOncePerTTLAndTimesTheCheckOut(t *testing.T) {
 	ready.Problems(context.Background())
 	if calls.Load() != 2 {
 		t.Errorf("%d checks after the ttl, want 2", calls.Load())
+	}
+}
+
+func TestACancelledProbeDoesNotPoisonTheCachedAnswer(t *testing.T) {
+	ready := NewReadiness(time.Minute, time.Second, Check{Name: "database", Fn: func(ctx context.Context) error { return ctx.Err() }})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if p := ready.Problems(ctx); len(p) != 0 {
+		t.Errorf("a hung-up probe cached %v", p)
 	}
 }
 
