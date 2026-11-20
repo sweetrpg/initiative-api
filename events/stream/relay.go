@@ -24,16 +24,6 @@ const FanoutCollection = "stream_fanout"
 // startup fails until the index is dropped.
 const FanoutTTL = 60 * time.Second
 
-// MaxStreamAge and GuardInterval are the values the stream transport (5.2 part 2) enforces; they
-// live here so the relay's documentation can state the bounds. They are the bounds on revocation when a relayed eviction is lost: a
-// connection ends at MaxStreamAge whatever happens, and its guard re-checks membership every
-// GuardInterval. The transport that enforces both is 5.2 part 2 (the stream endpoint, branch
-// feature/stream-tickets); until it merges, only the relay's own retries and tail-gap eviction apply.
-const (
-	MaxStreamAge  = time.Hour
-	GuardInterval = 30 * time.Second
-)
-
 // FanoutIndexes is the TTL index of the fan-out collection.
 var FanoutIndexes = []store.IndexSpec{{Name: "at_ttl", Keys: bson.D{{Key: "at", Value: 1}}, ExpireAfter: FanoutTTL}}
 
@@ -73,8 +63,8 @@ type fanoutDoc struct {
 // and be authorized again. A change row dropped because this pod's remote queue is full ends that
 // change's audience here for the same reason. Rows lost on the writing side (a full change queue,
 // or an insert that failed through its window) cannot be recovered by the other pods, which learn
-// of the gap only from clients refetching. The final bound for anything lost beyond that is MaxStreamAge, with
-// membership re-checked every GuardInterval.
+// of the gap only from clients refetching. The final bound for anything lost beyond that is each stream's membership re-check
+// (server.StreamOptions.RevocationBound, 7s by default), and the stream's maximum age behind it.
 type Relay struct {
 	h   *Hub
 	col store.Collection

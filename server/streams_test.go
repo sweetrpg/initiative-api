@@ -64,7 +64,13 @@ func newStreamTable(t *testing.T, opts StreamOptions, ticketTTL time.Duration) s
 		st.hub, st.streams, st.svc = hub, svc.Streams, svc
 	}
 	t.Cleanup(func() { routerHook = nil })
-	st.r, st.db, st.sid = viewTableRel(t, "3", func(d *fake.DB) store.Database { captured = d; return d }, func(w http.ResponseWriter, r *http.Request) {
+	st.r, st.db, st.sid = viewTableRel(t, "3", func(d *fake.DB) store.Database {
+		captured = d
+		if streamDBWrap != nil {
+			return streamDBWrap(d)
+		}
+		return d
+	}, func(w http.ResponseWriter, r *http.Request) {
 		if st.down.Load() {
 			st.relHits.Add(1)
 			w.WriteHeader(http.StatusServiceUnavailable)

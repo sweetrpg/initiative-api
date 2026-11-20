@@ -30,7 +30,8 @@ const (
 	CloseSlowConsumer      websocket.StatusCode = 4003 // the client fell behind; reconnect and refetch
 	CloseMaxAge            websocket.StatusCode = 4004 // the connection reached its maximum age
 	maxGuardErrors                              = 3
-	checkTimeout                                = 5 * time.Second
+	maxRecheckFailures                          = 3 // failed membership re-checks in a row that end a stream
+	checkTimeout                                = 2 * time.Second
 	readLimit                                   = 1024
 	streamBuffer                                = 64 // events buffered per connection
 	writeTimeout                                = 10 * time.Second
@@ -49,6 +50,9 @@ type StreamOptions struct {
 	// MaxAge ends a stream after this long (default 1h); Heartbeat is the interval of the
 	// application heartbeat, the protocol ping, and the membership re-check (default 20s).
 	MaxAge, Heartbeat time.Duration
+	// RecheckInterval is how often a stream re-reads its membership and credential (default 5s,
+	// never above Heartbeat).
+	RecheckInterval time.Duration
 	// Buffer is how many events a stream may fall behind before it is closed (default 64).
 	Buffer int
 	// beforeWrite, when set by a test, runs before each event is written.
@@ -85,6 +89,25 @@ func (o StreamOptions) maxAge() time.Duration {
 		return o.MaxAge
 	}
 	return constants.DefaultStreamMaxAge
+}
+
+func (o StreamOptions) recheck() time.Duration {
+	d := o.RecheckInterval
+	if d <= 0 {
+		d = constants.DefaultStreamRecheckInterval
+	}
+	return min(d, o.heartbeat())
+}
+
+// RevocationBound is the longest a stream stays open after its member is removed, demoted or
+// blocked, when the eviction itself is lost (the evictor or the relay is down): one re-check
+// interval to the next re-check, plus the time that check may take.
+func (o StreamOptions) RevocationBound() time.Duration { return o.recheck() + checkTimeout }
+
+// FaultBound is the same when the store cannot answer the re-checks: the stream closes at the
+// third consecutive failed one, so each of three intervals may also spend a full check timeout.
+func (o StreamOptions) FaultBound() time.Duration {
+	return maxRecheckFailures * (o.recheck() + checkTimeout)
 }
 
 func (o StreamOptions) heartbeat() time.Duration {
@@ -507,7 +530,8 @@ type connection struct {
 	v    data.Viewer
 	a    serveArgs
 
-	renewFailing bool
+	renewFailing    bool
+	recheckFailures int
 }
 
 func (cl *connection) write(ctx context.Context, v any) error {
@@ -553,6 +577,8 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 	ctx = cl.conn.CloseRead(ctx)
 	tick := time.NewTicker(cl.h.opts.heartbeat())
 	defer tick.Stop()
+	recheck := time.NewTicker(cl.h.opts.recheck())
+	defer recheck.Stop()
 	maxAge := time.NewTimer(cl.h.opts.maxAge())
 	defer maxAge.Stop()
 	pings := make(chan struct{}, 1)
@@ -579,12 +605,12 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 			if cl.write(ctx, ev) != nil {
 				return true
 			}
-		case <-tick.C:
-			// Check first, so a revoked connection gets no further frame.
+		case <-recheck.C:
 			if code, why := cl.check(ctx); code != 0 {
 				_ = cl.conn.Close(code, why)
 				return false
 			}
+		case <-tick.C:
 			if cl.write(ctx, gin.H{"type": "heartbeat"}) != nil {
 				return true
 			}
@@ -621,9 +647,11 @@ func (cl *connection) renew(ctx context.Context) {
 	}
 }
 
-// check re-reads what the stream was authorized on. A failed membership read keeps the stream (the
-// next check retries; the maximum age bounds a persistent failure). A credential's failed reads
-// close it after maxGuardErrors in a row.
+// check re-reads what the stream was authorized on, every recheck interval. Failed reads fail
+// closed after three in a row, for membership and for a credential alike: a store that cannot say
+// whether the member is still allowed does not keep the stream open for the maximum age. Each
+// failed membership read is logged with the running count. The stream closes with
+// CloseMembershipChanged, and the client's reconnect is refused while the store is down.
 func (cl *connection) check(ctx context.Context) (websocket.StatusCode, string) {
 	ctx, cancel := context.WithTimeout(ctx, checkTimeout) // a hung store must not stall delivery
 	defer cancel()
@@ -632,8 +660,18 @@ func (cl *connection) check(ctx context.Context) (websocket.StatusCode, string) 
 			return CloseCredentialRevoked, "credential revoked"
 		}
 	}
-	if errors.Is(cl.h.svc.Streams.Recheck(ctx, cl.v), domain.ErrAccessChanged) {
+	err := cl.h.svc.Streams.Recheck(ctx, cl.v)
+	switch {
+	case errors.Is(err, domain.ErrAccessChanged):
 		return CloseMembershipChanged, "membership changed"
+	case errors.Is(err, domain.ErrRecheckFailed):
+		cl.recheckFailures++
+		slog.WarnContext(ctx, "re-checking a stream's membership failed", "failures", cl.recheckFailures, "of", maxRecheckFailures, "error", err)
+		if cl.recheckFailures >= maxRecheckFailures {
+			return CloseMembershipChanged, "membership could not be verified"
+		}
+	default:
+		cl.recheckFailures = 0
 	}
 	return 0, ""
 }

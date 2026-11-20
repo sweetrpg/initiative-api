@@ -52,6 +52,9 @@ type Config struct {
 	// after that long, so a revoked credential or a missed eviction cannot outlive it;
 	// StreamHeartbeat is the interval of the server's heartbeat frames.
 	StreamTicketTTL, StreamMaxAge, StreamHeartbeat time.Duration
+	// StreamRecheckInterval is how often an open stream re-checks membership and credentials; it
+	// never exceeds StreamHeartbeat.
+	StreamRecheckInterval time.Duration
 	// RequestTimeout bounds every request except the event stream's upgrade.
 	RequestTimeout time.Duration
 	// StreamConcurrentMax is the most event streams one user may hold open across all pods and
@@ -115,9 +118,10 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		{constants.REQUEST_TIMEOUT, &c.RequestTimeout, constants.DefaultRequestTimeout, time.Second, time.Minute},
 		{constants.STREAM_TICKET_TTL, &c.StreamTicketTTL, constants.DefaultStreamTicketTTL, time.Second, constants.MaxStreamTicketTTL},
 		{constants.STREAM_MAX_AGE, &c.StreamMaxAge, constants.DefaultStreamMaxAge, time.Minute, 24 * time.Hour},
-		// The heartbeat is also how often a stream re-checks membership and credentials, so it
-		// bounds how long a revocation can go unseen.
 		{constants.STREAM_HEARTBEAT, &c.StreamHeartbeat, constants.DefaultStreamHeartbeat, time.Second, time.Minute},
+		// How often a stream re-checks membership and credentials: with the check timeout it bounds
+		// how long a revocation can go unseen (see server.StreamOptions.RevocationBound).
+		{constants.STREAM_RECHECK_INTERVAL, &c.StreamRecheckInterval, constants.DefaultStreamRecheckInterval, time.Second, time.Minute},
 	} {
 		v := get(d.key, d.def.String())
 		if n, err := time.ParseDuration(v); err != nil || n < d.min || n > d.max {
@@ -126,6 +130,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 			*d.dst = n
 		}
 	}
+	c.StreamRecheckInterval = min(c.StreamRecheckInterval, c.StreamHeartbeat) // a re-check slower than the heartbeat would not be the bound
 	for _, d := range []struct {
 		key      string
 		dst      *int
