@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,7 +31,7 @@ func Middleware(accessLog *slog.Logger, requestTimeout time.Duration) []gin.Hand
 // 503 timeout.
 func RequestDeadline(d time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if d <= 0 || (c.Request.Method == http.MethodGet && c.Request.URL.Path == "/streams") {
+		if d <= 0 || isStreamUpgrade(c.Request) {
 			c.Next()
 			return
 		}

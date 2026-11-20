@@ -85,6 +85,10 @@ Invalid values stop the process at startup with every problem listed.
   `DELETE /sessions/{id}/invites/{invite}` revokes. Joining: `POST /sessions/join {code}` makes a
   pending request that grants nothing; `GET /sessions/{id}/requests`, `POST .../requests/{id}/approve
   {role}` or `/reject {reason}`. Blocks: `GET|POST /sessions/{id}/blocks`, `DELETE .../blocks/{user}`.
+  Notifications: `turn.yours`, `turn.next` and the change-request events (`change_request.submitted`
+  to the GM and co-GMs, `.approved` / `.rejected` to the submitter) are delivered only to the
+  addressee's open streams of that session. `GET|PUT /sessions/{id}/notification-preferences
+  {"muted": [...]}` mutes types per member; state events are unaffected.
   Roles are `gm` (the creator, exactly one), `co_gm`, `player`, `observer`; `domain.Allowed` is the
   one role table. Membership collections are the source of truth for who holds a role. Membership,
   invite, request and block records and the session are all soft-deleted (`deleted_at`, `deleted_by`;

@@ -123,6 +123,11 @@ func main() {
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	sessions.MaxMembers = cfg.SessionMembersMax
 	streams := domain.NewStreams(db, sessions, encounters)
+	prefs := domain.NewNotificationPrefs(db, sessions)
+	changeRequests := domain.NewChangeRequests(db, encounters, sessions)
+	changeRequests.Notifier = hub
+	hub.SetPreferences(prefs)
+	hub.SetManagers(sessions)
 	streams.TTL = cfg.StreamTicketTTL
 	ready := server.NewReadiness(5*time.Second, 2*time.Second, server.Check{Name: "database", Fn: func(ctx context.Context) error { return database.Db.Client().Ping(ctx, nil) }})
 	svc := server.Services{
@@ -135,20 +140,21 @@ func main() {
 			domain.Kind{Name: "sessions", Key: domain.KeySessionsPerGM, Repo: sessions.Items()},
 			domain.Kind{Name: "credentials", Key: domain.KeyIntegrationCredentials, Repo: creds.Items()},
 		),
-		Authz:          authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
-		Entitlements:   entitlements.New(cfg.EntitlementsAPIURL),
-		OwnerLimits:    data.NewOwnerEntitlements(db, cfg.OwnerEntitlementsMaxAge),
-		Themes:         themes,
-		Systems:        data.NewSystemRepo(db),
-		Credentials:    creds,
-		Rosters:        rosters,
-		Encounters:     encounters,
-		Sessions:       sessions,
-		ChangeRequests: domain.NewChangeRequests(db, encounters, sessions),
-		Relations:      relations.New(cfg.AuthAPIURL),
-		Hub:            hub,
-		Streams:        streams,
-		Leases:         data.NewStreamLeases(db),
+		Authz:             authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
+		Entitlements:      entitlements.New(cfg.EntitlementsAPIURL),
+		OwnerLimits:       data.NewOwnerEntitlements(db, cfg.OwnerEntitlementsMaxAge),
+		Themes:            themes,
+		Systems:           data.NewSystemRepo(db),
+		Credentials:       creds,
+		Rosters:           rosters,
+		Encounters:        encounters,
+		Sessions:          sessions,
+		ChangeRequests:    changeRequests,
+		NotificationPrefs: prefs,
+		Relations:         relations.New(cfg.AuthAPIURL),
+		Hub:               hub,
+		Streams:           streams,
+		Leases:            data.NewStreamLeases(db),
 		Stream: server.StreamOptions{
 			AllowedOrigins: cfg.StreamAllowedOrigins, MaxAge: cfg.StreamMaxAge, Heartbeat: cfg.StreamHeartbeat,
 			ConcurrentMax: cfg.StreamConcurrentMax, CredentialMax: cfg.StreamCredentialMax, MaxPerPod: cfg.StreamMaxPerPod, LeaseTTL: cfg.StreamLeaseTTL, Grace: cfg.StreamGrace, Pod: pod,

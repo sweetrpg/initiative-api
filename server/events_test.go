@@ -148,7 +148,7 @@ func TestNoEventAPlayerOrObserverCanReceiveCarriesAHiddenCombatant(t *testing.T)
 
 	for name, sub := range map[string]*stream.Subscription{"player": player, "observer": observer} {
 		evs := drain(sub)
-		if len(evs) != len(allEventTypes)*4 {
+		if len(withoutNotices(evs)) != len(allEventTypes)*4 { // addressed notices are checked for leaks below, not counted
 			t.Fatalf("%s received %d events, want one per change", name, len(evs))
 		}
 		for _, ev := range evs {
@@ -176,7 +176,7 @@ func TestAPlayerSeesTheVisibleIdsOfAChangeThatAlsoTouchedAHiddenOne(t *testing.T
 	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid", "orc"}, At: time.Now()})
 	hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", CombatantID: []string{"hid"}, At: time.Now()})
 	hub.Emit(context.Background(), data.Change{Type: data.EventTurn, After: e.encounter(t), SessionID: e.sid, OwnerID: "u-1", At: time.Now()})
-	got := drain(player)
+	got := withoutNotices(drain(player))
 
 	if len(got) != 3 {
 		t.Fatalf("%d events", len(got))
