@@ -1,4 +1,26 @@
 
+## 0.10.0 - 2026-11-19
+
+### Added
+- Add Open/Grant subscriptions and cross-pod fan-out
+- Add stream tickets and the WebSocket endpoint
+- Cap concurrent event streams per user and per pod
+
+
+### Fixed
+- Keep the fan-out resume position and end streams after a gap
+- Drain evictions on stop and close pending subscriptions under the lock
+- Apply the review of the stream endpoint
+- Redact every ticket form and test the real middleware chain
+- Apply the review of stream seats and caps
+- Retry the database connection at startup
+- Peek the ticket first and take the seat after authorizing
+- Retry reads that fail to open a connection
+- Retry transient failures with backoffLimit 2
+- Request sweetrpg-dev-tls in the initiative namespace
+
+
+
 ## 0.9.0 - 2026-11-18
 
 ### Added
