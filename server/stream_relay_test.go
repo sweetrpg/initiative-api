@@ -477,3 +477,21 @@ func TestAnEvictionRowWithAUserAndNoSessionEndsThatUsersStreams(t *testing.T) {
 	}
 	waitFor(t, "the row's user to be evicted", func() bool { return isClosed(victim) })
 }
+
+func TestEvictingNobodyClosesNothingAndWritesNoRow(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a")
+	any := subscribe(pods[0].hub, e.viewer(t, "user-two"), encE1, 4)
+	userLevel := pods[0].hub.OpenUser("u-2", 4)
+	before := len(e.db.Fake(stream.FanoutCollection).Docs())
+
+	pods[0].hub.EvictUser("")
+	time.Sleep(100 * time.Millisecond) // a row would have been written by now
+
+	if any.Ended() || userLevel.Ended() {
+		t.Error("an empty user id closed someone's stream")
+	}
+	if got := len(e.db.Fake(stream.FanoutCollection).Docs()); got != before {
+		t.Errorf("an empty user id wrote %d fan-out rows, want none", got-before)
+	}
+}

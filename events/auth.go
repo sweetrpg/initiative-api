@@ -331,6 +331,11 @@ func (c *Consumer) Start(ctx context.Context, natsURL, durable string) error {
 }
 
 func (c *Consumer) start(ctx context.Context, natsURL, durable string) error {
+	if c.Evictor == nil {
+		// A deny would be acked with its streams still open. Wiring the evictor is the owner's job and
+		// must happen before the first event can be consumed, so a consumer without one never starts.
+		return errors.New("auth-event consumer has no evictor")
+	}
 	if durable == "" {
 		durable = defaultDurable
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -337,8 +338,20 @@ func TestAPermanentCloseOfTheConnectionPausesCredentialsAndSignalsDeadButNotAfte
 	}
 }
 
+func TestAConsumerWithoutAnEvictorNeverStartsSoNoDenyIsAckedUnapplied(t *testing.T) {
+	c := New(&rec{}, &memGate{})
+	err := c.Start(context.Background(), "nats://127.0.0.1:1", "")
+	if err == nil || !strings.Contains(err.Error(), "no evictor") {
+		t.Errorf("Start = %v, want it refused before it can connect or consume", err)
+	}
+	if c.conn != nil {
+		t.Error("a consumer with no evictor opened a connection")
+	}
+}
+
 func TestStartAgainstNoServerFailsAndLeavesNoConnection(t *testing.T) {
 	c := New(nil, &memGate{})
+	c.Evictor = &evicted{}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	if err := c.Start(ctx, "nats://127.0.0.1:1", ""); err == nil {

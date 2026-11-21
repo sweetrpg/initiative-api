@@ -78,24 +78,6 @@ func main() {
 		log.Fatalf("themes: %v", err)
 	}
 	creds := domain.NewCredentials(db)
-	// Credentials stay off (503) until the auth-event consumer is bound and caught up, so a deny
-	// published while the service was down is applied before any secret authenticates (PADR-0039).
-	// The consumer starts in the background, so the rest of the API does not wait on NATS; if NATS
-	// stays unreachable past CREDENTIAL_EVENTS_MAX_DISCONNECT the gate closes again.
-	evictor := &lateEvictor{} // the hub is built after the consumer starts; it is set below
-	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
-		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
-	} else {
-		var live atomic.Pointer[events.Consumer]
-		consumerCtx, stopConsumer := context.WithCancel(context.Background())
-		go runConsumer(consumerCtx, creds, evictor, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
-		defer func() {
-			stopConsumer() // first, so runConsumer does not rebuild what Stop closes
-			if c := live.Load(); c != nil {
-				c.Stop()
-			}
-		}()
-	}
 	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
 	// Fail-open: the hub publishes from its own queue and drops an event it cannot send.
@@ -108,7 +90,6 @@ func main() {
 		defer pub.Close() // deferred before hub.Close, so it runs after the queue that feeds it stops
 	}
 	hub := stream.New(encounters)
-	evictor.hub.Store(hub)
 	defer hub.Close()
 	if pub != nil {
 		hub.AttachBus(pub, 1024)
@@ -121,6 +102,25 @@ func main() {
 	relay := hub.AttachRelay(fanout, pod, 1024)
 	relay.Run(context.Background())
 	defer relay.Stop()
+	// Credentials stay off (503) until the auth-event consumer is bound and caught up, so a deny
+	// published while the service was down is applied before any secret authenticates (PADR-0039).
+	// The consumer starts after the hub, the bus and the relay exist, so an event it applies first (a
+	// deny) already finds the hub to evict from and nothing is acked into a void. It starts in the
+	// background, so the rest of the API does not wait on NATS; if NATS
+	// stays unreachable past CREDENTIAL_EVENTS_MAX_DISCONNECT the gate closes again.
+	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
+		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
+	} else {
+		var live atomic.Pointer[events.Consumer]
+		consumerCtx, stopConsumer := context.WithCancel(context.Background())
+		go runConsumer(consumerCtx, creds, hub, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
+		defer func() {
+			stopConsumer() // first, so runConsumer does not rebuild what Stop closes
+			if c := live.Load(); c != nil {
+				c.Stop()
+			}
+		}()
+	}
 	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	sessions.MaxMembers = cfg.SessionMembersMax
@@ -211,16 +211,6 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 
 	server.SetupHandlers(r, svc)
 	return r
-}
-
-// lateEvictor hands a denied user to the hub once it exists. An event that arrives before then finds
-// no open stream to close.
-type lateEvictor struct{ hub atomic.Pointer[stream.Hub] }
-
-func (l *lateEvictor) EvictUser(userID string) {
-	if h := l.hub.Load(); h != nil {
-		h.EvictUser(userID)
-	}
 }
 
 // Pacing for runConsumer: the wait between attempts, and how long a consumer must live before a

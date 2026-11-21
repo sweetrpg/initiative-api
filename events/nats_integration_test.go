@@ -54,6 +54,7 @@ func TestNATSConsumerRevokesAndOpens(t *testing.T) {
 	}
 	rev, gate := chanRevoker{make(chan [2]string, 4)}, fakeGate{make(chan struct{})}
 	c := New(rev, gate)
+	c.Evictor = &evicted{}
 	c.Stream, c.Filter = stream, prefix+".>"
 	if err := c.Start(ctx, url, fmt.Sprintf("test-%d", id)); err != nil {
 		t.Fatal(err)
