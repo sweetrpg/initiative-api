@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/sweetrpg/initiative-api/constants"
 	"time"
 
@@ -134,13 +135,17 @@ func (s *Streams) BearerView(ctx context.Context, actor, sessionID, encounterID 
 	return v, err
 }
 
+// ErrRecheckFailed means a stream's membership could not be read; the stream's owner counts these
+// and closes it after three in a row.
+var ErrRecheckFailed = errors.New("stream membership re-check failed")
+
 // ErrAccessChanged means a stream's viewer no longer matches the member's live record.
 var ErrAccessChanged = errors.New("stream access changed")
 
 // Recheck re-reads the live member record behind an open stream. It returns ErrAccessChanged when
 // the member is gone, the session is deleted, or their level is no longer the one the stream was
-// granted at (it must reconnect to be authorized again). A failed read returns nil: the check runs
-// again on the next heartbeat, and the connection's maximum age bounds a persistent failure.
+// granted at (it must reconnect to be authorized again). A failed read returns ErrRecheckFailed; the
+// stream's owner closes it after three in a row.
 func (s *Streams) Recheck(ctx context.Context, v data.Viewer) error {
 	if v.SessionID() == "" {
 		return nil
@@ -150,7 +155,7 @@ func (s *Streams) Recheck(ctx context.Context, v data.Viewer) error {
 	case errors.Is(err, data.ErrNotMember):
 		return ErrAccessChanged
 	case err != nil:
-		return nil
+		return fmt.Errorf("%w: %v", ErrRecheckFailed, err)
 	case now.Level() != v.Level():
 		return ErrAccessChanged
 	}

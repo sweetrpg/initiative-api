@@ -123,3 +123,17 @@ func TestLoadSessionMembersMax(t *testing.T) {
 		t.Fatalf("set = %d, %v; want 8", c.SessionMembersMax, err)
 	}
 }
+
+func TestLoadStreamRecheckInterval(t *testing.T) {
+	c, err := Load(lookupFrom(withAuth(nil)))
+	if err != nil || c.StreamRecheckInterval != 5*time.Second {
+		t.Fatalf("default = %v, %v; want 5s", c.StreamRecheckInterval, err)
+	}
+	c, err = Load(lookupFrom(withAuth(map[string]string{"STREAM_RECHECK_INTERVAL": "45s", "STREAM_HEARTBEAT": "10s", "STREAM_LEASE_TTL": "30s"})))
+	if err != nil || c.StreamRecheckInterval != 10*time.Second {
+		t.Fatalf("above the heartbeat = %v, %v; want it clamped to 10s", c.StreamRecheckInterval, err)
+	}
+	if _, err := Load(lookupFrom(withAuth(map[string]string{"STREAM_RECHECK_INTERVAL": "100ms"}))); err == nil || !strings.Contains(err.Error(), "STREAM_RECHECK_INTERVAL") {
+		t.Fatalf("100ms = %v, want a range error", err)
+	}
+}

@@ -18,6 +18,7 @@ const (
 	STREAM_TICKET_TTL                = "STREAM_TICKET_TTL"
 	STREAM_MAX_AGE                   = "STREAM_MAX_AGE"
 	STREAM_HEARTBEAT                 = "STREAM_HEARTBEAT"
+	STREAM_RECHECK_INTERVAL          = "STREAM_RECHECK_INTERVAL"
 	CREDENTIAL_EVENTS_MAX_DISCONNECT = "CREDENTIAL_EVENTS_MAX_DISCONNECT"
 	STREAM_CONCURRENT_MAX            = "STREAM_CONCURRENT_MAX"
 	STREAM_MAX_PER_POD               = "STREAM_MAX_PER_POD"
@@ -44,7 +45,10 @@ const (
 	MaxStreamTicketTTL     = 2 * time.Minute
 	DefaultStreamMaxAge    = time.Hour
 	DefaultStreamHeartbeat = 20 * time.Second
-	DefaultRequestTimeout  = 10 * time.Second
-	DefaultStreamLeaseTTL  = time.Minute
-	DefaultStreamGrace     = 30 * time.Second
+	// DefaultStreamRecheckInterval is how often an open stream re-reads its membership (and
+	// credential); with the check timeout it is the revocation bound.
+	DefaultStreamRecheckInterval = 5 * time.Second
+	DefaultRequestTimeout        = 10 * time.Second
+	DefaultStreamLeaseTTL        = time.Minute
+	DefaultStreamGrace           = 30 * time.Second
 )
