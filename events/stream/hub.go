@@ -255,6 +255,35 @@ func (h *Hub) Evict(sessionID, userID string) {
 	}
 }
 
+// EvictUser closes every subscription of userID, pending or live, in any session, user-level or on
+// private encounters, here and on the other pods. Platform-wide access was revoked (a deny or a
+// removed role in auth-api), not one session's, so nothing the user holds may stay open; the client
+// reconnects and is authorized again, which auth-api refuses while the denial stands. It is not
+// remembered: a user who is granted access again simply reconnects.
+func (h *Hub) EvictUser(userID string) {
+	if userID == "" {
+		return // would match nobody here and, in a fan-out row, be mistaken for everybody
+	}
+	h.evictUserLocal(userID)
+	if r := h.relay(); r != nil {
+		r.publishEvict("", userID)
+	}
+}
+
+func (h *Hub) evictUserLocal(userID string) {
+	h.mu.RLock()
+	var gone []*Subscription
+	for s := range h.sub {
+		if s.actor == userID {
+			gone = append(gone, s)
+		}
+	}
+	h.mu.RUnlock()
+	for _, s := range gone {
+		s.Close()
+	}
+}
+
 func (h *Hub) evictLocal(sessionID, userID string) {
 	if sessionID == "" {
 		return // an empty session would match every private subscription
@@ -278,7 +307,7 @@ func (h *Hub) evictAudience(c data.Change) {
 	h.mu.RLock()
 	var gone []*Subscription
 	for s := range h.sub {
-		if (c.SessionID != "" && s.session == c.SessionID) || (c.SessionID == "" && s.session == "" && s.actor == c.OwnerID) {
+		if (c.SessionID != "" && s.session == c.SessionID) || (c.SessionID == "" && s.session == "" && !s.userLevel && s.actor == c.OwnerID) {
 			gone = append(gone, s)
 		}
 	}
