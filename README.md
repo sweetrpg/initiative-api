@@ -93,6 +93,7 @@ Invalid values stop the process at startup with every problem listed.
   to the GM and co-GMs, `.approved` / `.rejected` to the submitter) are delivered only to the
   addressee's open streams of that session. `GET|PUT /sessions/{id}/notification-preferences
   {"muted": [...]}` mutes types per member; state events are unaffected.
+  Connect limit: a non-GM connection to a session stream (the GM is exempt) takes a seat in a per-session bucket, counted across pods in the lease collection and capped at the session's member limit (the owner's recorded `initiative.members_per_session`, clamped to `SESSION_MEMBERS_MAX`, the same number as the roster). A connect over it is refused with 403 `entitlement_limit_reached` (key and limit in the body) and the roster is untouched; a second device of the same member counts as another connection. Seats lapse after `STREAM_LEASE_TTL` unless renewed (a crashed pod's connections stop counting), and a dropped client that reconnects with the same `client_id` within `STREAM_GRACE` takes its seat back even if others filled the session. Nothing ends a live connection because the limit fell.
   User-level stream: `POST /streams/tickets {"scope":"user"}` (no session or encounter), then
   `GET /streams?ticket=`, or `GET /streams?scope=user` with the bearer. It carries only the
   addressed events of every session the user still belongs to (checked per delivery), no encounter

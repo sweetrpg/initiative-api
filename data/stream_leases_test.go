@@ -193,3 +193,20 @@ func TestAnOverLimitSeatIsGivenBackEvenWhenTheRequestWasCancelled(t *testing.T) 
 		t.Error("a refused seat stayed behind after the client went away")
 	}
 }
+
+func TestASessionBucketCountsConnectionsOfEveryPodAndUser(t *testing.T) {
+	r, _, _ := newLeases(t)
+	ctx := context.Background()
+	seat := func(id, user, pod string) StreamLease {
+		return StreamLease{ID: id, Bucket: "session:5f00000000000000000000a1", UserID: user, SessionID: "5f00000000000000000000a1", Pod: pod}
+	}
+	if err := r.Acquire(ctx, seat("s1", "u-1", "pod-a"), time.Minute, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Acquire(ctx, seat("s2", "u-2", "pod-b"), time.Minute, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Acquire(ctx, seat("s3", "u-3", "pod-c"), time.Minute, 2); !errors.Is(err, ErrStreamLimit) {
+		t.Errorf("third connection from a third pod = %v, want ErrStreamLimit: the count spans pods and users", err)
+	}
+}

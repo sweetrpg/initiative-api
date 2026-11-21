@@ -114,6 +114,30 @@ func (r *Sessions) IsMember(ctx context.Context, userID, sessionID string) (bool
 	return true, nil
 }
 
+// SeatInfo returns the live session and userID's live member record in it, for the connect-time
+// limit: the same checks as TicketView without its level rule. Every refusal is ErrNotMember.
+func (r *Sessions) SeatInfo(ctx context.Context, userID, sessionID string) (Session, Member, error) {
+	id, ok := cleanID(sessionID)
+	if !ok || checkUserID(userID) != nil {
+		return Session{}, Member{}, ErrNotMember
+	}
+	var s Session
+	if err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "deleted_at", Value: nil}}, &s); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return Session{}, Member{}, ErrNotMember
+		}
+		return Session{}, Member{}, err
+	}
+	var m Member
+	if err := r.members.FindOne(ctx, sessionUser(id, userID), &m); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return Session{}, Member{}, ErrNotMember
+		}
+		return Session{}, Member{}, err
+	}
+	return s, m, nil
+}
+
 // TicketView returns the Viewer a redeemed ticket opens: the user's live member record decides, not
 // the ticket. OpenFGA was asked when the ticket was minted and is not asked again (a redeem carries
 // no bearer to ask with), so the live record is the check: the session must exist, the user must
