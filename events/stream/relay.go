@@ -330,8 +330,10 @@ func (r *Relay) handle(ctx context.Context, raw bson.Raw) {
 		return
 	}
 	switch {
+	case d.Kind == kindEvict && d.Session == "" && d.User != "":
+		r.h.evictUserLocal(d.User) // a platform-wide eviction: every stream of that user
 	case d.Kind == kindEvict && d.Session == "":
-		slog.WarnContext(ctx, "dropped a fan-out eviction with no session")
+		slog.WarnContext(ctx, "dropped a fan-out eviction with no session and no user")
 	case d.Kind == kindEvict:
 		r.h.evictLocal(d.Session, d.User)
 	case d.Kind == kindNotice && d.Notice != nil:
