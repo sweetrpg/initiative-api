@@ -1,4 +1,20 @@
 
+## 0.14.0 - 2026-11-21
+
+### Added
+- Bound revocation with a separate re-check interval and fail closed on a failing store
+- Close every stream of a denied or role-stripped user
+
+
+### Fixed
+- State the revocation bounds honestly and give each re-check read its own timeout
+- Run a due re-check before each event write and cover the slow-client cases
+- Count the drained notices deterministically and share one membership read
+- Close the notice worker's done channel under the lock
+- Start the auth consumer only after the hub exists and refuse one with no evictor
+
+
+
 ## 0.13.0 - 2026-11-20
 
 ### Added
