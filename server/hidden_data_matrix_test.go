@@ -36,7 +36,7 @@ const (
 var changeSecrets = []string{proposedValue, secretCondition, secretReason}
 
 // GM-only fields of a combatant or session, which no viewer below GM level reads.
-var gmFieldSecrets = []string{secretRef, secretSource, removedName, `"external_refs"`, `"source_character_id"`, `"health_visibility"`, `"allow_co_gm_create_encounter"`, `"removed":`}
+var gmFieldSecrets = []string{secretRef, secretSource, removedName, `"external_refs"`, `"source_character_id"`, `"health_visibility"`, `"allow_co_gm_create_encounter"`, `"removed":`, `"base_revision"`, `"applied_revision"`}
 
 // valueSecrets are the fixture values that no route may return to a player or observer, wherever the
 // route lives; the field names below are meaningful only in session and encounter bodies.
@@ -114,7 +114,7 @@ func arrangeMatrix(t *testing.T, db *fake.DB, sid string, controls bool) {
 	approved.ID, approved.Status, approved.AppliedRevision = "5f00000000000000000000c2", data.ChangeApproved, 4
 	rejected.ID, rejected.Status, rejected.Reason = "5f00000000000000000000c3", data.ChangeRejected, secretReason
 	own := secretRequest(sid, "u-2")
-	own.ID, own.Health, own.AddConditions = "5f00000000000000000000c4", map[string]int{"hp": 11}, nil
+	own.ID, own.Health, own.AddConditions, own.Status, own.AppliedRevision = "5f00000000000000000000c4", map[string]int{"hp": 11}, nil, data.ChangeApproved, 4
 	for _, r := range []data.ChangeRequest{others, approved, rejected, own} {
 		if err := db.Fake(data.CollectionChangeRequests).InsertOne(context.Background(), r); err != nil {
 			t.Fatal(err)
@@ -202,8 +202,11 @@ func TestAPlayerReadsOnlyTheirOwnChangeRequests(t *testing.T) {
 	if !strings.Contains(own, "5f00000000000000000000c4") || strings.Contains(own, "5f00000000000000000000c1") {
 		t.Errorf("a player's change requests = %s, want only their own", own)
 	}
-	if gm := callAs(st.r, "user-ok", "GET", path, "").Body.String(); !strings.Contains(gm, proposedValue) {
-		t.Errorf("the GM's change requests = %s, want the proposed values (the fixture is not vacuous)", gm)
+	if l := leaks(own, []string{`"base_revision"`, `"applied_revision"`}); len(l) > 0 {
+		t.Errorf("a player's own change requests carry %v, which are encounter revisions: %s", l, own)
+	}
+	if gm := callAs(st.r, "user-ok", "GET", path, "").Body.String(); !strings.Contains(gm, proposedValue) || !strings.Contains(gm, `"base_revision":3`) || !strings.Contains(gm, `"applied_revision":4`) {
+		t.Errorf("the GM's change requests = %s, want the proposed values and the revisions (the fixture is not vacuous)", gm)
 	}
 }
 
