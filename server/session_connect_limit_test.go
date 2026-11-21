@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -59,7 +58,7 @@ func TestAConnectAtTheSessionLimitIsRefusedWithTheTypedEntitlementError(t *testi
 	if code != http.StatusForbidden || body.Code != "entitlement_limit_reached" || body.Key != domain.KeyMembersPerSession || body.Limit == nil || *body.Limit != 2 {
 		t.Errorf("refusal = %d %+v, want 403 entitlement_limit_reached with the key and limit 2 (the entitled 20 clamped)", code, body)
 	}
-	if w := callAs(st.r, "user-ok", "GET", "/sessions/"+st.sid+"/members", ""); w.Code != http.StatusOK || !(strings.Contains(w.Body.String(), "u-2") && strings.Contains(w.Body.String(), "u-3")) {
+	if w := callAs(st.r, "user-ok", "GET", "/sessions/"+st.sid+"/members", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "u-2") || !strings.Contains(w.Body.String(), "u-3") {
 		t.Errorf("the roster changed: %d %s", w.Code, w.Body)
 	}
 }
@@ -125,11 +124,4 @@ func TestSeatsOfAPodThatCrashedStopCountingAfterTheLeaseTimeout(t *testing.T) {
 	st.advance(150 * time.Millisecond) // nothing renews the seats, as when their pod is gone
 
 	st.accepted(t, "user-two", "")
-}
-
-func ctxFor(t *testing.T, d time.Duration) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), d)
-	t.Cleanup(cancel)
-	return ctx
 }
