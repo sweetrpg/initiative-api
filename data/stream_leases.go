@@ -70,10 +70,13 @@ func (r *StreamLeases) SetClock(now func() time.Time) { r.now = now }
 func (r *StreamLeases) live(l StreamLease) bson.D {
 	f := bson.D{{Key: "bucket", Value: l.Bucket}, {Key: "until", Value: bson.D{{Key: "$gt", Value: r.now()}}}}
 	if l.ClientID != "" {
-		// A dropped seat of the same client is the one this stream takes over, not a second seat.
+		// A dropped seat of the same user and client is the one this stream takes over, not a second
+		// seat. The user matters: a session bucket is shared, so another member's client id must not
+		// hide this user's grace seat.
 		f = append(f, bson.E{Key: "$or", Value: bson.A{
 			bson.D{{Key: "dropped", Value: bson.D{{Key: "$ne", Value: true}}}},
 			bson.D{{Key: "client_id", Value: bson.D{{Key: "$ne", Value: l.ClientID}}}},
+			bson.D{{Key: "user_id", Value: bson.D{{Key: "$ne", Value: l.UserID}}}},
 		}})
 	}
 	return f
@@ -121,13 +124,13 @@ func (r *StreamLeases) Acquire(ctx context.Context, l StreamLease, ttl time.Dura
 	return nil
 }
 
-// takeOver removes every dropped seat of l's client other than l, however many two streams that
+// takeOver removes every dropped seat of l's user and client other than l, however many two streams that
 // shared a client id left behind.
 func (r *StreamLeases) takeOver(ctx context.Context, l StreamLease) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	for range 8 {
-		err := r.c.DeleteOne(ctx, bson.D{{Key: "bucket", Value: l.Bucket}, {Key: "client_id", Value: l.ClientID}, {Key: "dropped", Value: true}, {Key: "_id", Value: bson.D{{Key: "$ne", Value: l.ID}}}})
+		err := r.c.DeleteOne(ctx, bson.D{{Key: "bucket", Value: l.Bucket}, {Key: "client_id", Value: l.ClientID}, {Key: "user_id", Value: l.UserID}, {Key: "dropped", Value: true}, {Key: "_id", Value: bson.D{{Key: "$ne", Value: l.ID}}}})
 		if err != nil {
 			return // none left, or the store failed: the stale seat lapses on its own
 		}

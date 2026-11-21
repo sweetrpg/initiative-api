@@ -210,3 +210,59 @@ func TestASessionBucketCountsConnectionsOfEveryPodAndUser(t *testing.T) {
 		t.Errorf("third connection from a third pod = %v, want ErrStreamLimit: the count spans pods and users", err)
 	}
 }
+
+func sessionSeats(t *testing.T, col *fake.Collection, extra ...bson.E) int64 {
+	t.Helper()
+	n, err := col.CountDocuments(context.Background(), append(bson.D{{Key: "bucket", Value: "session:s1"}}, extra...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func sessionLease(id, user, client string) StreamLease {
+	l := lease(id, user, client)
+	l.Bucket = "session:s1"
+	return l
+}
+
+func TestAnotherMembersClientIDDoesNotTakeOverAGraceSeat(t *testing.T) {
+	r, col, _ := newLeases(t)
+	ctx := context.Background()
+	a := sessionLease("a1", "u-1", "web")
+	if err := r.Acquire(ctx, a, time.Minute, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Release(ctx, a, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Acquire(ctx, sessionLease("b1", "u-2", "web"), time.Minute, 2); err != nil {
+		t.Fatal(err)
+	}
+	if n := sessionSeats(t, col, bson.E{Key: "_id", Value: "a1"}, bson.E{Key: "dropped", Value: true}); n != 1 {
+		t.Errorf("u-1's grace seat survives u-2 using the same client id: %d rows, want 1", n)
+	}
+	if err := r.Acquire(ctx, sessionLease("b2", "u-2", "other"), time.Minute, 2); !errors.Is(err, ErrStreamLimit) {
+		t.Errorf("a third seat while u-1's grace seat still counts = %v, want ErrStreamLimit", err)
+	}
+}
+
+func TestTheSameMemberTakesTheirGraceSeatBackWithTheirClientID(t *testing.T) {
+	r, col, _ := newLeases(t)
+	ctx := context.Background()
+	a := sessionLease("a1", "u-1", "web")
+	if err := r.Acquire(ctx, a, time.Minute, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Release(ctx, a, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Acquire(ctx, sessionLease("a2", "u-1", "web"), time.Minute, 1); err != nil {
+		t.Fatalf("the reconnect of the member that dropped: %v", err)
+	}
+	if n := sessionSeats(t, col); n != 1 {
+		t.Errorf("%d seats after the reconnect, want the dropped one replaced (1)", n)
+	}
+}

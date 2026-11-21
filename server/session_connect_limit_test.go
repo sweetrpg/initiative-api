@@ -5,12 +5,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/sweetrpg/initiative-api/data"
 	"github.com/sweetrpg/initiative-api/domain"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // limitTable is a stream table whose session member limit (the entitled 20, clamped by the
@@ -124,4 +126,95 @@ func TestSeatsOfAPodThatCrashedStopCountingAfterTheLeaseTimeout(t *testing.T) {
 	st.advance(150 * time.Millisecond) // nothing renews the seats, as when their pod is gone
 
 	st.accepted(t, "user-two", "")
+}
+
+func TestAMemberConnectFailsClosedWhenTheOwnerRecordIsMissingOrStale(t *testing.T) {
+	cases := map[string]bson.D{
+		"stale":   {{Key: "$set", Value: bson.D{{Key: "owner_limits_at", Value: time.Now().Add(-8 * 24 * time.Hour)}}}},
+		"missing": {{Key: "$unset", Value: bson.D{{Key: "owner_limits", Value: ""}, {Key: "owner_limits_at", Value: ""}}}},
+	}
+	for name, update := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := limitTable(t, 5, StreamOptions{})
+			tk, code := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`) // minted while the record is fresh
+			if code != http.StatusCreated {
+				t.Fatalf("ticket = %d", code)
+			}
+			var sess data.Session
+			if err := st.db.Fake(data.CollectionSessions).FindOneAndUpdate(t.Context(), bson.D{{Key: "_id", Value: st.sid}}, update, &sess); err != nil {
+				t.Fatal(err)
+			}
+
+			c, resp, err := st.dial(t, "ticket="+tk, nil)
+			if err == nil {
+				_ = c.CloseNow()
+				t.Fatal("the connect was accepted on an owner record that cannot be trusted")
+			}
+			var body ErrorBody
+			b, _ := io.ReadAll(resp.Body)
+			_ = json.Unmarshal(b, &body)
+			if resp.StatusCode != http.StatusServiceUnavailable || body.Code != "owner_entitlements_pending" {
+				t.Errorf("connect = %d %+v, want 503 owner_entitlements_pending", resp.StatusCode, body)
+			}
+			if n := len(st.db.Fake(data.CollectionStreamLeases).Docs()); n != 0 {
+				t.Errorf("%d seats left behind by the refused connect", n)
+			}
+		})
+	}
+}
+
+func TestACoGMHoldsASeatLikeAPlayer(t *testing.T) {
+	st := limitTable(t, 3, StreamOptions{})
+	joinTable(t, st, "user-four", "co_gm")
+	st.svc.Sessions.MaxMembers = 2
+
+	st.accepted(t, "user-four", "")
+	st.accepted(t, "user-two", "")
+	if code, _ := st.refusal(t, "user-three", ""); code != http.StatusForbidden {
+		t.Errorf("a third connection with a co-GM and a player seated = %d, want 403 (the co-GM counts)", code)
+	}
+}
+
+func TestStreamsOutsideTheSessionRosterTakeNoSessionSeat(t *testing.T) {
+	st := limitTable(t, 1, StreamOptions{})
+	st.accepted(t, "user-two", "")
+	if code, _ := st.refusal(t, "user-three", ""); code != http.StatusForbidden {
+		t.Fatalf("the session is full for user-three: %d", code)
+	}
+
+	st.openUserLevel(t, "user-three")
+	_, secret := issue(t, st.r, "user-three", `["read"]`)
+	cred, _, err := st.dial(t, "", http.Header{"Authorization": {"Bearer " + secret}})
+	if err != nil {
+		t.Fatalf("a credential stream: %v", err)
+	}
+	t.Cleanup(func() { _ = cred.CloseNow() })
+	private, _, err := st.dial(t, "", http.Header{"Authorization": {"Bearer user-three"}})
+	if err != nil {
+		t.Fatalf("a private (no session) stream: %v", err)
+	}
+	t.Cleanup(func() { _ = private.CloseNow() })
+
+	for _, d := range st.db.Fake(data.CollectionStreamLeases).Docs() {
+		if b, _ := d["bucket"].(string); strings.HasPrefix(b, "session:") && d["user_id"] != "u-2" {
+			t.Errorf("a stream outside the roster took a session seat: %v", d)
+		}
+	}
+}
+
+func TestAHeartbeatKeepsASeatPastTheLeaseTimeout(t *testing.T) {
+	var renewals atomic.Int64
+	st := limitTable(t, 2, StreamOptions{LeaseTTL: 100 * time.Millisecond, Heartbeat: 20 * time.Millisecond, afterRenew: func() { renewals.Add(1) }})
+	st.accepted(t, "user-two", "")
+	st.accepted(t, "user-three", "")
+
+	for range 2 { // two lease lifetimes pass on the shared clock, each with its renewals in between
+		st.advance(90 * time.Millisecond)
+		before := renewals.Load()
+		waitFor(t, "both streams to renew", func() bool { return renewals.Load() >= before+6 })
+	}
+
+	if code, _ := st.refusal(t, "user-two", ""); code != http.StatusForbidden {
+		t.Errorf("a connect after the seats outlived the lease timeout by renewing = %d, want 403 (still full)", code)
+	}
 }
