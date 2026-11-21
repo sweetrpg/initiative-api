@@ -459,6 +459,11 @@ type headFrame struct {
 type seat struct {
 	lease data.StreamLease
 	held  bool
+	// session is the seat in the session's bucket, which counts live non-GM connections against the
+	// member limit; sessionHeld is false for the GM, a private or user-level stream, and a credential.
+	session     data.StreamLease
+	sessionHeld bool
+	limit       int
 }
 
 // takeSeat gives the stream a seat in its bucket: the user's for a user's stream, the credential's
@@ -466,31 +471,72 @@ type seat struct {
 // of their own stream. Over the cap is data.ErrStreamLimit; a store failure is
 // data.ErrStreamUnavailable and a new connect fails closed (streams already open stay up).
 func (h streamHandlers) takeSeat(ctx context.Context, a serveArgs) (seat, error) {
+	if h.svc.Leases == nil {
+		return seat{}, nil
+	}
+	var s seat
 	max, bucket := h.opts.ConcurrentMax, "user:"+a.actor
 	if a.credentialID != "" {
 		max, bucket = h.opts.CredentialMax, "cred:"+a.credentialID
 	}
-	if h.svc.Leases == nil || max <= 0 {
-		return seat{}, nil
-	}
-	l := data.StreamLease{ID: randomHex(), Bucket: bucket, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
-	if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), max); err != nil {
-		if errors.Is(err, data.ErrStreamUnavailable) {
-			slog.WarnContext(ctx, "the stream seat store is unavailable; refusing a new stream", "error", err)
+	if max > 0 {
+		l := data.StreamLease{ID: randomHex(), Bucket: bucket, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
+		if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), max); err != nil {
+			return seat{}, h.seatError(ctx, err)
 		}
+		s.lease, s.held = l, true
+	}
+	if err := h.takeSessionSeat(ctx, a, &s); err != nil {
+		h.release(s, false) // give the user's seat back: this connect did not happen
 		return seat{}, err
 	}
-	return seat{l, true}, nil
+	return s, nil
+}
+
+func (h streamHandlers) seatError(ctx context.Context, err error) error {
+	if errors.Is(err, data.ErrStreamUnavailable) {
+		slog.WarnContext(ctx, "the stream seat store is unavailable; refusing a new stream", "error", err)
+	}
+	return err
+}
+
+// takeSessionSeat counts a non-GM connection to a session against its member limit, across pods:
+// the same number that holds the roster (7.12a). The GM, and any stream that is not in a session,
+// need no seat. The seat shares the user seat's client id, so a member who drops and reconnects
+// within the grace period keeps it even if others joined in the meantime. Nothing ends a live
+// connection because the limit fell: only a new connect is counted against it.
+func (h streamHandlers) takeSessionSeat(ctx context.Context, a serveArgs, s *seat) error {
+	if a.session == "" || a.userLevel || a.credentialID != "" {
+		return nil
+	}
+	limit, counted, err := h.svc.Streams.ConnectLimit(ctx, a.actor, a.session)
+	if err != nil || !counted {
+		return err
+	}
+	l := data.StreamLease{ID: randomHex(), Bucket: "session:" + a.session, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
+	if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), limit); err != nil {
+		if errors.Is(err, data.ErrStreamLimit) {
+			return &domain.EntitlementError{Key: domain.KeyMembersPerSession, Limit: limit}
+		}
+		return h.seatError(ctx, err)
+	}
+	s.session, s.sessionHeld, s.limit = l, true, limit
+	return nil
 }
 
 // release ends a seat. Only a connection that dropped (keep) holds it for the grace period; one the
 // server ended, or that never opened, frees it now.
 func (h streamHandlers) release(s seat, keep bool) {
-	if !s.held {
-		return
-	}
-	if err := h.svc.Leases.Release(context.Background(), s.lease, h.opts.Grace, keep); err != nil {
-		slog.Warn("releasing a stream seat failed; it lapses on its own", "seat", s.lease.ID, "error", err)
+	for _, l := range []struct {
+		lease data.StreamLease
+		held  bool
+	}{{s.lease, s.held}, {s.session, s.sessionHeld}} {
+		if !l.held {
+			continue
+		}
+		if err := h.svc.Leases.Release(context.Background(), l.lease, h.opts.Grace, keep); err != nil {
+			slog.Warn("releasing a stream seat failed; it lapses on its own", "seat", l.lease.ID, "error", err)
+		}
 	}
 }
 
@@ -655,14 +701,23 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 // membership re-check or the credential guard. A failure leaves the stream up; the seat lapses after
 // the lease TTL if renewals keep failing, and the next connect for that user then has room.
 func (cl *connection) renew(ctx context.Context) {
-	if !cl.a.seat.held {
+	st := cl.a.seat
+	if !st.held && !st.sessionHeld {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.renewTimeout()) // part of stallAllowance
+	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.renewTimeout()) // both seats share it: part of stallAllowance
 	defer cancel()
-	err := cl.h.svc.Leases.Renew(ctx, cl.a.seat.lease, cl.h.opts.leaseTTL())
+	var err error
+	for _, l := range []struct {
+		lease data.StreamLease
+		held  bool
+	}{{st.lease, st.held}, {st.session, st.sessionHeld}} {
+		if l.held {
+			err = errors.Join(err, cl.h.svc.Leases.Renew(ctx, l.lease, cl.h.opts.leaseTTL()))
+		}
+	}
 	if err != nil && !cl.renewFailing {
-		slog.WarnContext(ctx, "renewing a stream seat failed; it lapses if renewals keep failing", "seat", cl.a.seat.lease.ID, "error", err)
+		slog.WarnContext(ctx, "renewing a stream seat failed; it lapses if renewals keep failing", "seat", st.lease.ID, "error", err)
 	}
 	cl.renewFailing = err != nil // log the first failure of a run, not every heartbeat
 	if hook := cl.h.opts.afterRenew; hook != nil {

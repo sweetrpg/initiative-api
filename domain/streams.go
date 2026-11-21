@@ -162,6 +162,22 @@ func (s *Streams) Recheck(ctx context.Context, v data.Viewer) error {
 	return nil
 }
 
+// ConnectLimit is the cap on live non-GM connections in the session that userID's connection
+// counts against: the owner's recorded members_per_session value clamped to the configured maximum
+// (the same number the roster is held to). The GM is exempt (counted false). It fails closed on a
+// missing or stale recorded value, like every check made for a member rather than the GM.
+func (s *Streams) ConnectLimit(ctx context.Context, userID, sessionID string) (limit int, counted bool, err error) {
+	sess, m, err := s.sessions.repo.SeatInfo(ctx, userID, sessionID)
+	if err != nil {
+		return 0, false, err
+	}
+	if m.Role == data.RoleGM {
+		return 0, false, nil
+	}
+	limit, err = s.sessions.memberLimit(sess, m.Role)
+	return limit, err == nil, err
+}
+
 // Peek reads what a ticket stands for without spending it; the caller checks its limits and then
 // calls Redeem, so a refused connect does not cost the client its ticket.
 func (s *Streams) Peek(ctx context.Context, ticket string) (Claim, error) {
