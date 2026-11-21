@@ -99,10 +99,11 @@ func (o StreamOptions) recheck() time.Duration {
 	return min(d, o.heartbeat())
 }
 
-// The re-check runs inline in the connection's loop, so a slow client delays it. stallAllowance is
-// the most one heartbeat tick can hold the loop: a heartbeat write that the client takes up to
-// writeTimeout to accept, then a seat renewal bounded by checkTimeout. A write that does not
-// complete in writeTimeout ends the stream anyway.
+// The re-check runs inline in the connection's loop, so a slow client delays it. The loop is held
+// by one write at a time and a due re-check runs before every event write, so stallAllowance is the
+// most one pass can hold it: a heartbeat write that the client takes up to writeTimeout to accept,
+// then a seat renewal bounded by checkTimeout. A write that does not complete in writeTimeout ends
+// the stream anyway.
 const stallAllowance = writeTimeout + checkTimeout
 
 // RevocationBound is the longest a stream stays open after its member is removed, demoted or
@@ -122,6 +123,9 @@ func (o StreamOptions) FaultBound() time.Duration {
 
 // StalledFaultBound is FaultBound with a slow client.
 func (o StreamOptions) StalledFaultBound() time.Duration { return o.FaultBound() + stallAllowance }
+
+// renewTimeout bounds one seat renewal, which holds the connection's loop.
+func (o StreamOptions) renewTimeout() time.Duration { return min(o.heartbeat()/2, checkTimeout) }
 
 func (o StreamOptions) heartbeat() time.Duration {
 	if o.Heartbeat > 0 {
@@ -609,6 +613,12 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 				}
 				return
 			}
+			// A backlog of events must not postpone the re-check: it goes first whenever it is due,
+			// so the loop is held by at most one write (see stallAllowance).
+			if code, why, due := cl.recheckIfDue(ctx, recheck); due && code != 0 {
+				_ = cl.conn.Close(code, why)
+				return false
+			}
 			if hook := cl.h.opts.beforeWrite; hook != nil {
 				hook()
 			}
@@ -648,7 +658,7 @@ func (cl *connection) renew(ctx context.Context) {
 	if !cl.a.seat.held {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, min(cl.h.opts.heartbeat()/2, checkTimeout)) // part of stallAllowance
+	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.renewTimeout()) // part of stallAllowance
 	defer cancel()
 	err := cl.h.svc.Leases.Renew(ctx, cl.a.seat.lease, cl.h.opts.leaseTTL())
 	if err != nil && !cl.renewFailing {
@@ -695,6 +705,17 @@ func (cl *connection) check(ctx context.Context) (websocket.StatusCode, string) 
 		cl.recheckFailures = 0
 	}
 	return 0, ""
+}
+
+// recheckIfDue runs the re-check if its tick is waiting, without blocking.
+func (cl *connection) recheckIfDue(ctx context.Context, t *time.Ticker) (code websocket.StatusCode, why string, due bool) {
+	select {
+	case <-t.C:
+		code, why = cl.check(ctx)
+		return code, why, true
+	default:
+		return 0, "", false
+	}
 }
 
 // pinger sends a protocol ping per request and ends the connection when no pong comes back.

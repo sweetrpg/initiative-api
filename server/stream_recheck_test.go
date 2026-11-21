@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -155,10 +156,10 @@ func TestWhileTheStoreIsDownANewTicketAndAnOldOneAreBothRefused(t *testing.T) {
 	// Minting is authorized through OpenFGA, which is up here; the connect re-reads the member's
 	// record, so whichever ticket carries the client to the door, the connect is refused.
 	fresh, code := st.ticket(t, "user-two", `{"session_id":"`+st.sid+`"}`)
+	if code != http.StatusCreated || fresh == "" {
+		t.Fatalf("minting during the outage = %d; this test needs it to succeed (OpenFGA is up) to exercise the connect", code)
+	}
 	for name, tk := range map[string]string{"a ticket minted earlier": old, "a ticket minted during the outage": fresh} {
-		if tk == "" || (name != "a ticket minted earlier" && code != http.StatusCreated) {
-			continue
-		}
 		if got := st.refused(t, "ticket="+tk, nil); got == http.StatusSwitchingProtocols || got < http.StatusInternalServerError {
 			t.Errorf("a stream opened with %s = %d, want a 5xx refusal", name, got)
 		}
@@ -180,5 +181,100 @@ func TestTheRecheckIntervalNeverExceedsTheHeartbeatAndTheBoundsAreStated(t *test
 		if got[0] != got[1] {
 			t.Errorf("default %s = %s, want %s", name, got[0], got[1])
 		}
+	}
+}
+
+// A write backlog must not postpone the re-check. While the loop is held in the first event's
+// write the re-check falls due; when the write ends, the next iteration finds both the next event
+// and the re-check ready, and select alone would pick between them at random. The re-check must go
+// first every time, so no second event is written. Several trials make the random pick fail a
+// version without the priority almost surely (1 - 2^-trials) and never fail the real one.
+func TestADueRecheckGoesBeforeTheNextBufferedEventWrite(t *testing.T) {
+	for trial := range 8 {
+		var writes atomic.Int32
+		release := make(chan struct{})
+		opts := StreamOptions{Heartbeat: time.Hour, RecheckInterval: testRecheck, beforeWrite: func() {
+			if writes.Add(1) == 1 {
+				<-release // hold the loop in the first event's write
+			}
+		}}
+		st := newStreamTable(t, opts, 0)
+		st.svc.Sessions.SetEvictor(nil)
+		c, _ := st.open(t, "user-two", "")
+		for range 3 {
+			st.hub.Emit(context.Background(), data.Change{Type: data.EventCombatantUpdated, After: userStreamEncounter(t, st), SessionID: st.sid, OwnerID: "u-1", CombatantID: []string{"orc"}, At: time.Now()})
+		}
+		waitFor(t, "the loop to be held in the first write", func() bool { return writes.Load() == 1 })
+		if w := callAs(st.r, "user-ok", "DELETE", "/sessions/"+st.sid+"/members/u-2", ""); w.Code != http.StatusNoContent && w.Code != http.StatusOK {
+			t.Fatalf("remove = %d %s", w.Code, w.Body)
+		}
+		time.Sleep(3 * testRecheck) // the re-check is now due, and the loop has not taken it
+		close(release)
+		if got := closeCode(c); got != CloseMembershipChanged {
+			t.Fatalf("trial %d: close code = %d, want %d", trial, got, CloseMembershipChanged)
+		}
+		if n := writes.Load(); n != 1 {
+			t.Fatalf("trial %d: %d event writes began, want 1: a due re-check went behind a buffered event", trial, n)
+		}
+	}
+}
+
+// slowLeases blocks every seat write until its context ends, as a hung store does, once slow is set.
+type slowLeases struct {
+	*fake.DB
+	slow *atomic.Bool
+}
+
+func (d slowLeases) Collection(name string) store.Collection {
+	c := d.DB.Collection(name)
+	if name != data.CollectionStreamLeases {
+		return c
+	}
+	return slowLeaseCollection{c, d.slow}
+}
+
+type slowLeaseCollection struct {
+	store.Collection
+	slow *atomic.Bool
+}
+
+func (c slowLeaseCollection) FindOneAndUpdate(ctx context.Context, f, u bson.D, out any) error {
+	if c.slow.Load() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return c.Collection.FindOneAndUpdate(ctx, f, u, out)
+}
+
+func TestASeatRenewalIsCappedAtTheCheckTimeoutNotHalfTheHeartbeat(t *testing.T) {
+	slow := new(atomic.Bool)
+	streamDBWrap = func(d *fake.DB) store.Database { return slowLeases{d, slow} }
+	t.Cleanup(func() { streamDBWrap = nil })
+	renewed := make(chan time.Time, 4)
+	opts := StreamOptions{ConcurrentMax: 5, Heartbeat: 6 * time.Second, LeaseTTL: time.Minute, afterRenew: func() { renewed <- time.Now() }}
+	st := newStreamTable(t, opts, 0)
+	c, _ := st.open(t, "user-two", "")
+	frame(t, c) // the head frame
+	slow.Store(true)
+
+	rctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	for { // the heartbeat frame is written just before the renewal starts
+		_, b, err := c.Read(rctx)
+		if err != nil {
+			t.Fatalf("waiting for the heartbeat: %v", err)
+		}
+		if strings.Contains(string(b), `"heartbeat"`) {
+			break
+		}
+	}
+	beat := time.Now()
+	select {
+	case at := <-renewed:
+		if took := at.Sub(beat); took > checkTimeout+500*time.Millisecond {
+			t.Errorf("a hung seat store held the loop for %s, want it cut at the check timeout (%s), not heartbeat/2 (%s)", took, checkTimeout, opts.Heartbeat/2)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the seat renewal never returned")
 	}
 }
