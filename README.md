@@ -61,7 +61,7 @@ Invalid values stop the process at startup with every problem listed.
   `POST /credentials/{id}/revoke`. Integrations send the secret as `Authorization: Bearer ic_...`;
   it acts as its owner with the user role, `read` allows GET and `write` allows other methods.
   Credentials cannot reach `/credentials`, `/entitlements` or `/themes`.
-  A deny or role removal in auth-api ends the owner's credentials (PADR-0039): the service consumes
+  A deny of this service or a removed role in auth-api ends the owner's credentials (PADR-0039) and then every open stream of that user: all sessions, user-level and private, closed on the pod that consumes the event at once and on the others as their fan-out tail delivers the row (milliseconds), over the same path as session evictions; nothing is remembered, so a user granted access again simply reconnects. If a fan-out row is lost (a full eviction queue, logged at error level) the user's session streams stay open until `STREAM_MAX_AGE` (they are still members, so the re-check does not end them), though every reconnect is refused by auth-api. The service consumes
   the `AUTH_EVENTS` stream (`NATS_URL`, optional `NATS_DURABLE_NAME`, `NATS_CREDS` or
   `NATS_USER`/`NATS_PASSWORD`). Credentials answer 503 `credentials_unavailable` until the consumer
   has caught up, and stay off if `NATS_URL` is unset or the consumer fell behind the stream's

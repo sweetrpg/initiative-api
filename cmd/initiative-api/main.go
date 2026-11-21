@@ -82,12 +82,13 @@ func main() {
 	// published while the service was down is applied before any secret authenticates (PADR-0039).
 	// The consumer starts in the background, so the rest of the API does not wait on NATS; if NATS
 	// stays unreachable past CREDENTIAL_EVENTS_MAX_DISCONNECT the gate closes again.
+	evictor := &lateEvictor{} // the hub is built after the consumer starts; it is set below
 	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
 		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
 	} else {
 		var live atomic.Pointer[events.Consumer]
 		consumerCtx, stopConsumer := context.WithCancel(context.Background())
-		go runConsumer(consumerCtx, creds, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
+		go runConsumer(consumerCtx, creds, evictor, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
 		defer func() {
 			stopConsumer() // first, so runConsumer does not rebuild what Stop closes
 			if c := live.Load(); c != nil {
@@ -107,6 +108,7 @@ func main() {
 		defer pub.Close() // deferred before hub.Close, so it runs after the queue that feeds it stops
 	}
 	hub := stream.New(encounters)
+	evictor.hub.Store(hub)
 	defer hub.Close()
 	if pub != nil {
 		hub.AttachBus(pub, 1024)
@@ -211,6 +213,16 @@ func newRouter(cfg config.Config, svc server.Services, pool *redis.Pool) *gin.En
 	return r
 }
 
+// lateEvictor hands a denied user to the hub once it exists. An event that arrives before then finds
+// no open stream to close.
+type lateEvictor struct{ hub atomic.Pointer[stream.Hub] }
+
+func (l *lateEvictor) EvictUser(userID string) {
+	if h := l.hub.Load(); h != nil {
+		h.EvictUser(userID)
+	}
+}
+
 // Pacing for runConsumer: the wait between attempts, and how long a consumer must live before a
 // loss counts as new trouble rather than a flap.
 const (
@@ -223,12 +235,13 @@ const (
 // capped backoff, an error logged each round, so a NATS that is down at boot is picked up when it
 // returns) and builds a new one if the connection is lost for good. Until a consumer has started and
 // caught up, credentials stay closed (503) and the rest of the API serves.
-func runConsumer(ctx context.Context, creds *domain.Credentials, natsURL, durable string, maxDisconnect time.Duration, retry startup.Policy, live *atomic.Pointer[events.Consumer]) {
+func runConsumer(ctx context.Context, creds *domain.Credentials, evict events.Evictor, natsURL, durable string, maxDisconnect time.Duration, retry startup.Policy, live *atomic.Pointer[events.Consumer]) {
 	wait := consumerFirstWait
 	for ctx.Err() == nil {
 		var c *events.Consumer
 		err := startup.Do("start the auth-event consumer", retry, func() error {
 			c = events.New(creds, creds)
+			c.Evictor = evict
 			c.MaxDisconnect = maxDisconnect
 			return c.Start(ctx, natsURL, durable)
 		})

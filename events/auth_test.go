@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,7 +35,7 @@ func TestHandleMapsKindToReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &rec{}
-			if err := handle(context.Background(), r, []byte(tt.body)); err != nil {
+			if err := handle(context.Background(), r, nil, []byte(tt.body)); err != nil {
 				t.Fatalf("err = %v, want ack", err)
 			}
 			if r.owner != tt.owner || r.reason != tt.reason {
@@ -46,8 +47,44 @@ func TestHandleMapsKindToReason(t *testing.T) {
 
 func TestHandleFailedRevokeIsRetried(t *testing.T) {
 	r := &rec{err: errors.New("db down")}
-	if err := handle(context.Background(), r, []byte(`{"entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`)); err == nil {
+	if err := handle(context.Background(), r, nil, []byte(`{"entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`)); err == nil {
 		t.Fatal("failed revoke was acked; the deny would be lost")
+	}
+}
+
+type evicted struct{ users []string }
+
+func (e *evicted) EvictUser(u string) { e.users = append(e.users, u) }
+
+func TestADenyOrRemovedRoleEvictsTheUsersStreamsAfterTheCredentialsAreRevoked(t *testing.T) {
+	tests := []struct {
+		name, body string
+		want       []string
+	}{
+		{"deny for this service", `{"entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`, []string{"auth0|a"}},
+		{"role removed", `{"entity_id":"auth0|b","action":"role_removed"}`, []string{"auth0|b"}},
+		{"deny of another service", `{"entity_id":"auth0|a","action":"deny","data":{"service":"catalog-api"}}`, nil},
+		{"role added", `{"entity_id":"auth0|c","action":"role_added"}`, nil},
+		{"no subject", `{"action":"deny","data":{"service":"initiative-api"}}`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := &evicted{}
+			if err := handle(context.Background(), &rec{}, e, []byte(tt.body)); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(e.users, tt.want) {
+				t.Errorf("evicted %v, want %v", e.users, tt.want)
+			}
+		})
+	}
+}
+
+func TestAFailedRevokeEvictsNothingSoTheRedeliveryDoesBoth(t *testing.T) {
+	e := &evicted{}
+	err := handle(context.Background(), &rec{err: errors.New("db down")}, e, []byte(`{"entity_id":"auth0|a","action":"deny","data":{"service":"initiative-api"}}`))
+	if err == nil || len(e.users) != 0 {
+		t.Errorf("err = %v, evicted %v; want the error returned and no eviction before the credentials are revoked", err, e.users)
 	}
 }
 

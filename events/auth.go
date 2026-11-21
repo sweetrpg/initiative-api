@@ -49,6 +49,12 @@ type Revoker interface {
 	RevokeOwner(ctx context.Context, owner, reason string) (int, error)
 }
 
+// Evictor closes every open stream of a user, on this pod and the others. *stream.Hub implements
+// it.
+type Evictor interface {
+	EvictUser(userID string)
+}
+
 // Gate is the on/off switch for integration credentials. domain.Credentials implements it.
 type Gate interface {
 	Open(ctx context.Context) (bool, error)
@@ -62,7 +68,12 @@ type Gate interface {
 
 // handle applies one message. A nil error means ack it; an unparseable or irrelevant message is
 // acked (redelivery cannot fix it), a failed revoke is returned so the bus redelivers.
-func handle(ctx context.Context, rev Revoker, body []byte) error {
+//
+// A deny for this service or a removed role ends the subject's integration credentials and then
+// every open stream of that user (PADR-0039: a denied owner's open event streams close when the
+// revocation lands); ev may be nil. Credentials are revoked first and a failure there is retried
+// before anything is evicted; the eviction is idempotent, so a redelivery repeats it harmlessly.
+func handle(ctx context.Context, rev Revoker, evict Evictor, body []byte) error {
 	var ev event
 	if err := json.Unmarshal(body, &ev); err != nil {
 		slog.Error("dropping unparseable auth event", "error", err)
@@ -77,6 +88,9 @@ func handle(ctx context.Context, rev Revoker, body []byte) error {
 		return fmt.Errorf("revoke credentials for event %s: %w", ev.EventID, err)
 	}
 	slog.Info("revoked integration credentials", "event_id", ev.EventID, "reason", reason, "count", n)
+	if evict != nil {
+		evict.EvictUser(ev.EntityID)
+	}
 	return nil
 }
 
@@ -99,6 +113,8 @@ type Consumer struct {
 	gate Gate
 	// Stream and Filter default to AUTH_EVENTS and auth.events.>; tests point them at a prefixed stream.
 	Stream, Filter string
+	// Evictor, when set, closes a denied user's open streams (see handle).
+	Evictor Evictor
 	// MaxDisconnect is how long NATS may stay unreachable before the gate closes; DefaultMaxDisconnect
 	// when zero.
 	MaxDisconnect time.Duration
@@ -395,7 +411,7 @@ func (c *Consumer) start(ctx context.Context, natsURL, durable string) error {
 }
 
 func (c *Consumer) process(ctx context.Context, msg jetstream.Msg) {
-	if err := handle(ctx, c.rev, msg.Data()); err != nil {
+	if err := handle(ctx, c.rev, c.Evictor, msg.Data()); err != nil {
 		slog.Error("auth event handling failed, will retry", "error", err)
 		_ = msg.Nak()
 		return
