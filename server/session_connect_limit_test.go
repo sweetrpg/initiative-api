@@ -24,6 +24,16 @@ func limitTable(t *testing.T, limit int, opts StreamOptions) streamTable {
 	return st
 }
 
+// fullTable is limitTable with user-four joined as co-GM first, so the session has three non-GM
+// members to connect: user-two, user-three and user-four.
+func fullTable(t *testing.T, limit int, opts StreamOptions) streamTable {
+	t.Helper()
+	st := limitTable(t, 3, opts)
+	joinTable(t, st, "user-four", "co_gm")
+	st.svc.Sessions.MaxMembers = limit
+	return st
+}
+
 // refusal dials with a fresh ticket expecting a refusal and returns its status and typed body.
 func (st streamTable) refusal(t *testing.T, token, extra string) (int, ErrorBody) {
 	t.Helper()
@@ -51,12 +61,12 @@ func (st streamTable) accepted(t *testing.T, token, extra string) *websocket.Con
 	return c
 }
 
-func TestAConnectAtTheSessionLimitIsRefusedWithTheTypedEntitlementError(t *testing.T) {
-	st := limitTable(t, 2, StreamOptions{})
+func TestAConnectByAnotherMemberAtTheSessionLimitIsRefusedWithTheTypedEntitlementError(t *testing.T) {
+	st := fullTable(t, 2, StreamOptions{})
 	st.accepted(t, "user-two", "")
 	st.accepted(t, "user-three", "")
 
-	code, body := st.refusal(t, "user-two", "") // a second device of the same member counts too
+	code, body := st.refusal(t, "user-four", "")
 	if code != http.StatusForbidden || body.Code != "entitlement_limit_reached" || body.Key != domain.KeyMembersPerSession || body.Limit == nil || *body.Limit != 2 {
 		t.Errorf("refusal = %d %+v, want 403 entitlement_limit_reached with the key and limit 2 (the entitled 20 clamped)", code, body)
 	}
@@ -65,22 +75,71 @@ func TestAConnectAtTheSessionLimitIsRefusedWithTheTypedEntitlementError(t *testi
 	}
 }
 
-func TestTheGMConnectsEvenWhenTheSessionIsAtTheLimit(t *testing.T) {
+func TestASecondDeviceOfAMemberSharesTheirSeatWhenTheSessionIsFull(t *testing.T) {
+	st := fullTable(t, 2, StreamOptions{})
+	st.accepted(t, "user-two", "")
+	st.accepted(t, "user-three", "")
+
+	st.accepted(t, "user-two", "") // a second device takes no further seat
+	st.accepted(t, "user-three", "")
+	if code, _ := st.refusal(t, "user-four", ""); code != http.StatusForbidden {
+		t.Errorf("a third member = %d, want 403: the two devices held two members, not four seats", code)
+	}
+}
+
+func TestAThirdDeviceOfOneMemberIsRefusedWithTheDeviceLimit(t *testing.T) {
+	st := fullTable(t, 5, StreamOptions{})
+	st.accepted(t, "user-two", "")
+	st.accepted(t, "user-two", "")
+
+	code, body := st.refusal(t, "user-two", "")
+	if code != http.StatusForbidden || body.Code != "device_limit_reached" || body.Key != "devices_per_member" || body.Limit == nil || *body.Limit != 2 {
+		t.Errorf("third device = %d %+v, want 403 device_limit_reached with key devices_per_member and limit 2", code, body)
+	}
+	if code, _ := st.refusal(t, "user-two", `,"client_id":"tab"`); code != http.StatusForbidden {
+		t.Errorf("a third device with a client id = %d, want 403", code)
+	}
+	st.accepted(t, "user-three", "") // another member has devices of their own
+}
+
+func TestTheDeviceLimitComesFromTheConfiguredValue(t *testing.T) {
+	st := fullTable(t, 5, StreamOptions{DevicesMax: 3})
+	for range 3 {
+		st.accepted(t, "user-two", "")
+	}
+	if code, body := st.refusal(t, "user-two", ""); code != http.StatusForbidden || body.Limit == nil || *body.Limit != 3 {
+		t.Errorf("a fourth device = %d %+v, want 403 with limit 3", code, body)
+	}
+}
+
+func TestAClosedDeviceFreesItsPlaceForANewOne(t *testing.T) {
+	st := fullTable(t, 5, StreamOptions{})
+	a := st.accepted(t, "user-two", "")
+	st.accepted(t, "user-two", "")
+	_ = a.CloseNow()
+
+	waitFor(t, "the closed device's place to free", func() bool { _, code := st.open(t, "user-two", ""); return code == http.StatusSwitchingProtocols })
+}
+func TestTheGMConnectsWhenTheSessionIsAtTheLimitButIsHeldToTheDeviceLimit(t *testing.T) {
 	st := limitTable(t, 1, StreamOptions{})
 	st.accepted(t, "user-two", "")
 	if code, _ := st.refusal(t, "user-three", ""); code != http.StatusForbidden {
 		t.Fatalf("the session is not full: %d", code)
 	}
+	st.accepted(t, "user-ok", "") // the GM holds no member seat
 	st.accepted(t, "user-ok", "")
-	st.accepted(t, "user-ok", "") // and as often as the user cap allows: the GM holds no seat
-}
 
-func TestWhenTheLimitFallsBelowTheConnectionsOnlyNewOnesAreCounted(t *testing.T) {
-	st := limitTable(t, 2, StreamOptions{})
+	code, body := st.refusal(t, "user-ok", "")
+	if code != http.StatusForbidden || body.Code != "device_limit_reached" {
+		t.Errorf("the GM's third device = %d %+v, want 403 device_limit_reached", code, body)
+	}
+}
+func TestWhenTheLimitFallsBelowTheMembersConnectedOnlyNewMembersAreCounted(t *testing.T) {
+	st := fullTable(t, 3, StreamOptions{})
 	a := st.accepted(t, "user-two", "")
 	b := st.accepted(t, "user-three", "")
 
-	st.svc.Sessions.MaxMembers = 1 // the owner's limit fell below the 2 live connections
+	st.svc.Sessions.MaxMembers = 1 // the owner's limit fell below the 2 connected members
 
 	for _, c := range []*websocket.Conn{a, b} { // a round trip: the server still answers on a connection the limit did not end
 		go func() { // a ping's answer is read by the reader, which also takes the frames the server sent
@@ -94,20 +153,21 @@ func TestWhenTheLimitFallsBelowTheConnectionsOnlyNewOnesAreCounted(t *testing.T)
 			t.Fatalf("a connection was ended because the limit fell: %v", err)
 		}
 	}
-	if n := len(st.db.Fake(data.CollectionStreamLeases).Docs()); n != 2 { // each connection holds one session seat (no per-user cap here)
+	if n := st.seatsIn("session:"); n != 2 {
 		t.Errorf("%d seats after the limit fell, want the 2 connections to keep their seats", n)
 	}
-	if code, _ := st.refusal(t, "user-two", ""); code != http.StatusForbidden {
-		t.Errorf("a new connection at 2 live with limit 1 = %d, want 403", code)
+	if code, _ := st.refusal(t, "user-four", ""); code != http.StatusForbidden {
+		t.Errorf("a new member at 2 connected with limit 1 = %d, want 403", code)
 	}
+	extra := st.accepted(t, "user-two", "") // a member who holds a seat adds no member
 	_ = a.CloseNow()
 	_ = b.CloseNow()
-	waitFor(t, "the closed connections' seats to free", func() bool { return len(st.db.Fake(data.CollectionStreamLeases).Docs()) == 0 })
-	st.accepted(t, "user-two", "") // fewer live connections than the limit again
+	_ = extra.CloseNow()
+	waitFor(t, "the closed connections' seats to free", func() bool { return st.seatsIn("session:") == 0 })
+	st.accepted(t, "user-four", "") // fewer members connected than the limit again
 }
-
 func TestAMemberWhoDropsAndReconnectsInTheGraceKeepsTheirSeatEvenWhenOthersFillTheSession(t *testing.T) {
-	st := limitTable(t, 2, StreamOptions{Grace: time.Minute})
+	st := fullTable(t, 2, StreamOptions{Grace: time.Minute})
 	st.accepted(t, "user-two", `,"client_id":"web-a"`)
 	dropped := st.accepted(t, "user-three", `,"client_id":"web-b"`)
 	_ = dropped.CloseNow()
@@ -120,25 +180,23 @@ func TestAMemberWhoDropsAndReconnectsInTheGraceKeepsTheirSeatEvenWhenOthersFillT
 		return false
 	})
 
-	if code, _ := st.refusal(t, "user-two", `,"client_id":"web-c"`); code != http.StatusForbidden {
-		t.Fatalf("another connection during the grace = %d, want 403 (the dropped seat still counts)", code)
+	if code, _ := st.refusal(t, "user-four", `,"client_id":"web-c"`); code != http.StatusForbidden {
+		t.Fatalf("another member during the grace = %d, want 403 (the dropped member's seat still counts)", code)
 	}
 	st.accepted(t, "user-three", `,"client_id":"web-b"`) // the same client takes its seat back
 }
-
 func TestSeatsOfAPodThatCrashedStopCountingAfterTheLeaseTimeout(t *testing.T) {
-	st := limitTable(t, 2, StreamOptions{LeaseTTL: 100 * time.Millisecond, Heartbeat: time.Hour})
+	st := fullTable(t, 2, StreamOptions{LeaseTTL: 100 * time.Millisecond, Heartbeat: time.Hour})
 	st.accepted(t, "user-two", "")
 	st.accepted(t, "user-three", "")
-	if code, _ := st.refusal(t, "user-two", ""); code != http.StatusForbidden {
+	if code, _ := st.refusal(t, "user-four", ""); code != http.StatusForbidden {
 		t.Fatalf("full = %d", code)
 	}
 
 	st.advance(150 * time.Millisecond) // nothing renews the seats, as when their pod is gone
 
-	st.accepted(t, "user-two", "")
+	st.accepted(t, "user-four", "")
 }
-
 func TestAMemberConnectFailsClosedWhenTheOwnerRecordIsMissingOrStale(t *testing.T) {
 	cases := map[string]bson.D{
 		"stale":   {{Key: "$set", Value: bson.D{{Key: "owner_limits_at", Value: time.Now().Add(-8 * 24 * time.Hour)}}}},
@@ -215,7 +273,7 @@ func TestStreamsOutsideTheSessionRosterTakeNoSessionSeat(t *testing.T) {
 
 func TestAHeartbeatKeepsASeatPastTheLeaseTimeout(t *testing.T) {
 	var renewals atomic.Int64
-	st := limitTable(t, 2, StreamOptions{LeaseTTL: 100 * time.Millisecond, Heartbeat: 20 * time.Millisecond, afterRenew: func() { renewals.Add(1) }})
+	st := fullTable(t, 2, StreamOptions{LeaseTTL: 100 * time.Millisecond, Heartbeat: 20 * time.Millisecond, afterRenew: func() { renewals.Add(1) }})
 	st.accepted(t, "user-two", "")
 	st.accepted(t, "user-three", "")
 
@@ -225,7 +283,7 @@ func TestAHeartbeatKeepsASeatPastTheLeaseTimeout(t *testing.T) {
 		waitFor(t, "both streams to renew", func() bool { return renewals.Load() >= before+6 })
 	}
 
-	if code, _ := st.refusal(t, "user-two", ""); code != http.StatusForbidden {
+	if code, _ := st.refusal(t, "user-four", ""); code != http.StatusForbidden {
 		t.Errorf("a connect after the seats outlived the lease timeout by renewing = %d, want 403 (still full)", code)
 	}
 }

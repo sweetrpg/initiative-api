@@ -18,6 +18,13 @@ const CollectionStreamLeases = "stream_leases"
 // ErrStreamLimit means the user already holds the most concurrent streams allowed.
 var ErrStreamLimit = errors.New("data: too many concurrent streams")
 
+// DeviceLimitError means one member already holds the most concurrent connections to a session.
+type DeviceLimitError struct{ Limit int }
+
+func (e *DeviceLimitError) Error() string {
+	return fmt.Sprintf("data: a member may hold at most %d connections to a session", e.Limit)
+}
+
 // ErrStreamUnavailable means the seat store could not be reached or written, so no seat could be
 // granted. A new connect fails closed on it; streams already open stay up (see Renew).
 var ErrStreamUnavailable = errors.New("data: stream seats are unavailable")
@@ -51,6 +58,9 @@ type StreamLease struct {
 	Pod       string    `bson:"pod"`
 	Until     time.Time `bson:"until"`
 	Dropped   bool      `bson:"dropped,omitempty"`
+	// Counted marks a session seat that counts toward the session's member limit: every member
+	// but the GM. Every session seat, the GM's too, counts toward the member's device limit.
+	Counted bool `bson:"counted,omitempty"`
 }
 
 // StreamLeases is the lease store.
@@ -122,6 +132,65 @@ func (r *StreamLeases) Acquire(ctx context.Context, l StreamLease, ttl time.Dura
 		r.takeOver(ctx, l)
 	}
 	return nil
+}
+
+// AcquireSession gives l a seat in a session's bucket. A member's connections share one member
+// seat, so the session holds at most members distinct counted members (a dropped client's seat
+// counts until its grace ends), and one member holds at most devices live connections, the GM
+// included. A new connection of a member who already holds a seat adds no member, so it is refused
+// only by the device limit, even when the member limit has fallen below the members connected.
+// Over the device limit is *DeviceLimitError, over the member limit ErrStreamLimit, a store failure
+// ErrStreamUnavailable. Like Acquire, the seat is inserted, recounted and given back when over, so
+// two racing first connects of different members can both be refused but neither is kept over.
+func (r *StreamLeases) AcquireSession(ctx context.Context, l StreamLease, ttl time.Duration, members, devices int) error {
+	if err := checkUserID(l.UserID); err != nil {
+		return err
+	}
+	l.Until, l.Dropped = r.now().Add(ttl), false
+	if err := r.c.InsertOne(ctx, l); err != nil {
+		r.retract(ctx, l.ID)
+		return fmt.Errorf("%w: %v", ErrStreamUnavailable, err)
+	}
+	var rows []StreamLease
+	err := r.c.Find(ctx, bson.D{{Key: "bucket", Value: l.Bucket}, {Key: "until", Value: bson.D{{Key: "$gt", Value: r.now()}}}}, store.FindOptions{}, &rows)
+	if err != nil {
+		r.retract(ctx, l.ID)
+		return fmt.Errorf("%w: %v", ErrStreamUnavailable, err)
+	}
+	if err := checkSessionSeat(l, rows, members, devices); err != nil {
+		r.retract(ctx, l.ID)
+		return err
+	}
+	if l.ClientID != "" {
+		r.takeOver(ctx, l)
+	}
+	return nil
+}
+
+// checkSessionSeat applies the device and member limits to rows, the live seats of l's bucket
+// including l.
+func checkSessionSeat(l StreamLease, rows []StreamLease, members, devices int) error {
+	mine, distinct := 0, map[string]bool{}
+	for _, row := range rows {
+		if row.UserID == l.UserID && !row.Dropped {
+			mine++
+		}
+		if row.Counted && !(row.UserID == l.UserID && row.ID != l.ID) {
+			distinct[row.UserID] = true
+		}
+	}
+	if mine > devices {
+		return &DeviceLimitError{Limit: devices}
+	}
+	if !l.Counted || len(distinct) <= members {
+		return nil
+	}
+	for _, row := range rows {
+		if row.UserID == l.UserID && row.ID != l.ID && row.Counted {
+			return nil // the member already holds a seat; another connection adds no member
+		}
+	}
+	return ErrStreamLimit
 }
 
 // takeOver removes every dropped seat of l's user and client other than l, however many two streams that

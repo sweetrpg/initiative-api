@@ -41,6 +41,17 @@ type streamTable struct {
 	opts    StreamOptions
 }
 
+// seatsIn counts the seats whose bucket starts with prefix.
+func (st streamTable) seatsIn(prefix string) int {
+	n := 0
+	for _, d := range st.db.Fake(data.CollectionStreamLeases).Docs() {
+		if b, _ := d["bucket"].(string); strings.HasPrefix(b, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
 func (st streamTable) advance(d time.Duration) { st.clock.Add(int64(d)) }
 
 func newStreamTable(t *testing.T, opts StreamOptions, ticketTTL time.Duration) streamTable {
@@ -838,8 +849,8 @@ func TestAUserCannotHoldMoreStreamsThanTheCapAndASeatFreesWhenAStreamCloses(t *t
 	if _, code := st.open(t, "user-ok", ""); code != http.StatusTooManyRequests {
 		t.Fatalf("third stream = %d, want 429", code)
 	}
-	if n := len(st.db.Fake(data.CollectionStreamLeases).Docs()); n != 2 {
-		t.Errorf("the refused stream left a seat behind: %d rows, want 2", n)
+	if n := st.seatsIn("user:"); n != 2 {
+		t.Errorf("the refused stream left a seat behind: %d user seats, want 2", n)
 	}
 	if _, code := st.open(t, "user-two", ""); code != http.StatusSwitchingProtocols {
 		t.Errorf("another user's stream = %d, want it unaffected by the cap", code)
@@ -1018,7 +1029,7 @@ func TestConcurrentConnectsWithOneTicketOpenOneStreamAndHoldOneSeat(t *testing.T
 	if won.Load() != 1 {
 		t.Errorf("%d connects opened a stream, want exactly 1", won.Load())
 	}
-	waitFor(t, "the losers' seats to be given back", func() bool { return len(st.db.Fake(data.CollectionStreamLeases).Docs()) == 1 })
+	waitFor(t, "the losers' seats to be given back", func() bool { return st.seatsIn("user:") == 1 && st.seatsIn("session:") == 1 })
 }
 
 func TestACredentialStreamUsesItsOwnBucketNotItsOwners(t *testing.T) {

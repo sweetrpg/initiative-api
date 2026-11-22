@@ -65,7 +65,9 @@ type StreamOptions struct {
 	// seats lasting LeaseTTL unless renewed and kept Grace after a drop); MaxPerPod is this pod's
 	// cap, answered with close code 1013. Zero disables the cap.
 	ConcurrentMax, CredentialMax, MaxPerPod int
-	LeaseTTL, Grace                         time.Duration
+	// DevicesMax is the most connections one member may hold to a session (zero: the default).
+	DevicesMax      int
+	LeaseTTL, Grace time.Duration
 	// Pod names this pod on its seats.
 	Pod string
 }
@@ -75,6 +77,14 @@ func (o StreamOptions) buffer() int {
 		return o.Buffer
 	}
 	return streamBuffer
+}
+
+// devicesMax is the most connections one member may hold to a session.
+func (o StreamOptions) devicesMax() int {
+	if o.DevicesMax > 0 {
+		return o.DevicesMax
+	}
+	return constants.DefaultSessionDevicesMax
 }
 
 func (o StreamOptions) leaseTTL() time.Duration {
@@ -499,21 +509,23 @@ func (h streamHandlers) seatError(ctx context.Context, err error) error {
 	return err
 }
 
-// takeSessionSeat counts a non-GM connection to a session against its member limit, across pods:
-// the same number that holds the roster (7.12a). The GM, and any stream that is not in a session,
-// need no seat. The seat shares the user seat's client id, so a member who drops and reconnects
-// within the grace period keeps it even if others joined in the meantime. Nothing ends a live
-// connection because the limit fell: only a new connect is counted against it.
+// takeSessionSeat gives a session stream its seat in the session's bucket, across pods. A member's
+// connections share one member seat: the session holds at most the member limit of distinct
+// non-GM members (the number that holds the roster, 7.12a; the GM holds no member seat), and one
+// member, the GM included, at most DevicesMax connections. A stream that is not in a session needs
+// no seat. The seat shares the user seat's client id, so a member who drops and reconnects within
+// the grace period keeps it even if others joined in the meantime. Nothing ends a live connection
+// because the limit fell: only a new member is counted against it.
 func (h streamHandlers) takeSessionSeat(ctx context.Context, a serveArgs, s *seat) error {
 	if a.session == "" || a.userLevel || a.credentialID != "" {
 		return nil
 	}
 	limit, counted, err := h.svc.Streams.ConnectLimit(ctx, a.actor, a.session)
-	if err != nil || !counted {
+	if err != nil {
 		return err
 	}
-	l := data.StreamLease{ID: randomHex(), Bucket: "session:" + a.session, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
-	if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), limit); err != nil {
+	l := data.StreamLease{ID: randomHex(), Bucket: "session:" + a.session, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod, Counted: counted}
+	if err := h.svc.Leases.AcquireSession(ctx, l, h.opts.leaseTTL(), limit, h.opts.devicesMax()); err != nil {
 		if errors.Is(err, data.ErrStreamLimit) {
 			return &domain.EntitlementError{Key: domain.KeyMembersPerSession, Limit: limit}
 		}

@@ -285,3 +285,122 @@ func TestAnotherMembersClientIDStillCountsTheGraceSeatTowardTheLimit(t *testing.
 		t.Errorf("u-2 with u-1's client id, u-1 in grace and u-3 live = %v, want ErrStreamLimit (u-1's grace seat counts)", err)
 	}
 }
+
+func counted(user, id, client string) StreamLease {
+	l := sessionLease(id, user, client)
+	l.Counted = true
+	return l
+}
+
+func TestAMembersDevicesShareOneMemberSeat(t *testing.T) {
+	r, _, _ := newLeases(t)
+	ctx := context.Background()
+	for i, u := range []string{"u-1", "u-2"} {
+		if err := r.AcquireSession(ctx, counted(u, "first"+strconv.Itoa(i), ""), time.Minute, 2, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.AcquireSession(ctx, counted("u-1", "second", ""), time.Minute, 2, 2); err != nil {
+		t.Errorf("a second device of a member in a full session = %v, want a shared seat", err)
+	}
+	if err := r.AcquireSession(ctx, counted("u-3", "other", ""), time.Minute, 2, 2); !errors.Is(err, ErrStreamLimit) {
+		t.Errorf("a third member = %v, want ErrStreamLimit", err)
+	}
+}
+
+func TestAMemberOverTheDeviceLimitGetsTheTypedError(t *testing.T) {
+	r, col, _ := newLeases(t)
+	ctx := context.Background()
+	for _, id := range []string{"d1", "d2"} {
+		if err := r.AcquireSession(ctx, sessionLease(id, "u-1", ""), time.Minute, 0, 2); err != nil { // the GM: uncounted
+			t.Fatal(err)
+		}
+	}
+	err := r.AcquireSession(ctx, sessionLease("d3", "u-1", ""), time.Minute, 0, 2)
+	var dl *DeviceLimitError
+	if !errors.As(err, &dl) || dl.Limit != 2 {
+		t.Fatalf("a third device = %v, want *DeviceLimitError with limit 2", err)
+	}
+	if n := sessionSeats(t, col); n != 2 {
+		t.Errorf("%d seats after the refusal, want the refused one given back (2)", n)
+	}
+}
+
+func TestADroppedClientIsNotADeviceButStillHoldsItsMemberSeat(t *testing.T) {
+	r, _, _ := newLeases(t)
+	ctx := context.Background()
+	a := counted("u-1", "a1", "web")
+	if err := r.AcquireSession(ctx, a, time.Minute, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Release(ctx, a, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.AcquireSession(ctx, counted("u-1", "a2", "phone"), time.Minute, 1, 1); err != nil {
+		t.Errorf("a new device while the old one is in grace = %v, want it allowed (a dropped client is not a device)", err)
+	}
+	if err := r.AcquireSession(ctx, counted("u-2", "b1", "web"), time.Minute, 1, 1); !errors.Is(err, ErrStreamLimit) {
+		t.Errorf("another member = %v, want ErrStreamLimit", err)
+	}
+}
+
+func TestAnotherMembersClientIDCannotTakeOverAGraceSeatInASession(t *testing.T) {
+	r, col, _ := newLeases(t)
+	ctx := context.Background()
+	a := counted("u-1", "a1", "web")
+	if err := r.AcquireSession(ctx, a, time.Minute, 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Release(ctx, a, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.AcquireSession(ctx, counted("u-2", "b1", "web"), time.Minute, 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	if n := sessionSeats(t, col, bson.E{Key: "_id", Value: "a1"}, bson.E{Key: "dropped", Value: true}); n != 1 {
+		t.Errorf("u-1's grace seat survives u-2 using the same client id: %d rows, want 1", n)
+	}
+	if err := r.AcquireSession(ctx, counted("u-3", "c1", "tab"), time.Minute, 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AcquireSession(ctx, counted("u-4", "d1", "tab"), time.Minute, 3, 2); !errors.Is(err, ErrStreamLimit) {
+		t.Errorf("a fourth member with u-1's grace seat still held = %v, want ErrStreamLimit", err)
+	}
+}
+
+func TestConcurrentFirstConnectsOfDifferentMembersNeverLeaveTheSessionOverItsLimit(t *testing.T) {
+	r, col, _ := newLeases(t)
+	ctx := context.Background()
+	if err := r.AcquireSession(ctx, counted("u-0", "seed", ""), time.Minute, 3, 2); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := range 24 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := r.AcquireSession(ctx, counted("u-"+strconv.Itoa(i+1), "c"+strconv.Itoa(i), ""), time.Minute, 3, 2); err != nil && !errors.Is(err, ErrStreamLimit) {
+				t.Errorf("acquire: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := sessionSeats(t, col); n > 3 {
+		t.Errorf("%d member seats held, over the limit of 3", n)
+	}
+}
+
+func TestAnotherMembersDevicesCountAsOneMemberForANewMember(t *testing.T) {
+	r, _, _ := newLeases(t)
+	ctx := context.Background()
+	for _, c := range []struct{ user, id string }{{"u-1", "a1"}, {"u-1", "a2"}, {"u-2", "b1"}} {
+		if err := r.AcquireSession(ctx, counted(c.user, c.id, ""), time.Minute, 3, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.AcquireSession(ctx, counted("u-3", "c1", ""), time.Minute, 3, 2); err != nil {
+		t.Errorf("the third member with u-1 on two devices = %v, want it allowed: 3 members, 4 connections", err)
+	}
+}
