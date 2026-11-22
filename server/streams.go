@@ -463,7 +463,6 @@ type seat struct {
 	// member limit; sessionHeld is false for the GM, a private or user-level stream, and a credential.
 	session     data.StreamLease
 	sessionHeld bool
-	limit       int
 }
 
 // takeSeat gives the stream a seat in its bucket: the user's for a user's stream, the credential's
@@ -520,7 +519,7 @@ func (h streamHandlers) takeSessionSeat(ctx context.Context, a serveArgs, s *sea
 		}
 		return h.seatError(ctx, err)
 	}
-	s.session, s.sessionHeld, s.limit = l, true, limit
+	s.session, s.sessionHeld = l, true
 	return nil
 }
 

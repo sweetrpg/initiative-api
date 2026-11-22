@@ -266,3 +266,22 @@ func TestTheSameMemberTakesTheirGraceSeatBackWithTheirClientID(t *testing.T) {
 		t.Errorf("%d seats after the reconnect, want the dropped one replaced (1)", n)
 	}
 }
+
+func TestAnotherMembersClientIDStillCountsTheGraceSeatTowardTheLimit(t *testing.T) {
+	r, _, _ := newLeases(t)
+	ctx := context.Background()
+	a := sessionLease("a1", "u-1", "web")
+	if err := r.Acquire(ctx, a, time.Minute, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Release(ctx, a, time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Acquire(ctx, sessionLease("c1", "u-3", "tab"), time.Minute, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Acquire(ctx, sessionLease("b1", "u-2", "web"), time.Minute, 2); !errors.Is(err, ErrStreamLimit) {
+		t.Errorf("u-2 with u-1's client id, u-1 in grace and u-3 live = %v, want ErrStreamLimit (u-1's grace seat counts)", err)
+	}
+}

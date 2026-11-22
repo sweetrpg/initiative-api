@@ -82,7 +82,18 @@ func TestWhenTheLimitFallsBelowTheConnectionsOnlyNewOnesAreCounted(t *testing.T)
 
 	st.svc.Sessions.MaxMembers = 1 // the owner's limit fell below the 2 live connections
 
-	time.Sleep(100 * time.Millisecond)                                    // a connection ended because the limit fell would have released its seat by now
+	for _, c := range []*websocket.Conn{a, b} { // a round trip: the server still answers on a connection the limit did not end
+		go func() { // a ping's answer is read by the reader, which also takes the frames the server sent
+			for {
+				if _, _, err := c.Read(t.Context()); err != nil {
+					return
+				}
+			}
+		}()
+		if err := c.Ping(t.Context()); err != nil {
+			t.Fatalf("a connection was ended because the limit fell: %v", err)
+		}
+	}
 	if n := len(st.db.Fake(data.CollectionStreamLeases).Docs()); n != 2 { // each connection holds one session seat (no per-user cap here)
 		t.Errorf("%d seats after the limit fell, want the 2 connections to keep their seats", n)
 	}
