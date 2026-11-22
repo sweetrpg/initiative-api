@@ -61,6 +61,10 @@ type StreamLease struct {
 	// Counted marks a session seat that counts toward the session's member limit: every member
 	// but the GM. Every session seat, the GM's too, counts toward the member's device limit.
 	Counted bool `bson:"counted,omitempty"`
+	// Pending marks a session seat whose connect has not passed its checks yet. A pending seat
+	// counts toward every limit but never shields its member from the member limit, so two first
+	// connects of one new member racing each other are both refused.
+	Pending bool `bson:"pending,omitempty"`
 }
 
 // StreamLeases is the lease store.
@@ -80,13 +84,11 @@ func (r *StreamLeases) SetClock(now func() time.Time) { r.now = now }
 func (r *StreamLeases) live(l StreamLease) bson.D {
 	f := bson.D{{Key: "bucket", Value: l.Bucket}, {Key: "until", Value: bson.D{{Key: "$gt", Value: r.now()}}}}
 	if l.ClientID != "" {
-		// A dropped seat of the same user and client is the one this stream takes over, not a second
-		// seat. The user matters: a session bucket is shared, so another member's client id must not
-		// hide this user's grace seat.
+		// A dropped seat of the same client is the one this stream takes over, not a second seat.
+		// Only user and credential buckets are counted this way, and each holds one owner's seats.
 		f = append(f, bson.E{Key: "$or", Value: bson.A{
 			bson.D{{Key: "dropped", Value: bson.D{{Key: "$ne", Value: true}}}},
 			bson.D{{Key: "client_id", Value: bson.D{{Key: "$ne", Value: l.ClientID}}}},
-			bson.D{{Key: "user_id", Value: bson.D{{Key: "$ne", Value: l.UserID}}}},
 		}})
 	}
 	return f
@@ -147,7 +149,9 @@ func (r *StreamLeases) AcquireSession(ctx context.Context, l StreamLease, ttl ti
 		return err
 	}
 	l.Until, l.Dropped = r.now().Add(ttl), false
-	if err := r.c.InsertOne(ctx, l); err != nil {
+	pending := l
+	pending.Pending = true
+	if err := r.c.InsertOne(ctx, pending); err != nil {
 		r.retract(ctx, l.ID)
 		return fmt.Errorf("%w: %v", ErrStreamUnavailable, err)
 	}
@@ -160,6 +164,11 @@ func (r *StreamLeases) AcquireSession(ctx context.Context, l StreamLease, ttl ti
 	if err := checkSessionSeat(l, rows, members, devices); err != nil {
 		r.retract(ctx, l.ID)
 		return err
+	}
+	var out StreamLease
+	if err := r.c.FindOneAndUpdate(ctx, bson.D{{Key: "_id", Value: l.ID}}, bson.D{{Key: "$unset", Value: bson.D{{Key: "pending", Value: ""}}}}, &out); err != nil {
+		r.retract(ctx, l.ID)
+		return fmt.Errorf("%w: %v", ErrStreamUnavailable, err)
 	}
 	if l.ClientID != "" {
 		r.takeOver(ctx, l)
@@ -186,7 +195,7 @@ func checkSessionSeat(l StreamLease, rows []StreamLease, members, devices int) e
 		return nil
 	}
 	for _, row := range rows {
-		if row.UserID == l.UserID && row.ID != l.ID && row.Counted {
+		if row.UserID == l.UserID && row.ID != l.ID && row.Counted && !row.Pending {
 			return nil // the member already holds a seat; another connection adds no member
 		}
 	}

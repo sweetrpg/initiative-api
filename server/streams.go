@@ -469,8 +469,9 @@ type headFrame struct {
 type seat struct {
 	lease data.StreamLease
 	held  bool
-	// session is the seat in the session's bucket, which counts live non-GM connections against the
-	// member limit; sessionHeld is false for the GM, a private or user-level stream, and a credential.
+	// session is the seat in the session's bucket, which counts a member's connections against the
+	// member and device limits; sessionHeld is false for a private or user-level stream and a
+	// credential.
 	session     data.StreamLease
 	sessionHeld bool
 }

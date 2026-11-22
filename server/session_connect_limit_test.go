@@ -120,6 +120,7 @@ func TestAClosedDeviceFreesItsPlaceForANewOne(t *testing.T) {
 
 	waitFor(t, "the closed device's place to free", func() bool { _, code := st.open(t, "user-two", ""); return code == http.StatusSwitchingProtocols })
 }
+
 func TestTheGMConnectsWhenTheSessionIsAtTheLimitButIsHeldToTheDeviceLimit(t *testing.T) {
 	st := limitTable(t, 1, StreamOptions{})
 	st.accepted(t, "user-two", "")
@@ -134,6 +135,7 @@ func TestTheGMConnectsWhenTheSessionIsAtTheLimitButIsHeldToTheDeviceLimit(t *tes
 		t.Errorf("the GM's third device = %d %+v, want 403 device_limit_reached", code, body)
 	}
 }
+
 func TestWhenTheLimitFallsBelowTheMembersConnectedOnlyNewMembersAreCounted(t *testing.T) {
 	st := fullTable(t, 3, StreamOptions{})
 	a := st.accepted(t, "user-two", "")
@@ -166,6 +168,7 @@ func TestWhenTheLimitFallsBelowTheMembersConnectedOnlyNewMembersAreCounted(t *te
 	waitFor(t, "the closed connections' seats to free", func() bool { return st.seatsIn("session:") == 0 })
 	st.accepted(t, "user-four", "") // fewer members connected than the limit again
 }
+
 func TestAMemberWhoDropsAndReconnectsInTheGraceKeepsTheirSeatEvenWhenOthersFillTheSession(t *testing.T) {
 	st := fullTable(t, 2, StreamOptions{Grace: time.Minute})
 	st.accepted(t, "user-two", `,"client_id":"web-a"`)
@@ -185,6 +188,7 @@ func TestAMemberWhoDropsAndReconnectsInTheGraceKeepsTheirSeatEvenWhenOthersFillT
 	}
 	st.accepted(t, "user-three", `,"client_id":"web-b"`) // the same client takes its seat back
 }
+
 func TestSeatsOfAPodThatCrashedStopCountingAfterTheLeaseTimeout(t *testing.T) {
 	st := fullTable(t, 2, StreamOptions{LeaseTTL: 100 * time.Millisecond, Heartbeat: time.Hour})
 	st.accepted(t, "user-two", "")
@@ -197,6 +201,7 @@ func TestSeatsOfAPodThatCrashedStopCountingAfterTheLeaseTimeout(t *testing.T) {
 
 	st.accepted(t, "user-four", "")
 }
+
 func TestAMemberConnectFailsClosedWhenTheOwnerRecordIsMissingOrStale(t *testing.T) {
 	cases := map[string]bson.D{
 		"stale":   {{Key: "$set", Value: bson.D{{Key: "owner_limits_at", Value: time.Now().Add(-8 * 24 * time.Hour)}}}},
