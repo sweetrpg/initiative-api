@@ -1,4 +1,18 @@
 
+## 0.15.0 - 2026-11-22
+
+### Added
+- Count non-GM connections against the session member limit
+- Share one seat across a member's devices and cap devices per member
+
+
+### Fixed
+- Match grace seats by user as well as client id, and cover the connect-limit gaps
+- Hide base_revision and applied_revision from non-GM viewers
+- Keep a member's in-flight first connect from shielding itself from the member limit
+
+
+
 ## 0.14.0 - 2026-11-21
 
 ### Added

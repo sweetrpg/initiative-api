@@ -42,6 +42,9 @@ type Config struct {
 	// SessionMembersMax is the maximum of a session's member limit: an entitled members_per_session
 	// above it has no effect (initiative-entitlement-gating, "Session member limit").
 	SessionMembersMax int
+	// SessionDevicesMax is the most connections one member may hold to a session stream, the GM
+	// included.
+	SessionDevicesMax int
 	// CredentialEventsMaxDisconnect is how long NATS may be unreachable before integration
 	// credentials fail closed (503); the rest of the API keeps serving.
 	CredentialEventsMaxDisconnect time.Duration
@@ -102,6 +105,12 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		errs = append(errs, fmt.Errorf("%s %q: must be a positive integer", constants.SESSION_MEMBERS_MAX, maxMembers))
 	} else {
 		c.SessionMembersMax = n
+	}
+	maxDevices := get(constants.SESSION_DEVICES_MAX, strconv.Itoa(constants.DefaultSessionDevicesMax))
+	if n, err := strconv.Atoi(maxDevices); err != nil || n < 1 {
+		errs = append(errs, fmt.Errorf("%s %q: must be a positive integer", constants.SESSION_DEVICES_MAX, maxDevices))
+	} else {
+		c.SessionDevicesMax = n
 	}
 	maxAge := get(constants.OWNER_ENTITLEMENTS_MAX_AGE, defaultOwnerEntitlementsMaxAge)
 	if d, err := time.ParseDuration(maxAge); err != nil || d <= 0 {

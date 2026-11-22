@@ -56,7 +56,7 @@ type ChangeRequest struct {
 	RemoveConditions []string       `bson:"remove_conditions,omitempty" json:"remove_conditions,omitempty"`
 	Status           string         `bson:"status" json:"status"`
 	// BaseRevision is the encounter revision the player saw when submitting.
-	BaseRevision int64      `bson:"base_revision" json:"base_revision"`
+	BaseRevision int64      `bson:"base_revision" json:"base_revision,omitempty"`
 	CreatedAt    time.Time  `bson:"created_at" json:"created_at"`
 	DecidedBy    string     `bson:"decided_by,omitempty" json:"decided_by,omitempty"`
 	DecidedAt    *time.Time `bson:"decided_at,omitempty" json:"decided_at,omitempty"`
@@ -107,7 +107,19 @@ func (r *ChangeRequests) Create(ctx context.Context, v Viewer, req ChangeRequest
 	}
 	req.ID, req.SessionID, req.RequestedBy = newID(), v.session, v.actor
 	req.Status, req.CreatedAt = ChangePending, r.now()
-	return req, r.c.InsertOne(ctx, req)
+	if err := r.c.InsertOne(ctx, req); err != nil {
+		return ChangeRequest{}, err
+	}
+	return req.forViewer(v), nil
+}
+
+// forViewer is the request as v may read it. Only GM-level viewers see the encounter revisions
+// (base_revision, applied_revision); everyone else orders by view_tag and never reads a revision.
+func (r ChangeRequest) forViewer(v Viewer) ChangeRequest {
+	if v.level != ViewGM {
+		r.BaseRevision, r.AppliedRevision = 0, 0
+	}
+	return r
 }
 
 // List returns one page of the encounter's change requests, oldest first. A GM or co-GM sees all
@@ -136,7 +148,11 @@ func (r *ChangeRequests) List(ctx context.Context, v Viewer, encounterID, status
 	default:
 		q.Filters = append(q.Filters, Filter{Field: "status", Op: OpEq, Values: []any{status}})
 	}
-	return runQuery[ChangeRequest](ctx, r.c, ChangeRequestSpec, base, q)
+	page, err := runQuery[ChangeRequest](ctx, r.c, ChangeRequestSpec, base, q)
+	for i := range page.Items {
+		page.Items[i] = page.Items[i].forViewer(v)
+	}
+	return page, err
 }
 
 // Load reads one change request of the decision's session and encounter. d must grant can_edit.
