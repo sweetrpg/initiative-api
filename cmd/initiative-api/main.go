@@ -160,7 +160,7 @@ func main() {
 		Leases:            data.NewStreamLeases(db),
 		Stream: server.StreamOptions{
 			AllowedOrigins: cfg.StreamAllowedOrigins, MaxAge: cfg.StreamMaxAge, Heartbeat: cfg.StreamHeartbeat, RecheckInterval: cfg.StreamRecheckInterval,
-			ConcurrentMax: cfg.StreamConcurrentMax, CredentialMax: cfg.StreamCredentialMax, MaxPerPod: cfg.StreamMaxPerPod, LeaseTTL: cfg.StreamLeaseTTL, Grace: cfg.StreamGrace, Pod: pod,
+			ConcurrentMax: cfg.StreamConcurrentMax, CredentialMax: cfg.StreamCredentialMax, DevicesMax: cfg.SessionDevicesMax, MaxPerPod: cfg.StreamMaxPerPod, LeaseTTL: cfg.StreamLeaseTTL, Grace: cfg.StreamGrace, Pod: pod,
 		},
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc, pool), ReadHeaderTimeout: 10 * time.Second}
