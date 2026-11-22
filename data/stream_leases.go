@@ -175,7 +175,7 @@ func checkSessionSeat(l StreamLease, rows []StreamLease, members, devices int) e
 		if row.UserID == l.UserID && !row.Dropped {
 			mine++
 		}
-		if row.Counted && !(row.UserID == l.UserID && row.ID != l.ID) {
+		if row.Counted && (row.UserID != l.UserID || row.ID == l.ID) {
 			distinct[row.UserID] = true
 		}
 	}
