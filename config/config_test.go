@@ -56,6 +56,8 @@ func TestLoadErrors(t *testing.T) {
 		{"unparsable max age", map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "week"}, "OWNER_ENTITLEMENTS_MAX_AGE"},
 		{"zero session members max", map[string]string{"SESSION_MEMBERS_MAX": "0"}, "SESSION_MEMBERS_MAX"},
 		{"non-numeric session members max", map[string]string{"SESSION_MEMBERS_MAX": "many"}, "SESSION_MEMBERS_MAX"},
+		{"zero session devices max", map[string]string{"SESSION_DEVICES_MAX": "0"}, "SESSION_DEVICES_MAX"},
+		{"non-numeric session devices max", map[string]string{"SESSION_DEVICES_MAX": "few"}, "SESSION_DEVICES_MAX"},
 		{"zero max age", map[string]string{"OWNER_ENTITLEMENTS_MAX_AGE": "0s"}, "OWNER_ENTITLEMENTS_MAX_AGE"},
 		{"wildcard origin", map[string]string{"ALLOWED_ORIGINS": "https://a.example,*"}, "wildcard"},
 	}
@@ -121,5 +123,30 @@ func TestLoadSessionMembersMax(t *testing.T) {
 	c, err = Load(lookupFrom(withAuth(map[string]string{"SESSION_MEMBERS_MAX": "8"})))
 	if err != nil || c.SessionMembersMax != 8 {
 		t.Fatalf("set = %d, %v; want 8", c.SessionMembersMax, err)
+	}
+}
+
+func TestLoadStreamRecheckInterval(t *testing.T) {
+	c, err := Load(lookupFrom(withAuth(nil)))
+	if err != nil || c.StreamRecheckInterval != 5*time.Second {
+		t.Fatalf("default = %v, %v; want 5s", c.StreamRecheckInterval, err)
+	}
+	c, err = Load(lookupFrom(withAuth(map[string]string{"STREAM_RECHECK_INTERVAL": "45s", "STREAM_HEARTBEAT": "10s", "STREAM_LEASE_TTL": "30s"})))
+	if err != nil || c.StreamRecheckInterval != 10*time.Second {
+		t.Fatalf("above the heartbeat = %v, %v; want it clamped to 10s", c.StreamRecheckInterval, err)
+	}
+	if _, err := Load(lookupFrom(withAuth(map[string]string{"STREAM_RECHECK_INTERVAL": "100ms"}))); err == nil || !strings.Contains(err.Error(), "STREAM_RECHECK_INTERVAL") {
+		t.Fatalf("100ms = %v, want a range error", err)
+	}
+}
+
+func TestLoadSessionDevicesMax(t *testing.T) {
+	c, err := Load(lookupFrom(withAuth(nil)))
+	if err != nil || c.SessionDevicesMax != 2 {
+		t.Fatalf("default = %d, %v; want 2", c.SessionDevicesMax, err)
+	}
+	c, err = Load(lookupFrom(withAuth(map[string]string{"SESSION_DEVICES_MAX": "4"})))
+	if err != nil || c.SessionDevicesMax != 4 {
+		t.Fatalf("set = %d, %v; want 4", c.SessionDevicesMax, err)
 	}
 }

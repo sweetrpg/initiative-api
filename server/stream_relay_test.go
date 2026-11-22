@@ -225,11 +225,11 @@ func TestAPendingSubscriptionIsClosedAfterItsDeadline(t *testing.T) {
 	}
 }
 
-func TestAnEvictionRowWithNoSessionEndsNothing(t *testing.T) {
+func TestAnEvictionRowWithNeitherSessionNorUserEndsNothing(t *testing.T) {
 	e := newEventTable(t, nil)
 	pods := newRelayPods(t, e, "pod-b")
 	owner := subscribe(pods[0].hub, ownerViewer(t, e), "", 4)
-	row := map[string]any{"_id": primitive.NewObjectID(), "pod": "pod-x", "kind": "evict", "at": time.Now(), "user_id": "u-1"}
+	row := map[string]any{"_id": primitive.NewObjectID(), "pod": "pod-x", "kind": "evict", "at": time.Now()}
 	if err := e.db.Collection(stream.FanoutCollection).InsertOne(context.Background(), row); err != nil {
 		t.Fatal(err)
 	}
@@ -367,5 +367,131 @@ func TestAFullRemoteQueueDisconnectsTheAudienceInsteadOfLeavingItStale(t *testin
 	waitFor(t, "the audience to be disconnected", func() bool { return isClosed(player) })
 	if rb.Dropped() == 0 {
 		t.Error("the dropped remote rows were not counted")
+	}
+}
+
+func TestAnAddressedNoticeOnOnePodReachesTheAddresseeOnTheOtherOnce(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a", "pod-b")
+	onA := subscribe(pods[0].hub, e.viewer(t, "user-two"), encE1, 8)
+	onB := subscribe(pods[1].hub, e.viewer(t, "user-two"), encE1, 8)
+	other := subscribe(pods[1].hub, e.viewer(t, "user-three"), encE1, 8)
+
+	pods[0].hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: e.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now(), Data: map[string]any{"combatant_id": "pc"}})
+
+	waitFor(t, "the notice on the other pod", func() bool { return len(onB.C) > 0 })
+	if n := len(drain(onA)); n != 1 {
+		t.Errorf("the originating pod delivered %d, want 1", n)
+	}
+	if got := drain(onB); len(got) != 1 || got[0].Type != data.NoticeTurnYours {
+		t.Errorf("the other pod delivered %+v, want one turn.yours", got)
+	}
+	if n := len(drain(other)); n != 0 {
+		t.Errorf("a different user on the other pod received %d notices", n)
+	}
+}
+
+func TestAMuteIsHonoredOnTheRemotePod(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a", "pod-b")
+	pods[1].hub.SetPreferences(mutes{"u-2": {data.NoticeTurnYours}})
+	muted := subscribe(pods[1].hub, e.viewer(t, "user-two"), encE1, 8)
+
+	pods[0].hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: e.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+	pods[0].hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnNext, SessionID: e.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+
+	waitFor(t, "the unmuted notice on the remote pod", func() bool { return len(muted.C) > 0 })
+	pods[1].hub.Flush()
+	got := notices(drain(muted))
+	if len(got) != 1 || got[0].Type != data.NoticeTurnNext {
+		t.Errorf("the remote pod delivered %+v, want only turn.next (turn.yours is muted there)", got)
+	}
+}
+
+func TestEvictingAUserClosesEveryStreamTheyHoldAndNobodyElses(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	inSession := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
+	sessionWide := subscribe(hub, e.viewer(t, "user-two"), "", 8)
+	private := hub.Open("", "u-2", "", 8) // pending: evicted before it was granted
+	userLevel := hub.OpenUser("u-2", 8)
+	other := subscribe(hub, e.viewer(t, "user-three"), encE1, 8)
+	otherUserLevel := hub.OpenUser("u-3", 8)
+
+	hub.EvictUser("u-2")
+
+	for name, s := range map[string]*stream.Subscription{"encounter": inSession, "session-wide": sessionWide, "private": private, "user-level": userLevel} {
+		if !s.Ended() {
+			t.Errorf("the denied user's %s stream is still open", name)
+		}
+	}
+	if other.Ended() || otherUserLevel.Ended() {
+		t.Error("another user's streams were closed")
+	}
+}
+
+func TestADeniedUserWhoIsGrantedAgainCanReconnectAndHearEvents(t *testing.T) {
+	e := newEventTable(t, nil)
+	hub := stream.New(e.enc)
+	t.Cleanup(hub.Close)
+	first := subscribe(hub, e.viewer(t, "user-two"), encE1, 8)
+	hub.EvictUser("u-2")
+	if !first.Ended() {
+		t.Fatal("the stream survived the eviction")
+	}
+
+	again := subscribe(hub, e.viewer(t, "user-two"), encE1, 8) // the eviction is not remembered
+	hub.Notify(context.Background(), data.Notice{Type: data.NoticeTurnYours, SessionID: e.sid, EncounterID: encE1, Users: []string{"u-2"}, At: time.Now()})
+	hub.Flush()
+
+	if again.Ended() {
+		t.Error("the reconnected stream was closed by the old eviction")
+	}
+	if got := notices(drain(again)); len(got) != 1 {
+		t.Errorf("the reconnected stream got %d notices, want 1", len(got))
+	}
+}
+
+func TestAnEvictionOnOnePodClosesTheUsersStreamsOnTheOtherAndNoOneElses(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a", "pod-b")
+	denied := subscribe(pods[1].hub, e.viewer(t, "user-two"), encE1, 8)
+	deniedUser := pods[1].hub.OpenUser("u-2", 8)
+	other := subscribe(pods[1].hub, e.viewer(t, "user-three"), encE1, 8)
+
+	pods[0].hub.EvictUser("u-2")
+
+	waitFor(t, "the denied user's streams to close on the other pod", func() bool { return isClosed(denied) && deniedUser.Ended() })
+	if other.Ended() {
+		t.Error("another user's stream on the other pod was closed")
+	}
+}
+
+func TestAnEvictionRowWithAUserAndNoSessionEndsThatUsersStreams(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-b")
+	victim := subscribe(pods[0].hub, e.viewer(t, "user-two"), encE1, 4)
+	row := map[string]any{"_id": primitive.NewObjectID(), "pod": "pod-x", "kind": "evict", "at": time.Now(), "user_id": "u-2"}
+	if err := e.db.Collection(stream.FanoutCollection).InsertOne(context.Background(), row); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the row's user to be evicted", func() bool { return isClosed(victim) })
+}
+
+func TestEvictingNobodyClosesNothingAndWritesNoRow(t *testing.T) {
+	e := newEventTable(t, nil)
+	pods := newRelayPods(t, e, "pod-a")
+	any := subscribe(pods[0].hub, e.viewer(t, "user-two"), encE1, 4)
+	userLevel := pods[0].hub.OpenUser("u-2", 4)
+	before := len(e.db.Fake(stream.FanoutCollection).Docs())
+
+	pods[0].hub.EvictUser("")
+	time.Sleep(100 * time.Millisecond) // a row would have been written by now
+
+	if any.Ended() || userLevel.Ended() {
+		t.Error("an empty user id closed someone's stream")
+	}
+	if got := len(e.db.Fake(stream.FanoutCollection).Docs()); got != before {
+		t.Errorf("an empty user id wrote %d fan-out rows, want none", got-before)
 	}
 }

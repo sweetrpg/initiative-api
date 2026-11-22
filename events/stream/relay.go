@@ -24,22 +24,13 @@ const FanoutCollection = "stream_fanout"
 // startup fails until the index is dropped.
 const FanoutTTL = 60 * time.Second
 
-// MaxStreamAge and GuardInterval are the values the stream transport (5.2 part 2) enforces; they
-// live here so the relay's documentation can state the bounds. They are the bounds on revocation when a relayed eviction is lost: a
-// connection ends at MaxStreamAge whatever happens, and its guard re-checks membership every
-// GuardInterval. The transport that enforces both is 5.2 part 2 (the stream endpoint, branch
-// feature/stream-tickets); until it merges, only the relay's own retries and tail-gap eviction apply.
-const (
-	MaxStreamAge  = time.Hour
-	GuardInterval = 30 * time.Second
-)
-
 // FanoutIndexes is the TTL index of the fan-out collection.
 var FanoutIndexes = []store.IndexSpec{{Name: "at_ttl", Keys: bson.D{{Key: "at", Value: 1}}, ExpireAfter: FanoutTTL}}
 
 const (
 	kindChange = "change"
 	kindEvict  = "evict"
+	kindNotice = "notice"
 )
 
 // fanoutDoc is one row of the fan-out collection. A change row carries the data.Change the
@@ -52,6 +43,7 @@ type fanoutDoc struct {
 	At      time.Time          `bson:"at"`
 	EventID string             `bson:"event_id,omitempty"`
 	Change  *data.Change       `bson:"change,omitempty"`
+	Notice  *data.Notice       `bson:"notice,omitempty"`
 	Session string             `bson:"session_id,omitempty"`
 	User    string             `bson:"user_id,omitempty"`
 }
@@ -71,8 +63,8 @@ type fanoutDoc struct {
 // and be authorized again. A change row dropped because this pod's remote queue is full ends that
 // change's audience here for the same reason. Rows lost on the writing side (a full change queue,
 // or an insert that failed through its window) cannot be recovered by the other pods, which learn
-// of the gap only from clients refetching. The final bound for anything lost beyond that is MaxStreamAge, with
-// membership re-checked every GuardInterval.
+// of the gap only from clients refetching. The final bound for anything lost beyond that is each stream's membership re-check
+// (server.StreamOptions.RevocationBound, 7s by default), and the stream's maximum age behind it.
 type Relay struct {
 	h   *Hub
 	col store.Collection
@@ -173,6 +165,18 @@ func (r *Relay) publishChange(c data.Change, eventID string) {
 	default:
 		r.dropped.Add(1)
 		slog.Warn("the fan-out queue is full; other pods miss an encounter event", "encounter", c.After.ID, "type", c.Type)
+	}
+}
+
+// publishNotice carries an addressed event to the other pods, whose streams may hold its
+// addressees. Like a change it is dropped, with a log line, when the queue is full.
+func (r *Relay) publishNotice(n data.Notice) {
+	d := fanoutDoc{ID: primitive.NewObjectID(), Pod: r.pod, Kind: kindNotice, At: time.Now(), Notice: &n}
+	select {
+	case r.out <- d:
+	default:
+		r.dropped.Add(1)
+		slog.Warn("the fan-out queue is full; other pods miss a notification", "type", n.Type, "session", n.SessionID)
 	}
 }
 
@@ -326,10 +330,14 @@ func (r *Relay) handle(ctx context.Context, raw bson.Raw) {
 		return
 	}
 	switch {
+	case d.Kind == kindEvict && d.Session == "" && d.User != "":
+		r.h.evictUserLocal(d.User) // a platform-wide eviction: every stream of that user
 	case d.Kind == kindEvict && d.Session == "":
-		slog.WarnContext(ctx, "dropped a fan-out eviction with no session")
+		slog.WarnContext(ctx, "dropped a fan-out eviction with no session and no user")
 	case d.Kind == kindEvict:
 		r.h.evictLocal(d.Session, d.User)
+	case d.Kind == kindNotice && d.Notice != nil:
+		r.h.enqueueNotice(noticeJob{n: *d.Notice, local: true}) // preferences are read on the worker, never on the tail
 	case d.Kind == kindChange && d.Change != nil:
 		select {
 		case r.in <- d:

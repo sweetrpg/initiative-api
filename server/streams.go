@@ -30,7 +30,8 @@ const (
 	CloseSlowConsumer      websocket.StatusCode = 4003 // the client fell behind; reconnect and refetch
 	CloseMaxAge            websocket.StatusCode = 4004 // the connection reached its maximum age
 	maxGuardErrors                              = 3
-	checkTimeout                                = 5 * time.Second
+	maxRecheckFailures                          = 3 // failed membership re-checks in a row that end a stream
+	checkTimeout                                = 2 * time.Second
 	readLimit                                   = 1024
 	streamBuffer                                = 64 // events buffered per connection
 	writeTimeout                                = 10 * time.Second
@@ -47,8 +48,11 @@ type StreamOptions struct {
 	// is always allowed.
 	AllowedOrigins []string
 	// MaxAge ends a stream after this long (default 1h); Heartbeat is the interval of the
-	// application heartbeat, the protocol ping, and the membership re-check (default 20s).
+	// application heartbeat and the protocol ping (default 20s).
 	MaxAge, Heartbeat time.Duration
+	// RecheckInterval is how often a stream re-reads its membership and credential (default 5s,
+	// never above Heartbeat).
+	RecheckInterval time.Duration
 	// Buffer is how many events a stream may fall behind before it is closed (default 64).
 	Buffer int
 	// beforeWrite, when set by a test, runs before each event is written.
@@ -61,7 +65,9 @@ type StreamOptions struct {
 	// seats lasting LeaseTTL unless renewed and kept Grace after a drop); MaxPerPod is this pod's
 	// cap, answered with close code 1013. Zero disables the cap.
 	ConcurrentMax, CredentialMax, MaxPerPod int
-	LeaseTTL, Grace                         time.Duration
+	// DevicesMax is the most connections one member may hold to a session (zero: the default).
+	DevicesMax      int
+	LeaseTTL, Grace time.Duration
 	// Pod names this pod on its seats.
 	Pod string
 }
@@ -71,6 +77,14 @@ func (o StreamOptions) buffer() int {
 		return o.Buffer
 	}
 	return streamBuffer
+}
+
+// devicesMax is the most connections one member may hold to a session.
+func (o StreamOptions) devicesMax() int {
+	if o.DevicesMax > 0 {
+		return o.DevicesMax
+	}
+	return constants.DefaultSessionDevicesMax
 }
 
 func (o StreamOptions) leaseTTL() time.Duration {
@@ -86,6 +100,42 @@ func (o StreamOptions) maxAge() time.Duration {
 	}
 	return constants.DefaultStreamMaxAge
 }
+
+func (o StreamOptions) recheck() time.Duration {
+	d := o.RecheckInterval
+	if d <= 0 {
+		d = constants.DefaultStreamRecheckInterval
+	}
+	return min(d, o.heartbeat())
+}
+
+// The re-check runs inline in the connection's loop, so a slow client delays it. The loop is held
+// by one write at a time and a due re-check runs before every event write, so stallAllowance is the
+// most one pass can hold it: a heartbeat write that the client takes up to writeTimeout to accept,
+// then a seat renewal bounded by checkTimeout. A write that does not complete in writeTimeout ends
+// the stream anyway.
+const stallAllowance = writeTimeout + checkTimeout
+
+// RevocationBound is the longest a stream stays open after its member is removed, demoted or
+// blocked, when the eviction itself is lost (the evictor or the relay is down) and the client keeps
+// up: one re-check interval to the next re-check, plus the time that check may take.
+func (o StreamOptions) RevocationBound() time.Duration { return o.recheck() + checkTimeout }
+
+// StalledBound is RevocationBound when the client's socket is slow enough to hold the loop for a
+// whole heartbeat write and renewal first.
+func (o StreamOptions) StalledBound() time.Duration { return o.RevocationBound() + stallAllowance }
+
+// FaultBound is RevocationBound when the store cannot answer the re-checks: the stream closes at
+// the third consecutive failed one, so each of three intervals may also spend a full check timeout.
+func (o StreamOptions) FaultBound() time.Duration {
+	return maxRecheckFailures * (o.recheck() + checkTimeout)
+}
+
+// StalledFaultBound is FaultBound with a slow client.
+func (o StreamOptions) StalledFaultBound() time.Duration { return o.FaultBound() + stallAllowance }
+
+// renewTimeout bounds one seat renewal, which holds the connection's loop.
+func (o StreamOptions) renewTimeout() time.Duration { return min(o.heartbeat()/2, checkTimeout) }
 
 func (o StreamOptions) heartbeat() time.Duration {
 	if o.Heartbeat > 0 {
@@ -146,14 +196,23 @@ type ticketBody struct {
 	SessionID   string `json:"session_id"`
 	EncounterID string `json:"encounter_id"`
 	ClientID    string `json:"client_id"`
+	// Scope is empty for an encounter stream or "user" for the user-level stream.
+	Scope string `json:"scope"`
 }
+
+// scopeUser asks for the user-level stream.
+const scopeUser = "user"
 
 func (h streamHandlers) mint(c *gin.Context) {
 	var b ticketBody
 	if !bindJSON(c, &b) {
 		return
 	}
-	ticket, ttl, err := h.svc.Streams.Mint(c.Request.Context(), authz.Viewer(c), domain.TicketRequest{SessionID: b.SessionID, EncounterID: b.EncounterID, ClientID: b.ClientID})
+	if b.Scope != "" && b.Scope != scopeUser {
+		writeError(c, data.ErrInvalid, nil)
+		return
+	}
+	ticket, ttl, err := h.svc.Streams.Mint(c.Request.Context(), authz.Viewer(c), domain.TicketRequest{SessionID: b.SessionID, EncounterID: b.EncounterID, ClientID: b.ClientID, UserLevel: b.Scope == scopeUser})
 	if err != nil {
 		writeError(c, err, nil)
 		return
@@ -224,6 +283,7 @@ func (h streamHandlers) ticketGate(c *gin.Context) {
 	defer release()
 	a := serveArgs{
 		actor: claim.UserID, session: claim.SessionID, encounter: claim.EncounterID, clientID: claim.ClientID,
+		userLevel: claim.UserLevel,
 		authorize: func(ctx context.Context) (data.Viewer, error) { return h.svc.Streams.View(ctx, claim) },
 		redeem:    func(ctx context.Context) error { _, err := h.svc.Streams.Redeem(ctx, ticket); return err },
 	}
@@ -238,7 +298,12 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 		return
 	}
 	actor, session, enc := authz.Viewer(c), c.Query("session_id"), c.Query("encounter_id")
-	if _, viaCredential := c.Get(credentialContextKey); viaCredential && session != "" {
+	userLevel := c.Query("scope") == scopeUser
+	if userLevel && (session != "" || enc != "") {
+		writeError(c, data.ErrInvalid, nil)
+		return
+	}
+	if _, viaCredential := c.Get(credentialContextKey); viaCredential && (session != "" || userLevel) {
 		// Session data is authorized with the caller's own bearer (PADR-0037); a credential has none.
 		userOnly(c)
 		return
@@ -250,7 +315,7 @@ func (h streamHandlers) bearerStream(c *gin.Context) {
 	if !data.ValidClientID(client) {
 		client = "" // ignored, never rejected, like the origin of a write
 	}
-	a := serveArgs{actor: actor, session: session, encounter: enc, clientID: client}
+	a := serveArgs{actor: actor, session: session, encounter: enc, clientID: client, userLevel: userLevel}
 	a.authorize = func(ctx context.Context) (data.Viewer, error) {
 		return h.svc.Streams.BearerView(ctx, actor, session, enc)
 	}
@@ -297,8 +362,10 @@ func liveGuard(live func(context.Context) (bool, error)) func(context.Context) e
 
 type serveArgs struct {
 	actor, session, encounter, clientID string
-	authorize                           func(context.Context) (data.Viewer, error)
-	// guard runs on every heartbeat, besides the membership re-check; an error ends the stream.
+	// userLevel opens the user-level stream: addressed events only, no viewer, no encounter heads.
+	userLevel bool
+	authorize func(context.Context) (data.Viewer, error)
+	// guard runs on every re-check, besides the membership re-check; an error ends the stream.
 	guard func(context.Context) error
 	// credentialID is set when an integration credential opened the stream; its seats count in
 	// their own bucket. seat is the seat serve takes and releases.
@@ -329,21 +396,12 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 		writeError(c, stream.ErrShuttingDown, nil)
 		return
 	}
-	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, h.opts.buffer())
-	defer sub.Close()
-	v, err := a.authorize(ctx)
-	if err == nil {
-		err = sub.Grant(v)
-		if errors.Is(err, stream.ErrEvicted) && sub.ServerStopping() {
-			err = stream.ErrShuttingDown // closed by Shutdown after the check above
-		} else if errors.Is(err, stream.ErrEvicted) || errors.Is(err, stream.ErrViewer) {
-			err = data.ErrNotMember
-		}
-	}
+	sub, v, err := h.openSub(ctx, a)
 	if err != nil {
 		writeError(c, err, nil)
 		return
 	}
+	defer sub.Close()
 	if a.seat, err = h.takeSeat(ctx, a); err != nil {
 		writeError(c, err, nil)
 		return
@@ -354,10 +412,13 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 			return
 		}
 	}
-	heads, truncated, err := h.svc.Streams.Heads(ctx, v, a.encounter)
-	if err != nil {
-		writeError(c, err, nil)
-		return
+	var heads []domain.Head
+	var truncated bool
+	if !a.userLevel {
+		if heads, truncated, err = h.svc.Streams.Heads(ctx, v, a.encounter); err != nil {
+			writeError(c, err, nil)
+			return
+		}
 	}
 	keep := false // only a dropped connection keeps its seat for the grace period
 	released = true
@@ -375,6 +436,29 @@ func (h streamHandlers) serve(c *gin.Context, a serveArgs) {
 	keep = cl.run(ctx)
 }
 
+// openSub registers the stream's subscription: a user-level one needs no scope, any other is
+// authorized and granted its viewer. A subscription returned with an error is already closed.
+func (h streamHandlers) openSub(ctx context.Context, a serveArgs) (*stream.Subscription, data.Viewer, error) {
+	if a.userLevel {
+		return h.svc.Hub.OpenUser(a.actor, h.opts.buffer()), data.Viewer{}, nil
+	}
+	sub := h.svc.Hub.Open(a.session, a.actor, a.encounter, h.opts.buffer())
+	v, err := a.authorize(ctx)
+	if err == nil {
+		err = sub.Grant(v)
+		if errors.Is(err, stream.ErrEvicted) && sub.ServerStopping() {
+			err = stream.ErrShuttingDown // closed by Shutdown after the check above
+		} else if errors.Is(err, stream.ErrEvicted) || errors.Is(err, stream.ErrViewer) {
+			err = data.ErrNotMember
+		}
+	}
+	if err != nil {
+		sub.Close()
+		return nil, v, err
+	}
+	return sub, v, nil
+}
+
 type headFrame struct {
 	Type string `json:"type"`
 	domain.Head
@@ -385,6 +469,11 @@ type headFrame struct {
 type seat struct {
 	lease data.StreamLease
 	held  bool
+	// session is the seat in the session's bucket, which counts a member's connections against the
+	// member and device limits; sessionHeld is false for a private or user-level stream and a
+	// credential.
+	session     data.StreamLease
+	sessionHeld bool
 }
 
 // takeSeat gives the stream a seat in its bucket: the user's for a user's stream, the credential's
@@ -392,31 +481,74 @@ type seat struct {
 // of their own stream. Over the cap is data.ErrStreamLimit; a store failure is
 // data.ErrStreamUnavailable and a new connect fails closed (streams already open stay up).
 func (h streamHandlers) takeSeat(ctx context.Context, a serveArgs) (seat, error) {
+	if h.svc.Leases == nil {
+		return seat{}, nil
+	}
+	var s seat
 	max, bucket := h.opts.ConcurrentMax, "user:"+a.actor
 	if a.credentialID != "" {
 		max, bucket = h.opts.CredentialMax, "cred:"+a.credentialID
 	}
-	if h.svc.Leases == nil || max <= 0 {
-		return seat{}, nil
-	}
-	l := data.StreamLease{ID: randomHex(), Bucket: bucket, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
-	if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), max); err != nil {
-		if errors.Is(err, data.ErrStreamUnavailable) {
-			slog.WarnContext(ctx, "the stream seat store is unavailable; refusing a new stream", "error", err)
+	if max > 0 {
+		l := data.StreamLease{ID: randomHex(), Bucket: bucket, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod}
+		if err := h.svc.Leases.Acquire(ctx, l, h.opts.leaseTTL(), max); err != nil {
+			return seat{}, h.seatError(ctx, err)
 		}
+		s.lease, s.held = l, true
+	}
+	if err := h.takeSessionSeat(ctx, a, &s); err != nil {
+		h.release(s, false) // give the user's seat back: this connect did not happen
 		return seat{}, err
 	}
-	return seat{l, true}, nil
+	return s, nil
+}
+
+func (h streamHandlers) seatError(ctx context.Context, err error) error {
+	if errors.Is(err, data.ErrStreamUnavailable) {
+		slog.WarnContext(ctx, "the stream seat store is unavailable; refusing a new stream", "error", err)
+	}
+	return err
+}
+
+// takeSessionSeat gives a session stream its seat in the session's bucket, across pods. A member's
+// connections share one member seat: the session holds at most the member limit of distinct
+// non-GM members (the number that holds the roster, 7.12a; the GM holds no member seat), and one
+// member, the GM included, at most DevicesMax connections. A stream that is not in a session needs
+// no seat. The seat shares the user seat's client id, so a member who drops and reconnects within
+// the grace period keeps it even if others joined in the meantime. Nothing ends a live connection
+// because the limit fell: only a new member is counted against it.
+func (h streamHandlers) takeSessionSeat(ctx context.Context, a serveArgs, s *seat) error {
+	if a.session == "" || a.userLevel || a.credentialID != "" {
+		return nil
+	}
+	limit, counted, err := h.svc.Streams.ConnectLimit(ctx, a.actor, a.session)
+	if err != nil {
+		return err
+	}
+	l := data.StreamLease{ID: randomHex(), Bucket: "session:" + a.session, UserID: a.actor, SessionID: a.session, ClientID: a.clientID, Pod: h.opts.Pod, Counted: counted}
+	if err := h.svc.Leases.AcquireSession(ctx, l, h.opts.leaseTTL(), limit, h.opts.devicesMax()); err != nil {
+		if errors.Is(err, data.ErrStreamLimit) {
+			return &domain.EntitlementError{Key: domain.KeyMembersPerSession, Limit: limit}
+		}
+		return h.seatError(ctx, err)
+	}
+	s.session, s.sessionHeld = l, true
+	return nil
 }
 
 // release ends a seat. Only a connection that dropped (keep) holds it for the grace period; one the
 // server ended, or that never opened, frees it now.
 func (h streamHandlers) release(s seat, keep bool) {
-	if !s.held {
-		return
-	}
-	if err := h.svc.Leases.Release(context.Background(), s.lease, h.opts.Grace, keep); err != nil {
-		slog.Warn("releasing a stream seat failed; it lapses on its own", "seat", s.lease.ID, "error", err)
+	for _, l := range []struct {
+		lease data.StreamLease
+		held  bool
+	}{{s.lease, s.held}, {s.session, s.sessionHeld}} {
+		if !l.held {
+			continue
+		}
+		if err := h.svc.Leases.Release(context.Background(), l.lease, h.opts.Grace, keep); err != nil {
+			slog.Warn("releasing a stream seat failed; it lapses on its own", "seat", l.lease.ID, "error", err)
+		}
 	}
 }
 
@@ -473,7 +605,8 @@ type connection struct {
 	v    data.Viewer
 	a    serveArgs
 
-	renewFailing bool
+	renewFailing    bool
+	recheckFailures int
 }
 
 func (cl *connection) write(ctx context.Context, v any) error {
@@ -486,13 +619,21 @@ func (cl *connection) write(ctx context.Context, v any) error {
 	return cl.conn.Write(ctx, websocket.MessageText, b)
 }
 
+// scopeOf names what a stream follows: the addressed events of the user, or encounter state.
+func scopeOf(a serveArgs) string {
+	if a.userLevel {
+		return scopeUser
+	}
+	return "encounter"
+}
+
 // hello sends the hello frame and one head frame per encounter in scope. They carry only what the
 // viewer's own views carry: the scope they asked for and each visible encounter's revision (GM) or
 // view tag.
 func (cl *connection) hello(ctx context.Context, heads []domain.Head, truncated bool) error {
 	opts := cl.h.opts
 	if err := cl.write(ctx, gin.H{
-		"type": "hello", "session_id": cl.a.session, "encounter_id": cl.a.encounter, "client_id": cl.a.clientID,
+		"type": "hello", "scope": scopeOf(cl.a), "session_id": cl.a.session, "encounter_id": cl.a.encounter, "client_id": cl.a.clientID,
 		"heartbeat_seconds": int(opts.heartbeat().Seconds()), "max_age_seconds": int(opts.maxAge().Seconds()), "heads_truncated": truncated,
 	}); err != nil {
 		return err
@@ -511,6 +652,8 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 	ctx = cl.conn.CloseRead(ctx)
 	tick := time.NewTicker(cl.h.opts.heartbeat())
 	defer tick.Stop()
+	recheck := time.NewTicker(cl.h.opts.recheck())
+	defer recheck.Stop()
 	maxAge := time.NewTimer(cl.h.opts.maxAge())
 	defer maxAge.Stop()
 	pings := make(chan struct{}, 1)
@@ -528,6 +671,12 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 				}
 				return
 			}
+			// A backlog of events must not postpone the re-check: it goes first whenever it is due,
+			// so the loop is held by at most one write (see stallAllowance).
+			if code, why, due := cl.recheckIfDue(ctx, recheck); due && code != 0 {
+				_ = cl.conn.Close(code, why)
+				return false
+			}
 			if hook := cl.h.opts.beforeWrite; hook != nil {
 				hook()
 			}
@@ -537,12 +686,12 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 			if cl.write(ctx, ev) != nil {
 				return true
 			}
-		case <-tick.C:
-			// Check first, so a revoked connection gets no further frame.
+		case <-recheck.C:
 			if code, why := cl.check(ctx); code != 0 {
 				_ = cl.conn.Close(code, why)
 				return false
 			}
+		case <-tick.C:
 			if cl.write(ctx, gin.H{"type": "heartbeat"}) != nil {
 				return true
 			}
@@ -564,14 +713,23 @@ func (cl *connection) run(ctx context.Context) (keepSeat bool) {
 // membership re-check or the credential guard. A failure leaves the stream up; the seat lapses after
 // the lease TTL if renewals keep failing, and the next connect for that user then has room.
 func (cl *connection) renew(ctx context.Context) {
-	if !cl.a.seat.held {
+	st := cl.a.seat
+	if !st.held && !st.sessionHeld {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.heartbeat()/2)
+	ctx, cancel := context.WithTimeout(ctx, cl.h.opts.renewTimeout()) // both seats share it: part of stallAllowance
 	defer cancel()
-	err := cl.h.svc.Leases.Renew(ctx, cl.a.seat.lease, cl.h.opts.leaseTTL())
+	var err error
+	for _, l := range []struct {
+		lease data.StreamLease
+		held  bool
+	}{{st.lease, st.held}, {st.session, st.sessionHeld}} {
+		if l.held {
+			err = errors.Join(err, cl.h.svc.Leases.Renew(ctx, l.lease, cl.h.opts.leaseTTL()))
+		}
+	}
 	if err != nil && !cl.renewFailing {
-		slog.WarnContext(ctx, "renewing a stream seat failed; it lapses if renewals keep failing", "seat", cl.a.seat.lease.ID, "error", err)
+		slog.WarnContext(ctx, "renewing a stream seat failed; it lapses if renewals keep failing", "seat", st.lease.ID, "error", err)
 	}
 	cl.renewFailing = err != nil // log the first failure of a run, not every heartbeat
 	if hook := cl.h.opts.afterRenew; hook != nil {
@@ -579,21 +737,52 @@ func (cl *connection) renew(ctx context.Context) {
 	}
 }
 
-// check re-reads what the stream was authorized on. A failed membership read keeps the stream (the
-// next check retries; the maximum age bounds a persistent failure). A credential's failed reads
-// close it after maxGuardErrors in a row.
+// check re-reads what the stream was authorized on, every recheck interval. Failed reads fail
+// closed after three in a row, for membership and for a credential alike: a store that cannot say
+// whether the member is still allowed does not keep the stream open for the maximum age. Each
+// failed membership read is logged with the running count. The stream closes with
+// CloseMembershipChanged, and a connect (which re-reads the member's record) is refused while the
+// store is down. A user-level stream has no membership to re-check: each notice it receives is
+// checked for membership instead. A credential-backed stream runs the credential guard.
 func (cl *connection) check(ctx context.Context) (websocket.StatusCode, string) {
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout) // a hung store must not stall delivery
-	defer cancel()
+	// Each read has its own timeout: a slow credential guard must not leave the membership
+	// re-check an expired context, which would count as a failed re-check. (A credential stream has
+	// no session and a session stream has no credential, so one of the two is a no-op.)
 	if cl.a.guard != nil {
-		if err := cl.a.guard(ctx); errors.Is(err, errCredentialRevoked) {
+		gctx, cancel := context.WithTimeout(ctx, checkTimeout)
+		err := cl.a.guard(gctx)
+		cancel()
+		if errors.Is(err, errCredentialRevoked) {
 			return CloseCredentialRevoked, "credential revoked"
 		}
 	}
-	if errors.Is(cl.h.svc.Streams.Recheck(ctx, cl.v), domain.ErrAccessChanged) {
+	rctx, cancel := context.WithTimeout(ctx, checkTimeout) // a hung store must not stall delivery
+	defer cancel()
+	err := cl.h.svc.Streams.Recheck(rctx, cl.v)
+	switch {
+	case errors.Is(err, domain.ErrAccessChanged):
 		return CloseMembershipChanged, "membership changed"
+	case errors.Is(err, domain.ErrRecheckFailed):
+		cl.recheckFailures++
+		slog.WarnContext(ctx, "re-checking a stream's membership failed", "failures", cl.recheckFailures, "of", maxRecheckFailures, "error", err)
+		if cl.recheckFailures >= maxRecheckFailures {
+			return CloseMembershipChanged, "membership could not be verified"
+		}
+	default:
+		cl.recheckFailures = 0
 	}
 	return 0, ""
+}
+
+// recheckIfDue runs the re-check if its tick is waiting, without blocking.
+func (cl *connection) recheckIfDue(ctx context.Context, t *time.Ticker) (code websocket.StatusCode, why string, due bool) {
+	select {
+	case <-t.C:
+		code, why = cl.check(ctx)
+		return code, why, true
+	default:
+		return 0, "", false
+	}
 }
 
 // pinger sends a protocol ping per request and ends the connection when no pong comes back.

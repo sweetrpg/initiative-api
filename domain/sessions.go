@@ -768,3 +768,14 @@ func (s *Sessions) scrubControllers(ctx context.Context, d data.Decision, user s
 		slog.WarnContext(ctx, "cancelling a member's pending change requests failed", "session", d.SessionID(), "user", user, "error", err)
 	}
 }
+
+// IsMember reports whether userID currently belongs to the live session (stream.Members).
+func (s *Sessions) IsMember(ctx context.Context, userID, sessionID string) (bool, error) {
+	return s.repo.IsMember(ctx, userID, sessionID)
+}
+
+// ManagerIDs lists the GM and co-GM user ids of a session, for addressing change-request notices
+// (stream.Managers).
+func (s *Sessions) ManagerIDs(ctx context.Context, sessionID string) ([]string, error) {
+	return s.repo.ManagerIDs(ctx, sessionID)
+}

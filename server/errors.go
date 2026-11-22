@@ -48,6 +48,7 @@ func writeError(c *gin.Context, err error, current any) {
 
 func classifyError(err error) (ErrorBody, int) {
 	var ee *domain.EntitlementError
+	var dl *data.DeviceLimitError
 	var er *domain.EntitlementRequiredError
 	var he *data.HealthError
 	switch {
@@ -60,6 +61,8 @@ func classifyError(err error) (ErrorBody, int) {
 		return ErrorBody{Code: "field_out_of_range", Message: "That health value is outside the allowed range for the game system.", Key: he.Field}, http.StatusUnprocessableEntity
 	case errors.As(err, &ee):
 		return ErrorBody{Code: "entitlement_limit_reached", Message: "Your plan's limit for this item has been reached.", Key: ee.Key, Limit: &ee.Limit}, http.StatusForbidden
+	case errors.As(err, &dl):
+		return ErrorBody{Code: "device_limit_reached", Message: "This account already has the most connections allowed to this session. Close one and try again.", Key: "devices_per_member", Limit: &dl.Limit}, http.StatusForbidden
 	case errors.Is(err, domain.ErrReadOnly):
 		return ErrorBody{Code: "packaged_theme_read_only", Message: "Packaged themes cannot be changed. Create a custom theme from it instead."}, http.StatusForbidden
 	case errors.Is(err, domain.ErrCredentialsClosed):

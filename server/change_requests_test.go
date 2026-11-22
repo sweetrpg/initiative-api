@@ -78,8 +78,15 @@ func TestAControllingPlayerSubmitsAChangeAndTheCombatantIsUnchanged(t *testing.T
 
 	code, req := submit(t, r, "user-two", sid, "pc", `{"health":{"hp":4},"conditions":{"add":[{"name":"prone"}]}}`)
 
-	if code != http.StatusCreated || req["status"] != "pending" || req["requested_by"] != "u-2" || req["base_revision"] != float64(3) || req["combatant_id"] != "pc" {
-		t.Fatalf("submit = %d %v, want a pending request by u-2 at revision 3", code, req)
+	if code != http.StatusCreated || req["status"] != "pending" || req["requested_by"] != "u-2" || req["combatant_id"] != "pc" {
+		t.Fatalf("submit = %d %v, want a pending request by u-2", code, req)
+	}
+	if _, ok := req["base_revision"]; ok {
+		t.Errorf("a player's submit answer carries base_revision, an encounter revision: %v", req)
+	}
+	gm := callAs(r, "user-ok", "GET", encPath(sid, encE1)+"/change-requests", "").Body.String()
+	if !strings.Contains(gm, `"base_revision":3`) {
+		t.Errorf("the GM's list = %s, want the request at base_revision 3", gm)
 	}
 	if h := pcHealth(t, r, sid); h["hp"] != float64(9) || gmRevision(t, r, sid) != 3 {
 		t.Errorf("pc health %v revision %v: a submitted request must change nothing", h, gmRevision(t, r, sid))

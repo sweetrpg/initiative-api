@@ -1,4 +1,83 @@
 
+## 0.15.0 - 2026-11-22
+
+### Added
+- Count non-GM connections against the session member limit
+- Share one seat across a member's devices and cap devices per member
+
+
+### Fixed
+- Match grace seats by user as well as client id, and cover the connect-limit gaps
+- Hide base_revision and applied_revision from non-GM viewers
+- Keep a member's in-flight first connect from shielding itself from the member limit
+
+
+
+## 0.14.0 - 2026-11-21
+
+### Added
+- Bound revocation with a separate re-check interval and fail closed on a failing store
+- Close every stream of a denied or role-stripped user
+
+
+### Fixed
+- State the revocation bounds honestly and give each re-check read its own timeout
+- Run a due re-check before each event write and cover the slow-client cases
+- Count the drained notices deterministically and share one membership read
+- Close the notice worker's done channel under the lock
+- Start the auth consumer only after the hub exists and refuse one with no evictor
+
+
+
+## 0.13.0 - 2026-11-20
+
+### Added
+- Addressed notifications and per-session preferences
+- Publish addressed notices to the bus per addressee
+- User-level stream for addressed notifications
+
+
+### Fixed
+- Validate the session id before it reaches a preference query
+- Deliver notices off the request path and cover the isolation cases
+- Make closing the notice worker final and bound its store reads
+- Share the mute lookup with the bus and publish only to current members
+
+
+
+## 0.12.0 - 2026-11-20
+
+### Added
+- Publish encounter events to INITIATIVE_EVENTS on NATS
+- Cut off in-flight requests when their credential ends
+
+
+### Fixed
+- Drain the publisher on close and test the observer envelope
+- Run the reconciler CronJob under PodSecurity restricted
+
+## 0.11.0 - 2026-11-20
+
+### Added
+- Report database health to the readiness probe
+
+
+### Fixed
+- Retry the API's database, index and NATS start-up
+- Bound the database and every request with timeouts
+- Fail closed on the credential path only, and harden the retry
+- Keep the credential consumer alive and check retention on every reconnect
+- Keep one startupProbe
+- Guard reconnect before bind, recheck retention while catching up, pace consumer rebuilds
+- Make Consumer.Stop idempotent
+- Append driver timeouts to the raw URI and test the deadline through the middleware
+- Keep the readiness probe on /status/ping and report health without driver detail
+- Set ndots 2 on API and reconciler pods
+- Close event streams with 1001 before the server shuts down
+- Make Drain wait on live stream handlers
+
+
+
 ## 0.10.0 - 2026-11-19
 
 ### Added

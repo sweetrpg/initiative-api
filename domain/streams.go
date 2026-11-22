@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/sweetrpg/initiative-api/constants"
 	"time"
 
@@ -51,12 +52,15 @@ type TicketRequest struct {
 	SessionID   string
 	EncounterID string
 	ClientID    string
+	// UserLevel asks for the user-level stream; it excludes SessionID and EncounterID.
+	UserLevel bool
 }
 
 // Claim is what a redeemed ticket asks for. It is a request, not proof: View decides.
 type Claim struct {
 	UserID, SessionID, EncounterID, ClientID string
 	Level                                    data.ViewLevel
+	UserLevel                                bool
 }
 
 // Mint authorizes actor for the scope the way the REST reads do (a non-member is data.ErrNotMember)
@@ -67,7 +71,12 @@ func (s *Streams) Mint(ctx context.Context, actor string, req TicketRequest) (st
 	if data.ValidClientID(req.ClientID) {
 		t.ClientID = req.ClientID
 	}
-	if req.SessionID != "" {
+	if req.UserLevel {
+		if req.SessionID != "" || req.EncounterID != "" {
+			return "", 0, invalid("a user-level stream takes no session or encounter")
+		}
+		t.UserLevel = true
+	} else if req.SessionID != "" {
 		v, err := s.sessions.Viewer(ctx, actor, req.SessionID)
 		if err != nil {
 			return "", 0, err
@@ -126,13 +135,17 @@ func (s *Streams) BearerView(ctx context.Context, actor, sessionID, encounterID 
 	return v, err
 }
 
+// ErrRecheckFailed means a stream's membership could not be read; the stream's owner counts these
+// and closes it after three in a row.
+var ErrRecheckFailed = errors.New("stream membership re-check failed")
+
 // ErrAccessChanged means a stream's viewer no longer matches the member's live record.
 var ErrAccessChanged = errors.New("stream access changed")
 
 // Recheck re-reads the live member record behind an open stream. It returns ErrAccessChanged when
 // the member is gone, the session is deleted, or their level is no longer the one the stream was
-// granted at (it must reconnect to be authorized again). A failed read returns nil: the check runs
-// again on the next heartbeat, and the connection's maximum age bounds a persistent failure.
+// granted at (it must reconnect to be authorized again). A failed read returns ErrRecheckFailed; the
+// stream's owner closes it after three in a row.
 func (s *Streams) Recheck(ctx context.Context, v data.Viewer) error {
 	if v.SessionID() == "" {
 		return nil
@@ -142,11 +155,27 @@ func (s *Streams) Recheck(ctx context.Context, v data.Viewer) error {
 	case errors.Is(err, data.ErrNotMember):
 		return ErrAccessChanged
 	case err != nil:
-		return nil
+		return fmt.Errorf("%w: %v", ErrRecheckFailed, err)
 	case now.Level() != v.Level():
 		return ErrAccessChanged
 	}
 	return nil
+}
+
+// ConnectLimit is the cap on live non-GM connections in the session that userID's connection
+// counts against: the owner's recorded members_per_session value clamped to the configured maximum
+// (the same number the roster is held to). The GM is exempt (counted false). It fails closed on a
+// missing or stale recorded value, like every check made for a member rather than the GM.
+func (s *Streams) ConnectLimit(ctx context.Context, userID, sessionID string) (limit int, counted bool, err error) {
+	sess, m, err := s.sessions.repo.SeatInfo(ctx, userID, sessionID)
+	if err != nil {
+		return 0, false, err
+	}
+	if m.Role == data.RoleGM {
+		return 0, false, nil
+	}
+	limit, err = s.sessions.memberLimit(sess, m.Role)
+	return limit, err == nil, err
 }
 
 // Peek reads what a ticket stands for without spending it; the caller checks its limits and then
@@ -172,13 +201,16 @@ func (s *Streams) claim(ctx context.Context, ticket string, take func(context.Co
 	if err != nil {
 		return Claim{}, err
 	}
-	return Claim{UserID: t.UserID, SessionID: t.SessionID, EncounterID: t.EncounterID, ClientID: t.ClientID, Level: t.Level}, nil
+	return Claim{UserID: t.UserID, SessionID: t.SessionID, EncounterID: t.EncounterID, ClientID: t.ClientID, Level: t.Level, UserLevel: t.UserLevel}, nil
 }
 
 // View is the viewer a redeemed claim opens. Only the user, the scope and the minted level come
 // from the ticket; access is read live (data.Sessions.TicketView), so a member removed since the
 // mint, a session deleted since, or a role raised since gets nothing.
 func (s *Streams) View(ctx context.Context, c Claim) (data.Viewer, error) {
+	if c.UserLevel {
+		return data.Viewer{}, nil // identity only: the stream's deliveries check membership themselves
+	}
 	if c.SessionID == "" {
 		return s.ownerView(ctx, c.UserID, c.EncounterID)
 	}

@@ -78,23 +78,6 @@ func main() {
 		log.Fatalf("themes: %v", err)
 	}
 	creds := domain.NewCredentials(db)
-	// Credentials stay off (503) until the auth-event consumer is bound and caught up, so a deny
-	// published while the service was down is applied before any secret authenticates (PADR-0039).
-	// The consumer starts in the background, so the rest of the API does not wait on NATS; if NATS
-	// stays unreachable past CREDENTIAL_EVENTS_MAX_DISCONNECT the gate closes again.
-	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
-		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
-	} else {
-		var live atomic.Pointer[events.Consumer]
-		consumerCtx, stopConsumer := context.WithCancel(context.Background())
-		go runConsumer(consumerCtx, creds, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
-		defer func() {
-			stopConsumer() // first, so runConsumer does not rebuild what Stop closes
-			if c := live.Load(); c != nil {
-				c.Stop()
-			}
-		}()
-	}
 	pool := util.RedisPool() // non-nil: config requires REDIS_HOST
 	rosters, encounters, sessions := domain.NewRosters(db), domain.NewEncounters(db), domain.NewSessions(db)
 	// Fail-open: the hub publishes from its own queue and drops an event it cannot send.
@@ -119,10 +102,35 @@ func main() {
 	relay := hub.AttachRelay(fanout, pod, 1024)
 	relay.Run(context.Background())
 	defer relay.Stop()
+	// Credentials stay off (503) until the auth-event consumer is bound and caught up, so a deny
+	// published while the service was down is applied before any secret authenticates (PADR-0039).
+	// The consumer starts after the hub, the bus and the relay exist, so an event it applies first (a
+	// deny) already finds the hub to evict from and nothing is acked into a void. It starts in the
+	// background, so the rest of the API does not wait on NATS; if NATS
+	// stays unreachable past CREDENTIAL_EVENTS_MAX_DISCONNECT the gate closes again.
+	if natsURL := os.Getenv("NATS_URL"); natsURL == "" {
+		logging.Logger.Warn("NATS_URL is not set; integration credentials are disabled")
+	} else {
+		var live atomic.Pointer[events.Consumer]
+		consumerCtx, stopConsumer := context.WithCancel(context.Background())
+		go runConsumer(consumerCtx, creds, hub, natsURL, os.Getenv("NATS_DURABLE_NAME"), cfg.CredentialEventsMaxDisconnect, retry, &live)
+		defer func() {
+			stopConsumer() // first, so runConsumer does not rebuild what Stop closes
+			if c := live.Load(); c != nil {
+				c.Stop()
+			}
+		}()
+	}
 	rosters.SetSink(hub)
 	sessions.OwnerRecordMaxAge = cfg.OwnerEntitlementsMaxAge
 	sessions.MaxMembers = cfg.SessionMembersMax
 	streams := domain.NewStreams(db, sessions, encounters)
+	prefs := domain.NewNotificationPrefs(db, sessions)
+	changeRequests := domain.NewChangeRequests(db, encounters, sessions)
+	changeRequests.Notifier = hub
+	hub.SetPreferences(prefs)
+	hub.SetManagers(sessions)
+	hub.SetMembers(sessions)
 	streams.TTL = cfg.StreamTicketTTL
 	ready := server.NewReadiness(5*time.Second, 2*time.Second, server.Check{Name: "database", Fn: func(ctx context.Context) error { return database.Db.Client().Ping(ctx, nil) }})
 	svc := server.Services{
@@ -135,23 +143,24 @@ func main() {
 			domain.Kind{Name: "sessions", Key: domain.KeySessionsPerGM, Repo: sessions.Items()},
 			domain.Kind{Name: "credentials", Key: domain.KeyIntegrationCredentials, Repo: creds.Items()},
 		),
-		Authz:          authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
-		Entitlements:   entitlements.New(cfg.EntitlementsAPIURL),
-		OwnerLimits:    data.NewOwnerEntitlements(db, cfg.OwnerEntitlementsMaxAge),
-		Themes:         themes,
-		Systems:        data.NewSystemRepo(db),
-		Credentials:    creds,
-		Rosters:        rosters,
-		Encounters:     encounters,
-		Sessions:       sessions,
-		ChangeRequests: domain.NewChangeRequests(db, encounters, sessions),
-		Relations:      relations.New(cfg.AuthAPIURL),
-		Hub:            hub,
-		Streams:        streams,
-		Leases:         data.NewStreamLeases(db),
+		Authz:             authz.NewClient(cfg.AuthAPIURL, cfg.UsersAPIURL),
+		Entitlements:      entitlements.New(cfg.EntitlementsAPIURL),
+		OwnerLimits:       data.NewOwnerEntitlements(db, cfg.OwnerEntitlementsMaxAge),
+		Themes:            themes,
+		Systems:           data.NewSystemRepo(db),
+		Credentials:       creds,
+		Rosters:           rosters,
+		Encounters:        encounters,
+		Sessions:          sessions,
+		ChangeRequests:    changeRequests,
+		NotificationPrefs: prefs,
+		Relations:         relations.New(cfg.AuthAPIURL),
+		Hub:               hub,
+		Streams:           streams,
+		Leases:            data.NewStreamLeases(db),
 		Stream: server.StreamOptions{
-			AllowedOrigins: cfg.StreamAllowedOrigins, MaxAge: cfg.StreamMaxAge, Heartbeat: cfg.StreamHeartbeat,
-			ConcurrentMax: cfg.StreamConcurrentMax, CredentialMax: cfg.StreamCredentialMax, MaxPerPod: cfg.StreamMaxPerPod, LeaseTTL: cfg.StreamLeaseTTL, Grace: cfg.StreamGrace, Pod: pod,
+			AllowedOrigins: cfg.StreamAllowedOrigins, MaxAge: cfg.StreamMaxAge, Heartbeat: cfg.StreamHeartbeat, RecheckInterval: cfg.StreamRecheckInterval,
+			ConcurrentMax: cfg.StreamConcurrentMax, CredentialMax: cfg.StreamCredentialMax, DevicesMax: cfg.SessionDevicesMax, MaxPerPod: cfg.StreamMaxPerPod, LeaseTTL: cfg.StreamLeaseTTL, Grace: cfg.StreamGrace, Pod: pod,
 		},
 	}
 	srv := &http.Server{Addr: cfg.BindAddress, Handler: newRouter(cfg, svc, pool), ReadHeaderTimeout: 10 * time.Second}
@@ -216,12 +225,13 @@ const (
 // capped backoff, an error logged each round, so a NATS that is down at boot is picked up when it
 // returns) and builds a new one if the connection is lost for good. Until a consumer has started and
 // caught up, credentials stay closed (503) and the rest of the API serves.
-func runConsumer(ctx context.Context, creds *domain.Credentials, natsURL, durable string, maxDisconnect time.Duration, retry startup.Policy, live *atomic.Pointer[events.Consumer]) {
+func runConsumer(ctx context.Context, creds *domain.Credentials, evict events.Evictor, natsURL, durable string, maxDisconnect time.Duration, retry startup.Policy, live *atomic.Pointer[events.Consumer]) {
 	wait := consumerFirstWait
 	for ctx.Err() == nil {
 		var c *events.Consumer
 		err := startup.Do("start the auth-event consumer", retry, func() error {
 			c = events.New(creds, creds)
+			c.Evictor = evict
 			c.MaxDisconnect = maxDisconnect
 			return c.Start(ctx, natsURL, durable)
 		})

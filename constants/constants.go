@@ -13,11 +13,13 @@ const (
 	ALLOWED_ORIGINS                  = "ALLOWED_ORIGINS"
 	OWNER_ENTITLEMENTS_MAX_AGE       = "OWNER_ENTITLEMENTS_MAX_AGE"
 	SESSION_MEMBERS_MAX              = "SESSION_MEMBERS_MAX"
+	SESSION_DEVICES_MAX              = "SESSION_DEVICES_MAX"
 	REQUEST_TIMEOUT                  = "REQUEST_TIMEOUT"
 	STREAM_ALLOWED_ORIGINS           = "STREAM_ALLOWED_ORIGINS"
 	STREAM_TICKET_TTL                = "STREAM_TICKET_TTL"
 	STREAM_MAX_AGE                   = "STREAM_MAX_AGE"
 	STREAM_HEARTBEAT                 = "STREAM_HEARTBEAT"
+	STREAM_RECHECK_INTERVAL          = "STREAM_RECHECK_INTERVAL"
 	CREDENTIAL_EVENTS_MAX_DISCONNECT = "CREDENTIAL_EVENTS_MAX_DISCONNECT"
 	STREAM_CONCURRENT_MAX            = "STREAM_CONCURRENT_MAX"
 	STREAM_MAX_PER_POD               = "STREAM_MAX_PER_POD"
@@ -34,6 +36,10 @@ const (
 	// is unset; it matches the entitlements catalog's maximum for members_per_session.
 	DefaultSessionMembersMax = 20
 
+	// DefaultSessionDevicesMax is the most connections one member may hold to a session when
+	// SESSION_DEVICES_MAX is unset.
+	DefaultSessionDevicesMax = 2
+
 	// CorrelationHeader carries the request correlation ID in and out of the service.
 	CorrelationHeader = "X-Correlation-ID"
 )
@@ -44,7 +50,10 @@ const (
 	MaxStreamTicketTTL     = 2 * time.Minute
 	DefaultStreamMaxAge    = time.Hour
 	DefaultStreamHeartbeat = 20 * time.Second
-	DefaultRequestTimeout  = 10 * time.Second
-	DefaultStreamLeaseTTL  = time.Minute
-	DefaultStreamGrace     = 30 * time.Second
+	// DefaultStreamRecheckInterval is how often an open stream re-reads its membership (and
+	// credential); with the check timeout it is the revocation bound.
+	DefaultStreamRecheckInterval = 5 * time.Second
+	DefaultRequestTimeout        = 10 * time.Second
+	DefaultStreamLeaseTTL        = time.Minute
+	DefaultStreamGrace           = 30 * time.Second
 )

@@ -31,9 +31,11 @@ make run
 | `DB_OPTS` / `DB_URI` query | driver timeouts added | `serverSelectionTimeoutMS=5000`, `connectTimeoutMS=5000` and `socketTimeoutMS=30000` are added when the connection settings do not set them |
 | `ALLOWED_ORIGINS` | unset | comma-separated; unset disables CORS, `*` is rejected |
 | `SESSION_MEMBERS_MAX` | `20` | maximum of a session's member limit; an entitled `members_per_session` above it has no effect; positive integer |
+| `SESSION_DEVICES_MAX` | `2` | most connections one member (the GM included) may hold to a session stream; a further one is refused with 403 `device_limit_reached`; positive integer |
 | `REQUEST_TIMEOUT` | `10s` | deadline for every request except the event stream upgrade; past it a store call fails and the answer is 503 `timeout` with `Retry-After`; 1s-1m |
 | `STREAM_ALLOWED_ORIGINS` | unset | comma-separated host patterns a browser `Origin` may match to open an event stream (no `Origin` is always allowed; `*` is rejected); CORS `ALLOWED_ORIGINS` still applies first, so a cross-origin stream client must be in both lists |
-| `STREAM_TICKET_TTL`, `STREAM_MAX_AGE`, `STREAM_HEARTBEAT` | `30s`, `1h`, `20s` | stream ticket lifetime, maximum connection age, heartbeat and membership re-check interval; Go durations: ticket TTL 1s-2m, max age 1m-24h, heartbeat 1s-1m (it is also how often a stream re-checks membership and credentials) |
+| `STREAM_TICKET_TTL`, `STREAM_MAX_AGE`, `STREAM_HEARTBEAT` | `30s`, `1h`, `20s` | stream ticket lifetime, maximum connection age, and heartbeat (application heartbeat and protocol ping interval); Go durations: ticket TTL 1s-2m, max age 1m-24h, heartbeat 1s-1m |
+| `STREAM_RECHECK_INTERVAL` | `5s` | how often an open session stream re-reads its member's record and a credential-backed stream re-checks its credential; 1s-1m, never above `STREAM_HEARTBEAT`. **Revocation bound**, when the eviction signal is lost: a removed, demoted or blocked member's stream closes (4002) within this interval plus the 2s check timeout (**7s** by default) when the client keeps up, plus up to 12s (a heartbeat write the client takes 10s to accept, then a 2s seat renewal) if its socket is slow (**19s**). If the store cannot answer, the stream closes at the third failed re-check, within 3 x (interval + 2s) (**21s**, **33s** with a slow client); a connect (which re-reads the member's record) is refused while the store is down. A store slower than the 2s check timeout for three re-checks in a row (about 15s) closes healthy streams with 4002: fail-closed by design, and the client reconnects once the store answers. User-level streams have no membership re-check by design: each notice they receive is checked for membership. Derived in code by `StreamOptions.RevocationBound`, `StalledBound`, `FaultBound` and `StalledFaultBound` |
 | `CREDENTIAL_EVENTS_MAX_DISCONNECT` | `10m` | how long NATS may be unreachable before integration credentials answer 503 (the rest of the API keeps serving); they reopen after the consumer reconnects and catches up; 30s-1h |
 | `STREAM_CONCURRENT_MAX`, `STREAM_CREDENTIAL_MAX`, `STREAM_MAX_PER_POD` | `10`, `3`, `1000` | most event streams one user may hold across all pods (429 `too_many_streams` with `Retry-After`), most one integration credential may (its own count; it never uses up its owner's), and most one pod serves (close code 1013, ticket not spent) |
 | `STREAM_LEASE_TTL`, `STREAM_GRACE` | `60s`, `30s` | how long a stream's seat lasts without a renewal (at least twice `STREAM_HEARTBEAT`), and how long a dropped client keeps it for a reconnect; seats are compared across pods by their clocks, so keep node clocks in sync. If the seat store is down, new streams get 503 `streams_unavailable` and open streams stay up (seats lapse after the TTL) |
@@ -61,7 +63,7 @@ Invalid values stop the process at startup with every problem listed.
   `POST /credentials/{id}/revoke`. Integrations send the secret as `Authorization: Bearer ic_...`;
   it acts as its owner with the user role, `read` allows GET and `write` allows other methods.
   Credentials cannot reach `/credentials`, `/entitlements` or `/themes`.
-  A deny or role removal in auth-api ends the owner's credentials (PADR-0039): the service consumes
+  A deny of this service or a removed role in auth-api ends the owner's credentials (PADR-0039) and then every open stream of that user: all sessions, user-level and private, closed on the pod that consumes the event at once and on the others as their fan-out tail delivers the row (milliseconds), over the same path as session evictions; nothing is remembered, so a user granted access again simply reconnects. If a fan-out row is lost (a full eviction queue, logged at error level) the user's session and user-level streams stay open until `STREAM_MAX_AGE` (they are still members, so the re-check does not end them), though every reconnect is refused by auth-api. The service consumes
   the `AUTH_EVENTS` stream (`NATS_URL`, optional `NATS_DURABLE_NAME`, `NATS_CREDS` or
   `NATS_USER`/`NATS_PASSWORD`). Credentials answer 503 `credentials_unavailable` until the consumer
   has caught up, and stay off if `NATS_URL` is unset or the consumer fell behind the stream's
@@ -70,6 +72,9 @@ Invalid values stop the process at startup with every problem listed.
   Encounter events are also published to the `INITIATIVE_EVENTS` stream on
   `initiative.events.<entity>.<action>` (`NATS_URL`, same login), fail-open: a broker outage drops
   the event with a log line and never fails the write. `Nats-Msg-Id` is the event id.
+  Addressed notices are also published, one event per unmuted addressee, on
+  `initiative.user.<user_id>.<type>` (`turn.yours` stays two tokens: `initiative.user.u1.turn.yours`),
+  with `user_id` in the envelope, for a future push service.
   Administrator routes (admin bearer only, no credentials): `GET /admin/credentials[?owner=]` lists
   any owner's credentials (never the secret or hash); `DELETE /admin/credentials/{id}` with
   `{"reason": "..."}` removes one for good, at once; `GET /admin/credentials/deletions[?owner=]`
@@ -85,6 +90,15 @@ Invalid values stop the process at startup with every problem listed.
   `DELETE /sessions/{id}/invites/{invite}` revokes. Joining: `POST /sessions/join {code}` makes a
   pending request that grants nothing; `GET /sessions/{id}/requests`, `POST .../requests/{id}/approve
   {role}` or `/reject {reason}`. Blocks: `GET|POST /sessions/{id}/blocks`, `DELETE .../blocks/{user}`.
+  Notifications: `turn.yours`, `turn.next` and the change-request events (`change_request.submitted`
+  to the GM and co-GMs, `.approved` / `.rejected` to the submitter) are delivered only to the
+  addressee's open streams of that session. `GET|PUT /sessions/{id}/notification-preferences
+  {"muted": [...]}` mutes types per member; state events are unaffected.
+  Connect limit: a member's connections to a session stream share one seat in a per-session bucket, counted across pods in the lease collection. The session holds at most the member limit of distinct non-GM members (the owner's recorded `initiative.members_per_session`, clamped to `SESSION_MEMBERS_MAX`, the same number as the roster; the GM holds no member seat), so a member's second device takes no further seat, and a connect by a member who would be one too many is refused with 403 `entitlement_limit_reached` (key and limit in the body) with the roster untouched. One member, the GM included, may hold at most `SESSION_DEVICES_MAX` (default 2) connections to a session; a further one is refused with 403 `device_limit_reached` (key `devices_per_member` and limit in the body). A client that reconnects while the server still holds its old connection counts as a further device, so a member at the limit can get this code until the old connection times out; clients retry with backoff on it. Seats lapse after `STREAM_LEASE_TTL` unless renewed (a crashed pod's connections stop counting), and a dropped client that reconnects with the same `client_id` within `STREAM_GRACE` takes its seat back even if others filled the session. Nothing ends a live connection because the limit fell.
+  User-level stream: `POST /streams/tickets {"scope":"user"}` (no session or encounter), then
+  `GET /streams?ticket=`, or `GET /streams?scope=user` with the bearer. It carries only the
+  addressed events of every session the user still belongs to (checked per delivery), no encounter
+  state; integration credentials cannot open it.
   Roles are `gm` (the creator, exactly one), `co_gm`, `player`, `observer`; `domain.Allowed` is the
   one role table. Membership collections are the source of truth for who holds a role. Membership,
   invite, request and block records and the session are all soft-deleted (`deleted_at`, `deleted_by`;

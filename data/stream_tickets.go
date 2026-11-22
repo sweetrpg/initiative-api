@@ -30,7 +30,10 @@ type StreamTicket struct {
 	EncounterID string    `bson:"encounter_id,omitempty"`
 	Level       ViewLevel `bson:"level"` // what the user could see when the ticket was minted
 	ClientID    string    `bson:"client_id,omitempty"`
-	At          time.Time `bson:"at"`
+	// UserLevel marks a ticket for the user-level stream: addressed events across every session
+	// the user belongs to, no encounter state. It carries no session or encounter.
+	UserLevel bool      `bson:"user_level,omitempty"`
+	At        time.Time `bson:"at"`
 }
 
 // StreamTickets is the ticket store.
@@ -95,6 +98,44 @@ func (r *StreamTickets) Redeem(ctx context.Context, id string, maxAge time.Durat
 		return StreamTicket{}, ErrNotFound
 	}
 	return t, nil
+}
+
+// IsMember reports whether userID is a live member of the live session sessionID. It is the
+// per-delivery check behind the user-level stream, which spans sessions and so is not evicted when
+// one membership ends.
+func (r *Sessions) IsMember(ctx context.Context, userID, sessionID string) (bool, error) {
+	_, err := r.TicketView(ctx, userID, sessionID, ViewGM)
+	switch {
+	case errors.Is(err, ErrNotMember):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
+}
+
+// SeatInfo returns the live session and userID's live member record in it, for the connect-time
+// limit: the same checks as TicketView without its level rule. Every refusal is ErrNotMember.
+func (r *Sessions) SeatInfo(ctx context.Context, userID, sessionID string) (Session, Member, error) {
+	id, ok := cleanID(sessionID)
+	if !ok || checkUserID(userID) != nil {
+		return Session{}, Member{}, ErrNotMember
+	}
+	var s Session
+	if err := r.c.FindOne(ctx, bson.D{{Key: "_id", Value: id}, {Key: "deleted_at", Value: nil}}, &s); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return Session{}, Member{}, ErrNotMember
+		}
+		return Session{}, Member{}, err
+	}
+	var m Member
+	if err := r.members.FindOne(ctx, sessionUser(id, userID), &m); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return Session{}, Member{}, ErrNotMember
+		}
+		return Session{}, Member{}, err
+	}
+	return s, m, nil
 }
 
 // TicketView returns the Viewer a redeemed ticket opens: the user's live member record decides, not
